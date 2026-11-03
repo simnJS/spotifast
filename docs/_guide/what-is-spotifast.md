@@ -72,7 +72,7 @@ Spotifast has a limited scope:
   [Soloist player](/soloist/), which uses Spotify's own implementation with
   lossless support. Soloist does not report the delivered audio format.
   Spotifast's [private audio routes](/soloist/#playback-and-current-limits)
-  provide EQ and visualizers on Linux and Mac, and visualizers on Windows.
+  provide EQ on Linux and Mac.
 - No video podcasts or social features.
 - Changes at Spotify can briefly interrupt features until an update.
 

@@ -249,9 +249,6 @@ out, or a reconnection that gives up stops it.
   See [migration, sign-out, and storage protection](/settings-and-files/).
 - Downloaded audio and artwork, in the cache directory, within the budget
   you set.
-- The first time MilkDrop opens with an empty preset folder, the two projectM
-  preset packs are downloaded from GitHub (about 26 MB) and stored in the
-  config directory.
 - On Windows and macOS, desktop media controls load the cover themselves and
   are given a file, so the full-size artwork is downloaded into that cache
   when a song starts, even when no view on screen is showing it. Linux MPRIS
@@ -754,8 +751,7 @@ The mode selects the protocol. Host and port are separate fields.
 These settings apply to Spotifast's requests. The external browser used
 for Spotify approval keeps its own network and proxy settings.
 
-The Web API, artwork, lyrics, update checks and downloads, and MilkDrop preset
-downloads follow that mode. Update downloads retain their release-host redirect
+The Web API, artwork, lyrics, and update checks and downloads follow that mode. Update downloads retain their release-host redirect
 restrictions and checksum verification. Local receivers on the LAN are never sent through a proxy.
 
 Local playback can only use an unauthenticated, plaintext HTTP proxy: that is
@@ -844,7 +840,7 @@ Spotifast's proxy settings.
 
 On Linux with PipeWire, the managed child is given a private input through
 `--pipewire-device`. Native PipeWire streams apply the existing equalizer and
-feed the visualizers before volume, then play through the default output.
+play through the default output.
 Only that child's stream is held at unity gain; its documented volume events
 set the final processed gain. The route is temporary and local, and writes no
 audio to disk. The Mac native-audio route also reroutes the owned child.
@@ -852,9 +848,7 @@ Once its private tap mutes direct output, the loopback API sets source volume
 to 100% and confirms that level from playback state or a volume event.
 Subsequent volume-change events from Spotify update Spotifast's output fader,
 then restore the source to 100%. Reset echoes and state snapshots never
-replace the output fader. Windows capture only observes the direct output,
-so this volume policy is not applied there; the visualizer copy is divided by
-Soloist's own volume gain instead.
+replace the output fader.
 
 Home's **Recommended for you** shelf uses the Web API recommendations endpoint.
 When that endpoint returns HTTP 403 or 404 and no recommendations have loaded,

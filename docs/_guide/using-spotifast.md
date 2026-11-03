@@ -310,7 +310,6 @@ Unmodified letter shortcuts still yield to the focused control.
 
 This is the first part of screen-reader support. Windows testing with NVDA
 remains tracked in [#262](https://github.com/crmne/spotifast/issues/262).
-Winamp skins do not yet have equivalent accessibility coverage.
 
 ## Keyboard shortcuts
 
@@ -325,8 +324,6 @@ Winamp skins do not yet have equivalent accessibility coverage.
 | `S` / `R` | Shuffle / cycle repeat |
 | `Q` | Queue panel, or the queue column in full screen |
 | `F` | Enter or leave full screen lyrics |
-| `V` | Full screen lyrics: MilkDrop or the cover's art behind the words |
-| `N` / `P` | Full screen lyrics: next or previous MilkDrop preset |
 | `Ctrl+F` or `/` | Search |
 | `Ctrl+B` | Show or hide the sidebar |
 | `Alt+←` / `Alt+→` | Back or forward |
@@ -339,8 +336,6 @@ Winamp skins do not yet have equivalent accessibility coverage.
 | `Ctrl+X` | Copy the selected songs' links and remove the songs from your playlist |
 | `Shift+Q` | Add the selected songs to the queue, or show the queue if none are selected |
 | `Shift+N` | Play the selected songs next, on this computer |
-| `Ctrl+M` | Mini player |
-| `Ctrl+Shift+K` | MilkDrop |
 | `Ctrl+,` | Settings |
 | `Ctrl+/` or `?` | All shortcuts |
 | `Ctrl+Q` | Quit |
@@ -485,25 +480,6 @@ has no place in Spotify's playlist tree. Returning to **Local custom order**
 restores its saved position. Dragging a song onto Liked Songs still saves that
 song, wherever the row sits.
 
-**Player bar visualizer** in **Settings > Appearance** shows the song moving
-behind the player bar's controls: **Spectrum** draws glowing bars from bass
-to treble with peaks that hang and fall, and **Waveform** draws the sound's
-wave as a glowing line. With **Colour from album art** on, both sweep from
-bass to treble across up to four colours read from the cover, its hues first
-and its greys after, so a black and white cover moves in grey; with it off,
-they take the accent colour. It follows the equalizer, not the volume, and moves only while the
-song plays on this computer. It is off by default. Clicking the player
-bar's empty space switches it, as Winamp's visualizer did: off, then
-Spectrum, then Waveform, then off again. **Frame rate** in **Settings >
-Appearance** sets how often it and the mini player's analyser draw: 30, 60
-(the default), the rate of the screen showing the window, or Uncapped,
-which follows the display. They draw at half that rate while Spotifast's
-window is out of focus, at most 30 frames a second while the system saves
-energy, and not at all while nobody can see the window: minimised, in the
-tray, with the display off or the screen locked. MilkDrop has its own frame
-rate. Disable **Click player bar to change
-visualizer** in **Settings > Appearance** to prevent accidental changes.
-
 Spotifast follows the system when it asks for less motion: **Animation
 effects** turned off in Windows, **Reduce motion** on macOS, or GNOME's
 **Animations** turned off. Its animations then show where they end at once:
@@ -551,21 +527,9 @@ and raises Spotifast. Use **Show or hide Spotifast** in the tray menu to hide
 it again.
 
 Closing to the tray removes the window and its preview. Reopening the main
-window or switching to the Winamp window creates its controls again. Media
+window creates its controls again. Media
 keys and the system's now-playing controls continue working while the window
 is closed.
-
-For the Winamp mini player, turn off **Show in taskbar** under
-**Settings > Mini player**, or **Show in taskbar** in its options menu.
-The choice survives restarts. The mini player stays visible; the tray icon,
-**Ctrl+M**, the skin logo, and launching Spotifast again remain ways to reach
-the app. Returning to the main window always restores its taskbar button.
-Changing the option while the mini player is open replaces that window while
-playback continues. This setting is available on Windows and in Linux X11
-sessions, where it hides the mini player from panels and task switchers that
-follow the window manager's skip-taskbar state. Wayland has no standard way
-for an app to leave the taskbar, so the option is not offered there; use your
-desktop's window rules instead. It does not change the macOS Dock.
 
 A window saved on a display that is no longer connected opens on the
 primary display instead: on Windows and X11 it moves to the middle of the
@@ -579,8 +543,7 @@ position left on an unplugged display.
 Click Spotifast's menu-bar icon to open its menu. From there you can show or
 hide the window, control playback, or quit Spotifast. The menu opens from
 either a primary or secondary click, as other macOS menu-bar items do.
-It stays available with the main window open, with the Winamp mini player,
-and after closing the window to the menu bar.
+It stays available with the main window open, and after closing the window to the menu bar.
 
 Spotifast also shows its Dock icon when run directly through Cargo, without
 an installed app bundle.
@@ -605,16 +568,6 @@ Finder or Launchpad also brings the window back. Turn the setting on to put
 Spotifast back in the Dock. The choice survives restarts, and Spotifast
 starts without the Dock icon; the Dock may show it for a moment as the app
 launches. This option is only on macOS.
-
-## Keeping the mini player above other windows
-
-**Always on top** works on Windows, macOS and X11. On Wayland the app's
-controls are unavailable, because your desktop manages which windows stay above
-others.
-Use your desktop's window rule or shortcut instead. In KDE Plasma, configure
-**Keep Window Above Others** under **Settings > Keyboard > Shortcuts >
-Window Management**. Your saved preference remains available when you use
-Spotifast on Windows, macOS, or X11 again.
 
 Since 0.8.0, the top bar reserves room for the device and update
 badges beside Search. In narrow windows those badges show only their icons.
@@ -834,20 +787,7 @@ window shows the song's cover beside the lyrics, the two centred together,
 and a song without words, such as an instrumental, shows just its cover in
 the middle of the screen.
 
-Press **V** in full screen lyrics, or click anywhere that isn't a line of
-lyrics or a control, to put MilkDrop behind the words instead of the cover's
-art, and do the same again to bring the art back; Spotifast remembers which you
-chose. **N** and **P** change the preset there. The picture is dimmed as far as
-it takes to keep the words clear, and holds still while the music is paused.
-It uses the presets you have: with none, the art stays. It follows the sound
-after the equalizer and before the volume, like every visualizer.
-
-Click the album art in full screen lyrics to leave MilkDrop alone on the
-screen, edge to edge and at full brightness, even if it was off. Move the mouse
-to see the player's controls for a few seconds; the cursor hides with them.
-Any other click brings everything back as it was, and **Esc** leaves full
-screen. **V**, **N** and **P** still work. A song with no art, or a computer
-with no MilkDrop to show, stays as it is.
+**Esc** leaves full screen.
 
 Since 0.10.0, quitting while lyrics are full screen no longer leaves
 the next launch stuck in full screen: the window returns to its previous size.

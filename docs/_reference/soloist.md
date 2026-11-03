@@ -67,7 +67,7 @@ Once Soloist is ready, the inactive built-in player's duplicate entry is hidden.
 Choose **Turn off Soloist** in Settings to stop it and restore the built-in
 player's entry and settings. Saved built-in preferences are kept.
 While Soloist is enabled, built-in playback preferences are hidden. On Linux
-with PipeWire, EQ and visualization settings appear once the private Soloist
+with PipeWire, EQ settings appear once the private Soloist
 audio route is established, even while paused. This is automatic and separate
 from account verification. Shared controls for the tray, startup and Spotifast updates remain
 under **Application**. **Settings → Spotify Soloist** holds its rows: status,
@@ -164,12 +164,10 @@ for Soloist's queue identities and concurrent updates.
 
 On Linux with PipeWire, Spotifast routes its own Soloist process through a
 private audio input, using Soloist's documented `--pipewire-device` option.
-The existing equalizer, spectrum, oscilloscope and MilkDrop work on this route.
-The equalizer runs at the output's negotiated sample rate; the visualization
-copy is converted to 44.1 kHz. Visualizers receive audio after EQ and before
-volume, so zero volume still animates. Spotify's reported volume controls the
+The existing equalizer works on this route.
+The equalizer runs at the output's negotiated sample rate. Spotify's reported volume controls the
 final output gain, including changes made from another Spotify client. A slider
-moved in Spotifast or a skin is heard at once, and Soloist is told behind it.
+moved in Spotifast is heard at once, and Soloist is told behind it.
 
 The route holds about 60 ms of audio, or two graph cycles if those are longer,
 so a late wake-up in Soloist doesn't become a dropout. When that margin runs
@@ -186,15 +184,15 @@ configuration. The private input is not a default device or a system-wide
 filter. No microphone or system mix is captured, and samples are never saved
 to disk. Pausing clears buffered samples; closing Soloist removes the route.
 If PipeWire is unavailable at startup, Soloist uses its ordinary output and
-EQ and visualizer controls stay hidden. A route that fails during playback
+EQ controls stay hidden. A route that fails during playback
 does not stop the player: Spotifast rebuilds the route up to three times while
 Soloist keeps running, and restarts the player as described under Setup only
-if that does not work. Only Soloist's own audio reaches the EQ, the visualizers
+if that does not work. Only Soloist's own audio reaches the EQ
 and the output: if PipeWire links anything else into the private input,
 Spotifast removes the link, and the input is silent until it has gone.
 
-Linux without PipeWire keeps Soloist's direct output, without EQ or visualizers.
-The Mac and Windows routes are described below. Local files and full queue
+Linux without PipeWire keeps Soloist's direct output, without EQ.
+The Mac route is described below. Local files and full queue
 editing still require the built-in player on every platform.
 The Soloist API itself provides no PCM stream. OS audio processing does not
 establish which Spotify format was delivered, and is not advertised as
@@ -204,26 +202,19 @@ bit-perfect or as a DRM workaround.
 
 ### Native audio {#native-audio}
 
-Regular builds include native process capture on macOS 14.2 or newer and
-Windows build 20348 or newer (including Windows 11). On Mac, allow **System Audio
+Regular builds include native process capture on macOS 14.2 or newer. On Mac, allow **System Audio
 Recording** for Spotifast, then play a song: a private Core Audio tap passes
-only Spotifast's Soloist child through its EQ, limiter and visualizers,
-including MilkDrop. Until capture receives audio, Soloist's ordinary output
+only Spotifast's Soloist child through its EQ and limiter. Until capture receives audio, Soloist's ordinary output
 continues. Denying permission leaves ordinary playback available. Once routed,
 an output-device or sample-rate change stops the player, and Spotifast
 restarts it.
 
-On Windows, WASAPI captures only the owned Soloist process and its children
-for the spectrum, oscilloscope and MilkDrop. It does not change the audio
-output, so Soloist EQ remains unavailable. Capture failure leaves playback
-running. No virtual driver is installed on either platform and no captured
-audio is saved. The Mac playback path keeps the tap's sample rate; only the
-visualization copy is resampled.
+No virtual driver is installed and no captured audio is saved. The Mac
+playback path keeps the tap's sample rate.
 
 On Mac, once capture is ready and Soloist's direct output is muted, Spotifast
 sets Soloist's source volume to 100%. Spotifast's slider controls the redirected
-output after EQ and the visualizers. **Zero in Spotifast keeps the visualizers
-moving.** Its output level is remembered in the session file and defaults to
+output after EQ. Its output level is remembered in the session file and defaults to
 100%, so a low source level no longer limits the slider's maximum.
 
 A volume-change event from Spotify or your phone updates Spotifast's output
@@ -243,16 +234,6 @@ Spotifast restarts it.
 Spotify's player starts at a level of its own every launch, so Spotifast keeps
 the level you left it at and gives it back once the player is signed in. This
 is saved in the session file.
-
-Windows capture comes after Soloist's volume, so Spotifast undoes Soloist's
-volume curve for the visualizers: they keep their level as the volume falls.
-A muted source sends no signal, so **zero still stops the visualizers**.
-Lowering Soloist in the Windows volume mixer also shrinks them, because
-Soloist does not report that level. The tested WASAPI session and stream
-controls affect capture too, so they cannot supply a separate output fader. Windows 11's
-[pre-volume loopback option](https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/ksproperty-audioloopback)
-refers to endpoint volume, which affects other apps as well. Spotifast leaves
-that system control alone.
 
 Spotify lists capabilities such as Smart Shuffle, Jam and crossfade for its
 player. Spotifast only offers controls exposed by the documented Soloist API;

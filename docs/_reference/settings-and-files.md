@@ -13,8 +13,6 @@ Spotifast follows each platform's conventions. On Linux:
 | What | Where | Safe to delete? |
 | --- | --- | --- |
 | Settings | `~/.config/spotifast/settings.json` | Yes, you lose preferences |
-| Winamp and Windows Media Player skins | `~/.config/spotifast/skins/` | Yes, you add them again |
-| MilkDrop presets | `~/.config/spotifast/milkdrop/` | Yes, you fetch them again |
 | Spotify grants (available since 0.8.0) | System credential store | Use Sign out in Settings |
 | Credential revocation markers (available since 0.8.0) | `~/.local/state/spotifast/credential-storage/` | Keep after a failed sign-out deletion |
 | Legacy shared Web API grant | `~/.local/state/spotifast/shared_web_api_token.json` | Removed after migration or sign-out |
@@ -27,7 +25,6 @@ Spotifast follows each platform's conventions. On Linux:
 | Audio cache | `~/.cache/spotifast/audio/` | Always |
 | Artwork cache | `~/.cache/spotifast/art/` | Always |
 | Lyrics cache | `~/.cache/spotifast/lyrics/` | Always |
-| Skin previews | `~/.cache/spotifast/skin-previews/` | Always, they are drawn again |
 | Account-scoped playlist page cache | `~/.cache/spotifast/playlists/<account-id>/` | Always |
 | Account-scoped playlist list | `~/.cache/spotifast/library/` | Always |
 | Account-scoped Home shelves | `~/.cache/spotifast/home/` | Always |
@@ -250,25 +247,20 @@ their rows stay in memory until the write and its snapshot are confirmed,
 even if this temporarily exceeds the usual page limit. Track metadata is
 limited to 800 cached tracks; navigation and periodic cleanup trim old entries.
 
-The session remembers separate positions for the main window and the Winamp
-mini player, and the main window's size and whether it was maximized. Sizes
+The session remembers the main window's position and size, and whether it was maximized. Sizes
 and positions are in logical pixels, so they do not change with the interface
 zoom. Each window is created at its remembered place rather than moved there
-afterwards. The shade modes are kept in `settings.json`. Wayland compositors
+afterwards. Wayland compositors
 may ignore saved positions. A window that opens on no connected monitor (a
 display unplugged since) moves to the middle of the primary one on Windows
 and X11; on macOS, a position whose title bar would be on no screen is not
 used.
 
 Since 0.8.0, a main window left maximized or full
-screen reopens that way, and comes back that way from the mini player. The
+screen reopens that way. The
 remembered size and position describe an ordinary window and are not applied
 to one that already fills the screen, because sizing or moving such a window
 restores it down.
-
-Since 0.9.0, a closing main window keeps its own geometry until
-the native window closes. An extra closing frame cannot resize it to the
-mini player and overwrite its saved size or maximized state.
 
 Since 0.8.0, album and playlist scrollbars reserve the full track count
 as soon as Spotify reports it. Dragging to an unloaded section shows placeholders and requests
@@ -308,7 +300,7 @@ it.
 
 | What | Where |
 | --- | --- |
-| Settings, skins, MilkDrop presets, themes | `spotifast-data\config\` |
+| Settings, themes | `spotifast-data\config\` |
 | State, history, logs, `app.ron`, credential markers and the encrypted grant copies | `spotifast-data\state\` |
 | Caches | `spotifast-data\cache\` |
 
@@ -385,10 +377,7 @@ main fields are:
 | `custom_theme_cache` | absent | Last accepted custom palette; preserves appearance if its file is missing or invalid |
 | `system_theme_cache` | absent | Last accepted Omarchy palette for Follow system; retained across restarts |
 | `theme_pair` | absent | The themes Follow system uses in light and dark mode: `{"light": {"filename": "Catppuccin Latte.json", "palette": {...}}, "dark": {...}}`. Each `palette` is the last accepted copy of that file's colours. A missing side, or the whole field, is Spotifast's own Light or Dark; it is written only once you choose one |
-| `accent_from_art` | `true` | Tint pages with album art, and colour the player bar visualizer with the cover's colours |
-| `player_bar_vis` | `off` | Since 0.11.0: what moves behind the player bar while a song plays on this computer: `off`, `spectrum` or `waveform` |
-| `player_bar_vis_click` | `true` | Allow clicks on empty player bar space to cycle visualizer modes |
-| `visualizer_fps` | `60` | Frame rate of the player bar and mini player visualizers; `0` is uncapped. Half that out of focus, at most 30 while the system saves energy, none while the window is hidden. MilkDrop uses `milkdrop_fps` |
+| `accent_from_art` | `true` | Tint pages with album art |
 | `library_sort` | `{}` | Per-section Library order overrides, since 0.8.0: `library`, `recently_played`, `name`, `recently_added`, `local`, or `spotify`, where supported |
 | `library_by_you` | `false` | Show only playlists owned by the signed-in account, alongside Liked Songs; applies only to the Playlists shelf |
 | `sidebar_order` | `[]` | Saved local playlist arrangement, including an unpinned Liked Songs, retained when another sort is selected |
@@ -398,33 +387,13 @@ main fields are:
 | `sidebar_grid` | `false` | Library entries as responsive cover cards instead of rows |
 | `tracklist_compact` | `false` | One-line track rows without covers |
 | `middle_click_autoscroll` | `false` | Linux only: middle-click a list to autoscroll it. Windows always autoscrolls and macOS never does |
-| `winamp_window` | `false` | The window is the Winamp mini player |
-| `winamp_show_taskbar` | `true` | Windows since 0.8.0, and Linux X11 sessions: show the Winamp window's taskbar button; the main window always keeps its button. Wayland and macOS ignore it |
 | `custom_titlebar` | `false` | Windows and Linux: draw Spotifast's own title bar and window buttons instead of the desktop's |
-| `skin` | `Spotifast Wide` | File or folder name in the skins folder, or `Spotifast Tall` or `Spotifast Wide`; blank uses the built-in Winamp skin |
-| `random_skin` | `false` | Since 0.11.0: pick a different skin (built-in or installed) each time the mini player opens; `skin` holds the one picked |
-| `skin_scale` | by display | Screen pixels per skin pixel, 1 to 4 |
-| `winamp_on_top` | `false` | Keep the mini player above other windows |
-| `vis` | `bars` | The mini player's visualiser: `bars`, `scope`, or `off` |
-| `playlist_open` | `false` | The playlist window is open under the mini player |
-| `playlist_height` | `174` | The playlist window's height in skin pixels |
-| `eq_open` | `false` | The equalizer window is open under the mini player |
 | `eq_on` | `false` | The equalizer shapes local playback |
 | `eq_preamp_db` | `0` | The preamp, in decibels, -12 to 12 |
 | `eq_bands_db` | ten zeros | The bands from 60 Hz to 16 kHz, in decibels, -12 to 12 |
 | `eq_user_presets` | `[]` | Equalizer presets you saved, each with a `name`, its `preamp_db` and its ten `bands_db`, listed after the built-in presets |
 | `balance` | `0` | Left to right, -1 to 1, for local playback |
 | `mono` | `false` | Play both channels the same |
-| `playlist_shaded` | `false` | The playlist window is rolled up to its title bar |
-| `winamp_shaded` | `false` | The main window is rolled up to its title bar |
-| `milkdrop_open` | `false` | The MilkDrop window is open |
-| `milkdrop_seconds` | `10` | How long each MilkDrop preset plays, never less than its 2.7-second fade. A new value applies to the preset playing |
-| `milkdrop_fps` | `60` | MilkDrop frame rate; `0` is uncapped. At most 30 while the system saves energy |
-| `milkdrop_screen_hz` | `0` | Last refresh rate reported by MilkDrop's window |
-| `milkdrop_fullscreen` | `false` | The MilkDrop window fills the screen |
-| `milkdrop_panel_height` | `232` | The MilkDrop panel's height in the mini player, in skin pixels |
-| `lyrics_milkdrop` | `false` | MilkDrop rather than the cover's art behind full screen lyrics |
-| `milkdrop_size` | `640, 480` | The MilkDrop window's size in points |
 | `keep_playing_in_background` | `true` | Close to tray |
 | `tray_icon` | `colour` | Linux and Windows: the tray icon in `colour`, or in `white` or `black` to match the panel or taskbar. macOS ignores it: the menu bar draws its icon black or white to match itself |
 | `mac_notch_widget` | `false` | Show interactive Now Playing widget when hovering over the MacBook notch (macOS only) |
@@ -473,10 +442,10 @@ settings.
 `--demo-page` opens a page, such as `home`, `playlist:pl1`, or `artist:art0`,
 and `--demo-show` adds surfaces on top of it: a comma separated list of
 `queue`, `playing-next`, `devices`, `home-loading`, `audio-outputs`, `shortcuts`, `premium`, `create`, `duplicate`, `light`, `system-light`, `system-dark`,
-`focus`, `winamp`, `playlist`, `eq`, `eq-shade`, `compact`, `update`, `personal-app`, `slow-banner`, `audio-key-banner`,
+`focus`, `compact`, `update`, `personal-app`, `slow-banner`, `audio-key-banner`,
 `collection-loading`, `shuffle-selected`, `shuffle-started`, `library-list`,
 `library-list-narrow`, `library-list-wide`, `library-grid`, `library-grid-narrow`,
-`library-grid-wide`, `eq-user-presets`, `start-in-tray`, `rtl`, `player-bar-spectrum`, `player-bar-waveform`,
+`library-grid-wide`, `eq-user-presets`, `start-in-tray`, `rtl`,
 `lyrics-fullscreen-view`, `lyrics-fullscreen-instrumental`, `signed-out`, `connecting`,
 `waiting-for-browser`, `sign-in-returning`, `sign-in-malformed`, `sign-in-shared-retired`,
 `sign-in-unknown-client`, `sign-in-not-allowed`, `shared-grant`, and `own-app`. The Library variants show the list or cover grid with
@@ -501,8 +470,6 @@ Settings for a listener still on a shared grant from before 0.14.2, and
 light or dark (on Linux), to show the light and dark mode themes; with an
 explicit `--demo-data` directory, its `config/settings.json` and
 `config/themes` supply them.
-`player-bar-spectrum` and `player-bar-waveform` play a fixed, music-like
-sound on this computer with that player bar visualizer on.
 `lyrics-fullscreen-view` and `lyrics-fullscreen-instrumental` draw full-screen
 lyrics, with words or without, at the window's own size.
 `eq-user-presets` saves a sample equalizer preset and puts it in use.
@@ -598,7 +565,7 @@ already follows your desktop theme, so the two pickers are not shown.
 **How to make a theme**, beside the picker, opens this section. The
 **Open themes folder** icon button beside the picker creates the folder if
 needed and opens it in your file
-manager, using the same button style as the Winamp skins folder.
+manager.
 After adding or editing a JSON file on macOS or Windows, run
 `spotifast reload-themes` to refresh the list and the selected palette without
 restarting playback. Since 0.10.2, Spotifast on Linux notices changes to the
@@ -658,7 +625,7 @@ reset unrelated settings.
 A custom palette's `base` controls both its inherited colors and the light or
 dark styling of standard controls. Album-art tinting remains an independent
 setting; turn it off for fixed colors throughout. Palettes apply to the main
-window; Winamp skins remain separate. This first format controls colors only.
+window. This first format controls colors only.
 
 ### Follow an Omarchy theme
 

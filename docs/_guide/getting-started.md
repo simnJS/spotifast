@@ -196,13 +196,9 @@ Build the single binary with Rust 1.98 or newer:
 cargo install --git https://github.com/crmne/spotifast --locked
 ```
 
-MilkDrop uses libprojectM, which is built from source. This needs CMake, a C++
-compiler, and libclang. To build without MilkDrop or those tools, add
-`--no-default-features`. This also leaves out native Soloist audio capture on
-Mac and Windows. To keep that capture without MilkDrop, add
-`--no-default-features --features soloist-native-audio` (a C++ compiler is
-still needed). On Linux, you also need the development packages for
-ALSA and PipeWire, and the windowing libraries. On Arch:
+Native Soloist audio capture on Mac needs a C++ compiler; add
+`--no-default-features` to leave it out. On Linux, you also need the
+development packages for ALSA and PipeWire, and the windowing libraries. On Arch:
 
 ```bash
 sudo pacman -S --needed alsa-lib pipewire libxkbcommon wayland cmake clang
@@ -221,10 +217,6 @@ On Fedora:
 sudo dnf install alsa-lib-devel pipewire-devel libxkbcommon-devel \
   wayland-devel cmake clang clang-devel
 ```
-
-On Windows, libprojectM is built with Visual Studio 2022, CMake, LLVM, and
-vcpkg (`vcpkg install glew:x64-windows-static`, with
-`VCPKG_INSTALLATION_ROOT` pointing at the vcpkg folder).
 
 With [Nix](https://nixos.org), `nix develop` in a checkout provides all of it,
 along with the exact toolchain `rust-toolchain.toml` pins.

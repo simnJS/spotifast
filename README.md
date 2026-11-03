@@ -40,22 +40,20 @@ https://github.com/user-attachments/assets/a5f669ce-b3b7-4f8e-9933-976a78876c7e
 
 </details>
 
-[Features](#your-music-on-your-desktop) · [Install](#install) · [First playback](#start-listening) · [Mini player](#the-winamp-mini-player) · [MilkDrop](#music-in-motion) · [Help](#guides-and-help)
+[Features](#your-music-on-your-desktop) · [Install](#install) · [First playback](#start-listening) · [Help](#guides-and-help)
 
 Since 0.15, setup leads with Spotify's
 [Soloist player](https://spotifast.rocks/soloist/), with guided key setup,
 one-time pairing and automatic renewal of expiring builds. New listeners and
 people updating see this choice once after sign-in on supported platforms.
-**Use the built-in player** keeps librespot, with Spotifast's EQ, visualizers,
+**Use the built-in player** keeps librespot, with Spotifast's EQ,
 local files and full queue editing. The choice is remembered.
-On Linux with PipeWire, Soloist also supports Spotifast’s EQ and visualizers
+On Linux with PipeWire, Soloist also supports Spotifast’s EQ
 through a private audio route. [Native audio support](https://spotifast.rocks/soloist/#native-audio)
-adds EQ and visualizers on macOS 14.2 or newer, and visualizers on Windows 11,
-including MilkDrop. Windows Soloist playback does not support audible EQ.
+adds EQ on macOS 14.2 or newer. Windows Soloist playback does not support audible EQ.
 The Mac route keeps Soloist at full volume after redirecting its output,
-then applies Spotifast’s volume after the visualizers, including mute. Phone
+then applies Spotifast’s volume, including mute. Phone
 volume changes adjust that output level; Spotify’s indicator returns to 100%.
-Windows visuals keep their level as Soloist’s volume falls and stop only when it is muted.
 When enabled, Soloist appears as **This computer**; settings show the controls
 that apply to it. Turning it off restores the built-in player's preferences.
 While Soloist starts and its account is verified, the Spotify loading screen shows
@@ -78,8 +76,6 @@ Spotify lyrics without changing players.
 | **Queue** | Add songs to the queue, or choose **Play next** to put a song or selection first when playing on this computer. |
 | **Themes** | Choose light, dark, system appearance, or custom colours, with one theme for light mode and one for dark mode that switch with the system. On Omarchy, follow your desktop theme. |
 | **Desktop controls** | Use keyboard shortcuts and media keys. Keep music playing from the tray when supported by your desktop and settings, and start Spotifast with your computer, with its window or in the tray. |
-| **Winamp mini player** | Use classic skins with an equalizer, playlist, and animated sound displays. |
-| **MilkDrop** | Watch music-reactive visuals in a separate window or full screen. See platform availability below. |
 
 ## Install
 
@@ -114,33 +110,6 @@ Library access and local playback have separate approvals. Spotifast remembers
 both using your computer's protected storage. See
 [Getting started](https://spotifast.rocks/getting-started/) for the full walkthrough
 and [How it connects](https://spotifast.rocks/how-it-connects/) for the details.
-
-## The Winamp mini player
-
-A classic look for your music, with Winamp 2 `.wsz` and Windows Media Player `.wmz` skins, an equalizer,
-a playlist, and animated sound displays. Switch with **Ctrl+M**
-(**Cmd+Shift+M** on macOS), the shrink button, or Settings.
-The spectrum analyser and oscilloscope also work in the collapsed title bar.
-
-<p align="center">
-  <img src="docs/assets/images/winamp.png" alt="Spotifast's Winamp mini player with the built-in skin, equalizer, and playlist" width="320">
-</p>
-
-[Explore the mini player](https://spotifast.rocks/winamp/), including skins,
-window sizes, controls, and the return to the main player.
-
-## Music in motion
-
-MilkDrop reacts to music playing on this computer, with more than 10,000
-presets downloaded on first use. Open it from the visualiser button,
-Settings, or the mini player's **V** menu.
-
-![MilkDrop visualiser displaying coloured concentric patterns in Spotifast](docs/assets/images/milkdrop-poster.jpg)
-
-Included on **Linux**, **macOS**, and **Windows Intel/AMD** builds.
-It is not included in the Windows on ARM download.
-[Read the MilkDrop guide](https://spotifast.rocks/milkdrop/) for presets,
-controls, and fullscreen mode.
 
 ## Guides and help
 

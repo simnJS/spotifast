@@ -22,7 +22,7 @@ current release.
   password never passes through Spotifast; you sign in on Spotify's own
   pages. A proxy password, if you set one, uses the same store.
 - **Settings and history.** Settings, window positions, recent plays, the
-  last session, skins, themes and MilkDrop presets live in the config
+  last session and themes live in the config
   directory. A copy started from the Windows ZIP keeps them, its state and
   its caches in `spotifast-data` next to it, so anyone who can read that
   folder, on a shared USB drive say, can read them.
@@ -62,13 +62,13 @@ Spotifast connects only to the services below.
   the exact lookup is temporarily unavailable. A failed lookup can use older
   cached lyrics, but never caches an outage as a missing transcription.
 - **GitHub.** Once a day, Spotifast asks GitHub for the latest release. You
-  can turn automatic checks off in Settings. Downloading an update, and the
-  first opening of MilkDrop, also fetch files from GitHub. No Spotify data is
+  can turn automatic checks off in Settings. Downloading an update also
+  fetches files from GitHub. No Spotify data is
   sent.
 - **Your local network.** Spotifast looks for Spotify Connect speakers over
   mDNS and talks to the ones you choose.
 
-Links you open from the app, such as the Winamp Skin Museum or this website,
+Links you open from the app, such as this website,
 open in your browser.
 
 ## This website

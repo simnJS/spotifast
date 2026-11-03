@@ -170,13 +170,12 @@ Basic controls and state use Soloist's loopback API; collection offsets use
 the existing Spotify playback requests. Full queue editing and audio access
 remain unavailable through Soloist's documented API. On Linux with PipeWire,
 Spotifast processes its owned Soloist output through the operating system for
-EQ and visualizers; it does not capture the system mix.
+EQ; it does not capture the system mix.
 [Native audio support](/soloist/#native-audio) adds process-only Mac
-EQ and visualizers, and Windows visualizers. The Mac route applies Spotifast’s
-output volume after the visualizers and hold Soloist's source at 100% once
+EQ. The Mac route applies Spotifast’s
+output volume after EQ and holds Soloist's source at 100% once
 redirected. Spotify/phone volume events change that output level before the
-source is reset, so Spotify's indicator returns to 100%. Windows capture
-comes after source volume, which the visualizers undo, and cannot provide an
+source is reset, so Spotify's indicator returns to 100%. Windows has no
 audible EQ route.
 
 ## librespot playback
@@ -216,8 +215,7 @@ librespot provides:
 Spotify Premium is required. librespot cannot play audio with a free account.
 
 Spotifast uses a small librespot fork: librespot's development branch with a
-few patches that are also proposed upstream, such as normalisation data for the
-visualisers and an event for rejected audio keys. When Spotify refuses an
+few patches that are also proposed upstream, such as an event for rejected audio keys. When Spotify refuses an
 audio key, nothing in Spotifast can fix it; see
 [Spotify refused the audio key](/troubleshooting/#audio-key). The patches are listed in
 `Cargo.toml` and dropped as librespot merges them.
@@ -246,7 +244,7 @@ The Web API and librespot do not provide these features:
 - **Lossless through librespot.** librespot does not receive lossless streams.
   The optional [Soloist player](/soloist/) uses Spotify's own implementation.
   Its API does not report the delivered format or expose raw audio for
-  Spotifast's equalizer and visualisers. The Linux integration uses a private
+  Spotifast's equalizer. The Linux integration uses a private
   PipeWire audio route instead. Spotifast does not bypass DRM.
 - **Local files from Spotify's Local Files playlist.** librespot cannot play
   that playlist; add the songs to another playlist first. Local files on other

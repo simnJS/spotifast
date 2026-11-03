@@ -104,12 +104,6 @@ dark. It does not take alternative themes.
 The player bar's buttons stay. Buttons that do not fit hide when the window is
 narrow, so there are no settings to hide individual buttons.
 
-### Mini player skins
-
-Skins live in one Mini player section of Settings, where the skin is a Winamp
-skin or, once supported, another kind. Another kind of skin does not get a
-section of its own.
-
 ### Local files
 
 Local files play from the folder chosen in Settings. A view to browse them,
@@ -185,7 +179,7 @@ after). Only images the project itself uses, such as a figure a documentation
 page shows or an icon the app draws, belong in the repository.
 
 The `screenshots` check fails when a pull request changes interface code
-(`src/ui/`, the theme, the skins, the window) and neither its description nor
+(`src/ui/`, the theme, the window) and neither its description nor
 its author's comments hold an image or a recording. Attach the captures and
 re-run it. When such a change shows nothing new, such as a crash fix, the
 maintainer adds the `no-visual-change` label instead.
@@ -242,11 +236,7 @@ Linux needs the development packages listed under
 [Build from source](https://spotifast.rocks/getting-started/#build-from-source); `nix develop`
 provides the complete development environment. The command compatibility test
 also needs `dbus-run-session`, to use a private bus instead of the desktop's.
-MilkDrop builds libprojectM
-from source, so every platform also needs CMake, a C++ compiler, and
-libclang (on Windows, vcpkg with `glew:x64-windows-static` installed and
-`VCPKG_INSTALLATION_ROOT` pointing at it); `--no-default-features` leaves
-MilkDrop out and needs none of that. CI repeats the test suite on Linux,
+CI repeats the test suite on Linux,
 macOS, and Windows. Passing CI is required, but does not replace review
 for correctness, product fit, maintainability, or security.
 
