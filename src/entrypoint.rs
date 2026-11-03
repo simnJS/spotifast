@@ -358,14 +358,6 @@ pub(crate) fn run() -> eframe::Result<()> {
     let launch = fastframe_update::intercept(&spotifast::updates::CONFIG);
     // Before any output is listed or opened.
     spotifast::sink::name_in_mixers();
-    // A MilkDrop child launch is a bare visualiser window, not the app: it has
-    // its own event loop and OpenGL context, reads the sound from a shared
-    // buffer, and never touches the app's state. Handle it before anything
-    // else, including the argument parser, which does not know its flags.
-    #[cfg(feature = "milkdrop")]
-    if let Some(args) = spotifast::milkdrop::child::Args::parse() {
-        std::process::exit(spotifast::milkdrop::child::run(args));
-    }
 
     let cli = Cli::from_arg_matches(&Cli::command().get_matches_from(&launch.arguments))
         .unwrap_or_else(|error| error.exit());
@@ -869,8 +861,7 @@ fn native_options(
         Some(mini) => {
             let level = app::on_top_window_level(mini.on_top);
             // See-through, for skins that are not rectangles; the skin
-            // paints every pixel that is the window. MilkDrop runs in its own
-            // process, so nothing else shares this window's surface.
+            // paints every pixel that is the window.
             let viewport = viewport
                 .with_decorations(false)
                 .with_transparent(true)
@@ -1315,7 +1306,7 @@ impl Shell {
     /// otherwise once a second, as a display can change its mode in place
     /// and Wayland names the monitor only once the window is on it. A
     /// monitor with no usable answer clears the window's rate rather than
-    /// keeping the last screen's, so the dial falls back to MilkDrop's.
+    /// keeping the last screen's, so the dial offers no screen rate.
     fn read_screen_hz(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let place = ctx.input(|input| input.viewport().outer_rect);
         if let Some((asked, when)) = self.screen_asked
@@ -1329,7 +1320,7 @@ impl Shell {
             .winit_window()
             .and_then(|window| window.current_monitor())
             .and_then(|monitor| monitor.refresh_rate_millihertz())
-            .and_then(spotifast::milkdrop::screen_hz)
+            .and_then(spotifast::frame_rate::screen_hz)
             .unwrap_or(0);
     }
 

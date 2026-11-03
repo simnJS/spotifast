@@ -8,7 +8,7 @@ url="https://github.com/crmne/spotifast"
 license=('MIT')
 install="${pkgname}.install"
 depends=('dbus' 'alsa-lib' 'libpipewire' 'libglvnd' 'libxkbcommon' 'wayland' 'libx11')
-makedepends=('cargo' 'cmake' 'clang')
+makedepends=('cargo' 'clang')
 # The test suite uses ps where it cannot read a process any other way.
 checkdepends=('procps-ng')
 optdepends=('libxkbcommon-x11: keyboard handling in X11 sessions'

@@ -15,7 +15,6 @@ pub(super) const fn platform_shortcut<'a>(ctrl: &'a str, cmd: &'a str) -> &'a st
 pub(super) const SIDEBAR_SHORTCUT: &str = platform_shortcut("Ctrl+B", "Cmd+B");
 pub(super) const QUIT_SHORTCUT: &str = platform_shortcut("Ctrl+Q", "Cmd+Q");
 pub(super) const WINAMP_SHORTCUT: &str = platform_shortcut("Ctrl+M", "Cmd+Shift+M");
-pub(super) const MILKDROP_SHORTCUT: &str = platform_shortcut("Ctrl+Shift+K", "Cmd+Shift+K");
 
 pub fn handle(app: &mut App, ctx: &egui::Context) {
     if app.soloist_view() != crate::app::SoloistView::App {
@@ -103,12 +102,6 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         } else {
             key(Modifiers::COMMAND, Key::M, Action::ToggleWinampWindow);
         }
-        // Winamp's key for starting and stopping the visualisation plug-in.
-        key(
-            Modifiers::COMMAND | Modifiers::SHIFT,
-            Key::K,
-            Action::ToggleWinampMilkdrop,
-        );
         key(
             Modifiers::COMMAND,
             Key::Slash,
@@ -152,20 +145,8 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             key(
                 Modifiers::NONE,
                 Key::F,
-                if app.milkdrop_framed() {
-                    Action::MilkdropFullscreen
-                } else {
-                    Action::SetLyricsFullscreen(app.lyrics_fullscreen.is_none())
-                },
+                Action::SetLyricsFullscreen(app.lyrics_fullscreen.is_none()),
             );
-            #[cfg(feature = "milkdrop")]
-            if app.lyrics_fullscreen.is_some() {
-                key(Modifiers::NONE, Key::V, Action::ToggleLyricsMilkdrop);
-                if app.milkdrop_behind_lyrics() {
-                    key(Modifiers::NONE, Key::N, Action::MilkdropEffect(1));
-                    key(Modifiers::NONE, Key::P, Action::MilkdropEffect(-1));
-                }
-            }
         }
     });
     if !editing_text
@@ -304,16 +285,6 @@ pub fn shortcuts(locale: Locale) -> Vec<(Cow<'static, str>, Cow<'static, str>)> 
         (keys("Q"), gettext(locale, "Show the queue")),
         (keys("L"), gettext(locale, "Show the lyrics")),
         (keys("F"), gettext(locale, "Full screen lyrics")),
-        #[cfg(feature = "milkdrop")]
-        (
-            keys("V"),
-            gettext(locale, "Full screen lyrics: MilkDrop behind the words"),
-        ),
-        #[cfg(feature = "milkdrop")]
-        (
-            keys("N  /  P"),
-            gettext(locale, "Full screen lyrics: next or previous preset"),
-        ),
         (keys("Esc"), gettext(locale, "Lyrics: leave full screen")),
         (
             keys("Shift+↑  /  Shift+↓"),
@@ -384,25 +355,6 @@ pub fn shortcuts(locale: Locale) -> Vec<(Cow<'static, str>, Cow<'static, str>)> 
             gettext(locale, "Go to the playing album"),
         ),
         (keys(WINAMP_SHORTCUT), gettext(locale, "Mini player")),
-        (
-            keys(MILKDROP_SHORTCUT),
-            gettext(locale, "MilkDrop, under the mini player"),
-        ),
-        (
-            // Translators: Keep the key name F. Translate "or" and "double-click".
-            gettext(locale, "F  or  double-click"),
-            gettext(locale, "MilkDrop: fill the screen"),
-        ),
-        (keys("→  /  N"), gettext(locale, "MilkDrop: next preset")),
-        (
-            keys("←  /  P"),
-            gettext(locale, "MilkDrop: previous preset"),
-        ),
-        (keys("L"), gettext(locale, "MilkDrop: keep this preset")),
-        (
-            keys("Esc"),
-            gettext(locale, "MilkDrop: leave full screen, or close"),
-        ),
         (
             keys(platform_shortcut("Ctrl+,", "Cmd+,")),
             gettext(locale, "Settings"),
@@ -636,17 +588,12 @@ mod tests {
     #[test]
     fn shortcut_constants_name_the_platform_modifier() {
         let expected = if cfg!(target_os = "macos") {
-            ["Cmd+B", "Cmd+Q", "Cmd+Shift+M", "Cmd+Shift+K"]
+            ["Cmd+B", "Cmd+Q", "Cmd+Shift+M"]
         } else {
-            ["Ctrl+B", "Ctrl+Q", "Ctrl+M", "Ctrl+Shift+K"]
+            ["Ctrl+B", "Ctrl+Q", "Ctrl+M"]
         };
         assert_eq!(
-            [
-                SIDEBAR_SHORTCUT,
-                QUIT_SHORTCUT,
-                WINAMP_SHORTCUT,
-                MILKDROP_SHORTCUT,
-            ],
+            [SIDEBAR_SHORTCUT, QUIT_SHORTCUT, WINAMP_SHORTCUT,],
             expected
         );
     }

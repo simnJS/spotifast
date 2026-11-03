@@ -1,5 +1,5 @@
 //! Winamp's generic window: the frame `gen.bmp` draws around anything that is
-//! not one of the player's own windows, which is how Winamp 5 framed MilkDrop.
+//! not one of the player's own windows, which is how Winamp 5 framed its extra windows.
 //!
 //! The title bar is six 25-pixel tiles, on two rows for focused and not. Each
 //! side is a 29-pixel tile above a 24-pixel foot, and the bottom is two

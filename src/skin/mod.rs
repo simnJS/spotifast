@@ -578,7 +578,7 @@ mod tests {
     }
 
     /// Winamp's generic frame comes with the built-in skin, whole, so a
-    /// skin without a `gen.bmp` still frames MilkDrop.
+    /// skin without a `gen.bmp` still frames its generic windows.
     #[test]
     fn a_media_player_skin_can_bring_its_own_bar_colours() {
         let definition = b"<THEME><VIEW id=\"main\" width=\"9\" height=\"9\"/></THEME>";

@@ -38,7 +38,7 @@ pub enum Sheet {
     /// The equalizer rolled up: its bar, mini sliders, and buttons. Skins
     /// from Winamp 2.9 on ship this; older ones borrow the built-in one.
     EqEx,
-    /// The frame of Winamp's generic windows, which MilkDrop wears.
+    /// The frame of Winamp's generic windows.
     Gen,
     /// The generic windows' colours and dialog parts.
     GenEx,

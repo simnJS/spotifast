@@ -16,6 +16,7 @@ pub mod demo;
 pub mod device_history;
 pub mod emoji;
 pub mod eq;
+pub mod frame_rate;
 pub mod history;
 pub mod http;
 #[cfg(target_os = "linux")]
@@ -36,7 +37,6 @@ pub mod mac_notch;
 #[cfg(target_os = "macos")]
 pub mod mac_touchbar_crash_guard;
 pub mod made_for_you;
-pub mod milkdrop;
 pub mod model;
 pub mod motion;
 pub mod new_releases;

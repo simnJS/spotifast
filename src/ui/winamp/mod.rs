@@ -19,7 +19,6 @@ use crate::i18n::{Locale, gettext, pgettext};
 use crate::model::{Action, Page};
 use crate::player::RepeatMode;
 use crate::settings::VisMode;
-use crate::skin::generic;
 use crate::skin::layout::{self, Area};
 use crate::skin::{Mask, Sheet, Skin, Sprite, font, sprites};
 use crate::util;
@@ -29,31 +28,14 @@ use crate::winamp::{MAX_SCALE, WinampState};
 use super::widgets::{SliderEvent, wheel_notches};
 
 mod equalizer;
-#[cfg(feature = "milkdrop")]
-mod milkdrop;
 mod pixel_text;
 mod playlist;
 mod wmp;
 
 pub use pixel_text::PixelText;
 
-/// The MilkDrop panel's height in skin pixels. It is as wide as the player:
-/// the window has no background of its own to fill beside a wider panel.
-pub(crate) fn clamped_panel(height: u32) -> u32 {
-    height.clamp(generic::MIN_HEIGHT, MILKDROP_PANEL_MAX)
-}
-
-/// The tallest the panel grows, in skin pixels.
-const MILKDROP_PANEL_MAX: u32 = 960;
-
-/// The panel's height in the stack, if it is open in this build.
-fn docked_milkdrop(settings: &crate::settings::Settings) -> Option<u32> {
-    (cfg!(feature = "milkdrop") && settings.milkdrop_open)
-        .then(|| clamped_panel(settings.milkdrop_panel_height))
-}
-
-/// The stack's height in skin pixels: the main window, and the equalizer,
-/// the playlist and MilkDrop under it, whichever are open.
+/// The stack's height in skin pixels: the main window, and the equalizer
+/// and the playlist under it, whichever are open.
 fn stack_height(settings: &crate::settings::Settings) -> u32 {
     let mut height = if settings.winamp_shaded {
         layout::SHADE_HEIGHT
@@ -75,9 +57,6 @@ fn stack_height(settings: &crate::settings::Settings) -> u32 {
                 .playlist_height
                 .clamp(layout::PLAYLIST_MIN_HEIGHT, layout::PLAYLIST_MAX_HEIGHT)
         };
-    }
-    if let Some(panel) = docked_milkdrop(settings) {
-        height += panel;
     }
     height
 }
@@ -424,31 +403,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             mask: None,
         };
         playlist::show(app, &mut below, now.as_ref(), focused);
-        below_y += if app.settings.playlist_shaded {
-            layout::PLAYLIST_SHADE_HEIGHT
-        } else {
-            app.settings
-                .playlist_height
-                .clamp(layout::PLAYLIST_MIN_HEIGHT, layout::PLAYLIST_MAX_HEIGHT)
-        };
     }
-    #[cfg(feature = "milkdrop")]
-    if app.milkdrop_framed() {
-        let mut below = View {
-            ui: view.ui,
-            origin: origin + vec2(0.0, below_y as f32 * unit),
-            unit,
-            skin: &skin,
-            textures: &textures,
-            mask: None,
-        };
-        if milkdrop::show(app, &mut below, focused) {
-            crate::theme::visualiser_frame(&ctx, Some(app.milkdrop_pane_fps()));
-        }
-    }
-    #[cfg(not(feature = "milkdrop"))]
-    let _ = below_y;
-
     if vis_moving {
         crate::theme::visualiser_frame(&ctx, app.visualiser_fps());
     } else if now.is_some() {
@@ -790,14 +745,6 @@ fn options_menu(app: &mut App, ui: &mut Ui, unit: f32) {
             app.actions.push(Action::SetWinampTaskbar(visible));
         }
     }
-    let mut milkdrop = app.settings.milkdrop_open;
-    if ui
-        .checkbox(&mut milkdrop, "MilkDrop")
-        .on_hover_text(super::keys::MILKDROP_SHORTCUT)
-        .clicked()
-    {
-        app.actions.push(Action::ToggleWinampMilkdrop);
-    }
     if ui
         .button(gettext(locale, "Choose a skin").as_ref())
         .clicked()
@@ -970,12 +917,12 @@ fn clutter_bar(app: &mut App, view: &mut View, now: Option<&NowPlaying>) {
         app.actions.push(Action::SetSkinScale(next as u8));
     }
     // V opened Winamp's visualisation menu; this one has the display's
-    // three looks and MilkDrop.
+    // three looks.
     let vis = view
         .lamp_button(
             layout::CLUTTER_V,
             sprites::CLUTTER_V_LIT,
-            app.settings.milkdrop_open,
+            false,
             "clutter-v",
         )
         .on_hover_text(gettext(app.locale, "Visualisation").as_ref());
@@ -993,15 +940,6 @@ fn clutter_bar(app: &mut App, view: &mut View, now: Option<&NowPlaying>) {
             {
                 app.actions.push(Action::SetVisualiser(mode));
             }
-        }
-        ui.separator();
-        let mut milkdrop = app.settings.milkdrop_open;
-        if ui
-            .checkbox(&mut milkdrop, "MilkDrop")
-            .on_hover_text(super::keys::MILKDROP_SHORTCUT)
-            .clicked()
-        {
-            app.actions.push(Action::ToggleWinampMilkdrop);
         }
     });
 }
@@ -1748,36 +1686,5 @@ mod tests {
         assert_eq!(initial_size(&settings, &skin), vec2(275.0, 406.0));
         settings.eq_shaded = true;
         assert_eq!(initial_size(&settings, &skin), vec2(275.0, 304.0));
-    }
-
-    /// MilkDrop docks under everything else, the window grows to fit, and
-    /// the double size scales the lot.
-    #[cfg(feature = "milkdrop")]
-    #[test]
-    fn the_milkdrop_panel_stacks_under_the_rest_and_grows_the_window() {
-        let mut settings = crate::settings::Settings {
-            eq_open: true,
-            playlist_open: true,
-            ..Default::default()
-        };
-        let without = window_size(&settings, 1.0);
-        settings.milkdrop_open = true;
-        settings.milkdrop_panel_height = 232;
-        assert_eq!(
-            window_size(&settings, 1.0),
-            without + vec2(0.0, 232.0),
-            "the main window's width, and taller"
-        );
-        assert_eq!(
-            window_size(&settings, 2.0),
-            window_size(&settings, 1.0) * 2.0
-        );
-    }
-
-    /// A file edited by hand cannot make the frame fall apart.
-    #[test]
-    fn the_milkdrop_panel_keeps_to_its_limits() {
-        assert_eq!(clamped_panel(0), generic::MIN_HEIGHT);
-        assert_eq!(clamped_panel(9999), MILKDROP_PANEL_MAX);
     }
 }

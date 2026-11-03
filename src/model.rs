@@ -1476,29 +1476,6 @@ pub enum Action {
     CloseWindow,
     /// Roll the main window up to its title bar, or down again.
     ToggleWinampShade,
-    /// Open or close the MilkDrop window.
-    ToggleWinampMilkdrop,
-    /// Move the MilkDrop picture in the skinned window on or back a preset.
-    MilkdropEffect(i32),
-    /// Take the skinned MilkDrop window to full screen, in the plain window.
-    MilkdropFullscreen,
-    /// MilkDrop alone in the window, from full screen lyrics.
-    EnterImmersive,
-    /// Full screen lyrics back as they were.
-    LeaveImmersive,
-    /// Puts MilkDrop behind full screen lyrics, or the cover's art back.
-    ToggleLyricsMilkdrop,
-    /// The size of the picture in the skinned MilkDrop window, in points.
-    SetMilkdropPanel(u32),
-    /// How long each MilkDrop preset plays, in seconds.
-    SetMilkdropSeconds(u32),
-    SetMilkdropScale(u32),
-    /// How many frames a second the MilkDrop window draws; 0 is uncapped.
-    SetMilkdropFps(u32),
-    OpenMilkdropFolder,
-    /// Fetch one of projectM's preset packs into the folder, by its place
-    /// in the list.
-    DownloadMilkdropPack(usize),
     Quit,
 }
 

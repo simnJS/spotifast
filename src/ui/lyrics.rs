@@ -320,16 +320,6 @@ pub fn fullscreen(app: &mut App, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             let rect = ui.max_rect();
             background(app, ui, rect);
-            // The empty space is the backdrop's switch, as the player bar's
-            // is its visualizer's. Everything drawn after this takes its own
-            // clicks, and a drag is no click.
-            #[cfg(feature = "milkdrop")]
-            if ui
-                .interact(rect, ui.id().with("lyrics-backdrop"), Sense::click())
-                .clicked()
-            {
-                app.actions.push(Action::ToggleLyricsMilkdrop);
-            }
             let top = theme::titlebar_inset(ui.ctx()) + 24.0;
             if app.now_playing().is_some() && rect.width() >= COVER_BESIDE_MIN_WIDTH {
                 with_cover(app, ui, rect, top);
@@ -535,8 +525,6 @@ fn big_cover(app: &mut App, ui: &mut egui::Ui, column: Rect, align: Align) {
         cover,
         radius,
     );
-    let art = now.art_url.is_some() || now.art_small.is_some();
-    cover_opens_immersive(app, ui, cover, art);
     let words = Rect::from_min_max(pos2(column.left(), cover.bottom() + 18.0), column.max);
     let mut text = ui.new_child(
         UiBuilder::new()
@@ -571,122 +559,8 @@ fn preferred_backdrop_art(small: Option<String>, large: Option<String>) -> Optio
     small.or(large)
 }
 
-/// How bright the brightest of the picture may stay behind the words, so a
-/// white preset reads like the dimmed art does.
-const BACKDROP_GLOW: f32 = 0.2;
-/// The dimming's limits: even a dark preset's sparks stay this far under the
-/// white of the words, and a bright one is never lost altogether.
-const BACKDROP_DIM: std::ops::RangeInclusive<f32> = 0.2..=0.32;
-
-/// How much of the picture's brightness to keep, for one this bright.
-fn backdrop_dim(glow: f32) -> f32 {
-    (BACKDROP_GLOW / glow.max(0.01)).clamp(*BACKDROP_DIM.start(), *BACKDROP_DIM.end())
-}
-
-/// MilkDrop filling `rect`, dimmed so the words stay clear whatever it draws.
-/// `false` leaves the art: there is no picture yet, or none to be had.
-#[cfg(feature = "milkdrop")]
-fn milkdrop_backdrop(app: &mut App, ui: &mut egui::Ui, rect: Rect) -> bool {
-    use crate::milkdrop::pane::{Picture, UV};
-    if !app.milkdrop_behind_lyrics() {
-        return false;
-    }
-    let ctx = ui.ctx().clone();
-    let pixels = rect.size() * ctx.pixels_per_point();
-    let picture = app.milkdrop_picture(&ctx, [pixels.x, pixels.y]);
-    let Picture::Frame(texture) = picture else {
-        if picture == Picture::Waiting {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
-        } else {
-            // No MilkDrop to be had: as if the art was never clicked.
-            app.actions.push(Action::LeaveImmersive);
-        }
-        return false;
-    };
-    app.immersive_arrived();
-    let dim = ctx.animate_value_with_time(
-        egui::Id::new("lyrics-backdrop-dim"),
-        backdrop_dim(app.milkdrop_glow()),
-        crate::motion::seconds(&ctx, 0.5),
-    );
-    let tint = Color32::from_gray((dim * 255.0).round() as u8);
-    ui.painter()
-        .with_clip_rect(rect)
-        .image(texture, rect, UV, tint);
-    if app.now_playing().is_some_and(|now| now.playing) {
-        theme::visualiser_frame(&ctx, Some(app.milkdrop_pane_fps()));
-    }
-    true
-}
-
-/// MilkDrop alone, edge to edge and at full brightness, under the root of the
-/// window so that the player bar comes and goes over it without resizing it.
-/// Returns whether the controls show.
-#[cfg(feature = "milkdrop")]
-pub fn immersive(app: &mut App, ui: &mut egui::Ui) -> bool {
-    use crate::milkdrop::pane::{Picture, UV};
-    let ctx = ui.ctx().clone();
-    let rect = ctx.viewport_rect();
-    ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
-    let pixels = rect.size() * ctx.pixels_per_point();
-    match app.milkdrop_picture(&ctx, [pixels.x, pixels.y]) {
-        Picture::Frame(texture) => {
-            ui.painter().image(texture, rect, UV, Color32::WHITE);
-        }
-        Picture::Waiting => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
-        Picture::None => app.actions.push(Action::LeaveImmersive),
-    }
-    if app.now_playing().is_some_and(|now| now.playing) {
-        theme::visualiser_frame(&ctx, Some(app.milkdrop_pane_fps()));
-    }
-    let moved = ctx.input(|input| input.pointer.delta() != egui::Vec2::ZERO);
-    let now = ctx.input(|input| input.time);
-    let left = app.immersive_controls(moved, now);
-    match left {
-        Some(left) => ctx.request_repaint_after(std::time::Duration::from_secs_f64(left)),
-        None => ctx.set_cursor_icon(egui::CursorIcon::None),
-    }
-    left.is_some()
-}
-
-/// Everything in immersive mode that is not a control: any click there brings
-/// the view back.
-#[cfg(feature = "milkdrop")]
-pub fn immersive_click(app: &mut App, ui: &mut egui::Ui) {
-    egui::CentralPanel::default()
-        .frame(Frame::new())
-        .show(ui, |ui| {
-            let rect = ui.max_rect();
-            if ui
-                .interact(rect, ui.id().with("immersive"), Sense::click())
-                .clicked()
-            {
-                app.actions.push(Action::LeaveImmersive);
-            }
-        });
-}
-
-/// The cover is the way into immersive mode, if there is MilkDrop to go to.
-fn cover_opens_immersive(app: &mut App, ui: &egui::Ui, cover: Rect, art: bool) {
-    #[cfg(feature = "milkdrop")]
-    if art
-        && ui
-            .interact(cover, ui.id().with("lyrics-cover"), Sense::click())
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked()
-    {
-        app.actions.push(Action::EnterImmersive);
-    }
-    #[cfg(not(feature = "milkdrop"))]
-    let _ = (app, ui, cover, art);
-}
-
 fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
     theme::apply_local(ui, &theme::Palette::dark());
-    #[cfg(feature = "milkdrop")]
-    if milkdrop_backdrop(app, ui, rect) {
-        return;
-    }
     let art = app
         .now_playing()
         .and_then(|now| preferred_backdrop_art(now.art_small, now.art_url));
@@ -774,8 +648,6 @@ fn track_heading(app: &mut App, ui: &mut egui::Ui) {
                 rect,
                 4.0,
             );
-            let art = now.art_url.is_some() || now.art_small.is_some();
-            cover_opens_immersive(app, ui, rect, art);
             ui.vertical(|ui| {
                 ui.add(
                     egui::Label::new(
@@ -878,14 +750,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
     // always dark, and grows; each line wraps
     // for its full size all along, so growing can't rewrap its words.
     // A line takes 300 ms to light up or fade.
-    // A moving picture asks more of the quiet lines than a still one.
-    let quiet = palette
-        .text
-        .gamma_multiply(if app.milkdrop_behind_lyrics() {
-            0.62
-        } else {
-            0.42
-        });
+    let quiet = palette.text.gamma_multiply(0.42);
     ui.spacing_mut().scroll.fade.strength = 0.0;
     egui::ScrollArea::vertical()
         .id_salt(("fullscreen-lyrics-scroll", &now.uri))
@@ -1031,21 +896,5 @@ mod tests {
         }
         assert_eq!(fullscreen_content_width(47.0), 0.0);
         assert_eq!(fullscreen_content_width(2_000.0), 960.0);
-    }
-
-    /// A white picture ends up as dark as the dimmed art, and full white
-    /// words on it above WCAG's 7:1.
-    #[test]
-    fn white_is_dimmed_until_the_words_read_on_it() {
-        let dim = super::backdrop_dim(1.0);
-        let linear = |value: f32| ((value + 0.055) / 1.055).powf(2.4);
-        let contrast = 1.05 / (linear(dim) + 0.05);
-        assert!(contrast >= 7.0, "{contrast}");
-    }
-
-    #[test]
-    fn a_dark_picture_is_dimmed_less_but_never_left_alone() {
-        assert!(super::backdrop_dim(0.1) > super::backdrop_dim(1.0));
-        assert!(super::backdrop_dim(0.0) <= 0.32);
     }
 }

@@ -17,14 +17,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
-    env:
-      CMAKE_GENERATOR: Ninja
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - name: GLEW for MilkDrop
-        if: runner.os == 'Windows'
-        run: vcpkg install glew:x64-windows-static
       - name: MSVC environment
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
@@ -44,7 +39,7 @@ jobs:
           lock.write_text(lock.read_text().replace('name = "spotifast"\nversion = "' + base + '"', 'name = "spotifast"\nversion = "' + version + '"', 1))
           with open(os.environ['GITHUB_ENV'], 'a') as env:
               env.write('PREVIEW_VERSION=' + version + '\n')
-      - name: Build with native Soloist audio and MilkDrop
+      - name: Build with native Soloist audio
         run: cargo build --locked --release --features soloist-preview
       - name: Verify Windows runtime and package portable preview
         if: runner.os == 'Windows'

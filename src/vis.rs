@@ -3,8 +3,8 @@
 //! The tap wraps the active sink and stores half a second of post-EQ,
 //! pre-volume audio. The analyser uses Winamp's constants and behavior from
 //! `classic_vis.cpp`, with FFT details cross-checked against Webamp's
-//! `VisPainter.ts` and `FFTNullsoft.ts`. MilkDrop receives stereo samples;
-//! the spectrum and scope use mono samples.
+//! `VisPainter.ts` and `FFTNullsoft.ts`. The spectrum and scope use mono
+//! samples.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -50,18 +50,9 @@ const CHANNEL_SUM: f32 = 2.0;
 const SPEC_SCALE: f32 = 0.5;
 
 /// The last half second of sound, shared between the player's thread and
-/// the visualiser. The mono mix stays in this process for the skin's
-/// analyser; the stereo sound goes to a shared-memory ring for the MilkDrop
-/// child process, when one is running.
+/// the visualiser: the mono mix for the skin's analyser.
 pub struct AudioTap {
     samples: Mutex<VecDeque<f32>>,
-    /// The ring the MilkDrop child reads, attached while its window is open.
-    #[cfg(feature = "milkdrop")]
-    shm: Mutex<Option<std::sync::Arc<crate::milkdrop::shm::Ring>>>,
-    /// The ring of the child drawing for a skin's pane, which can run beside
-    /// the window's.
-    #[cfg(feature = "milkdrop")]
-    pane_shm: Mutex<Option<std::sync::Arc<crate::milkdrop::shm::Ring>>>,
 }
 
 impl std::fmt::Debug for AudioTap {
@@ -74,10 +65,6 @@ impl Default for AudioTap {
     fn default() -> Self {
         Self {
             samples: Mutex::new(VecDeque::with_capacity(KEPT)),
-            #[cfg(feature = "milkdrop")]
-            shm: Mutex::new(None),
-            #[cfg(feature = "milkdrop")]
-            pane_shm: Mutex::new(None),
         }
     }
 }
@@ -87,56 +74,19 @@ impl AudioTap {
         Arc::new(Self::default())
     }
 
-    /// Connects the tap to MilkDrop's shared-memory ring. `None` detaches it.
-    #[cfg(feature = "milkdrop")]
-    pub fn set_shm(&self, ring: Option<std::sync::Arc<crate::milkdrop::shm::Ring>>) {
-        *self.shm.lock().unwrap_or_else(|p| p.into_inner()) = ring;
-    }
-
-    /// Connects the tap to the pane's ring. `None` detaches it.
-    #[cfg(feature = "milkdrop")]
-    pub fn set_pane_shm(&self, ring: Option<std::sync::Arc<crate::milkdrop::shm::Ring>>) {
-        *self.pane_shm.lock().unwrap_or_else(|p| p.into_inner()) = ring;
-    }
-
-    /// Adds scaled stereo samples to the mono analyser buffer and, when
-    /// attached, MilkDrop's stereo shared-memory rings.
+    /// Adds scaled stereo samples to the mono analyser buffer.
     pub fn push(&self, interleaved: &[f64], gain: f32) {
         let mut samples = self.samples.lock().unwrap_or_else(|p| p.into_inner());
         record_mono(&mut samples, interleaved, gain);
-        drop(samples);
-        #[cfg(feature = "milkdrop")]
-        {
-            let rings = [
-                self.shm.lock().unwrap_or_else(|p| p.into_inner()).clone(),
-                self.pane_shm
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .clone(),
-            ];
-            for ring in rings.iter().flatten() {
-                record_stereo(ring, interleaved, gain);
-            }
-        }
     }
 
     /// `push` for a realtime thread: no allocation, and nothing it would
-    /// have to wait for. A window being read costs the picture this block,
-    /// which is better than the sound waiting for the picture.
+    /// have to wait for. A buffer being read costs the analyser this block,
+    /// which is better than the sound waiting for it.
     #[cfg(target_os = "linux")]
     pub fn try_push(&self, interleaved: &[f64], gain: f32) {
         if let Ok(mut samples) = self.samples.try_lock() {
             record_mono(&mut samples, interleaved, gain);
-        }
-        // Each lock is kept through the write: a clone of the ring here
-        // could turn out to be the last, and free it on this thread.
-        #[cfg(feature = "milkdrop")]
-        for slot in [&self.shm, &self.pane_shm] {
-            if let Ok(ring) = slot.try_lock()
-                && let Some(ring) = ring.as_ref()
-            {
-                record_stereo(ring, interleaved, gain);
-            }
         }
     }
 
@@ -180,21 +130,6 @@ fn record_mono(samples: &mut VecDeque<f32>, interleaved: &[f64], gain: f32) {
             samples.pop_front();
         }
         samples.push_back(mono);
-    }
-}
-
-/// Writes stereo to a shared-memory ring, in pieces of a fixed size on the
-/// stack so that it allocates nothing.
-#[cfg(feature = "milkdrop")]
-fn record_stereo(ring: &crate::milkdrop::shm::Ring, interleaved: &[f64], gain: f32) {
-    const FRAMES: usize = 256;
-    let mut stereo = [0.0f32; FRAMES * 2];
-    let (frames, _) = interleaved.as_chunks::<{ NUM_CHANNELS as usize }>();
-    for piece in frames.chunks(FRAMES) {
-        for (out, frame) in stereo.as_chunks_mut::<2>().0.iter_mut().zip(piece) {
-            *out = [frame[0] as f32 * gain, frame[1] as f32 * gain];
-        }
-        ring.push(&stereo[..piece.len() * 2]);
     }
 }
 
