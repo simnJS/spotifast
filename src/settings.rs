@@ -330,9 +330,6 @@ pub struct Settings {
     pub library_by_you: bool,
     /// Interface zoom, egui's zoom factor; Ctrl+plus/minus changes it.
     pub zoom: f32,
-    /// Windows and Linux: draw Spotifast's own title bar and window buttons
-    /// instead of the desktop frame.
-    pub custom_titlebar: bool,
     /// The equalizer shapes local playback.
     pub eq_on: bool,
     /// The preamp, in decibels, never above zero.
@@ -439,7 +436,6 @@ impl Default for Settings {
             library_sort: std::collections::BTreeMap::new(),
             library_by_you: false,
             zoom: 1.0,
-            custom_titlebar: false,
             eq_on: false,
             eq_preamp_db: 0.0,
             eq_bands_db: [0.0; 10],
@@ -918,6 +914,26 @@ mod tests {
                 serde_json::from_str(&settings.encode().unwrap()).unwrap();
             assert!(saved.get("audio_backend").is_none());
             assert_eq!(saved["audio_device"], "PipeWire Sound Server");
+        }
+    }
+
+    /// The title bar choice from before Spotifast always drew its own: the
+    /// key is read and ignored, the rest of the file still loads, and it is
+    /// not written back.
+    #[test]
+    fn an_old_custom_title_bar_choice_is_read_and_ignored() {
+        for custom in [true, false] {
+            let settings: Settings = serde_json::from_value(serde_json::json!({
+                "custom_titlebar": custom,
+                "volume": 37,
+                "zoom": 1.25,
+            }))
+            .unwrap();
+            assert_eq!(settings.volume, 37);
+            assert_eq!(settings.zoom, 1.25);
+            let saved: serde_json::Value =
+                serde_json::from_str(&settings.encode().unwrap()).unwrap();
+            assert!(saved.get("custom_titlebar").is_none());
         }
     }
 

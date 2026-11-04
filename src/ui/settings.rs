@@ -1073,8 +1073,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let sidebar_compact = gettext(locale, "Compact library sidebar");
     let tracklist_compact = gettext(locale, "Compact track list");
     let middle_click = gettext(locale, "Middle-click autoscroll");
-    let custom_titlebar = gettext(locale, "Custom title bar");
-    let show_custom_titlebar = cfg!(target_os = "linux") || app.windows_controls_visible();
     // Follow system's own light and dark palettes. Omarchy's palette already
     // follows the desktop, so they are offered only without it.
     let show_pair = app.settings.custom_theme.is_none()
@@ -1162,14 +1160,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ),
         )
         .when(cfg!(target_os = "linux")),
-        RowText::new(
-            custom_titlebar.clone(),
-            gettext(
-                locale,
-                "Draw Spotifast's own title bar and window buttons instead of the desktop's.",
-            ),
-        )
-        .when(show_custom_titlebar),
         pair_row(fastframe_theme::Base::Light),
         pair_row(fastframe_theme::Base::Dark),
     ];
@@ -1275,8 +1265,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 },
             );
             for (row, base) in [
-                (&appearance_rows[8], fastframe_theme::Base::Light),
-                (&appearance_rows[9], fastframe_theme::Base::Dark),
+                (&appearance_rows[7], fastframe_theme::Base::Light),
+                (&appearance_rows[8], fastframe_theme::Base::Dark),
             ] {
                 filtered_row(ui, &palette, &needle, &appearance, row, |ui| {
                     pair_picker(app, ui, base, &row.title);
@@ -1394,21 +1384,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         .changed()
                         {
                             changed = true;
-                        }
-                    },
-                );
-            }
-            if show_custom_titlebar {
-                filtered_row(
-                    ui,
-                    &palette,
-                    &needle,
-                    &appearance,
-                    &appearance_rows[7],
-                    |ui| {
-                        let mut custom = app.settings.custom_titlebar;
-                        if widgets::switch(ui, &palette, &custom_titlebar, &mut custom).changed() {
-                            app.actions.push(Action::SetCustomTitlebar(custom));
                         }
                     },
                 );

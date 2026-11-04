@@ -12957,17 +12957,6 @@ impl App {
                     ),
                 }
             }
-            Action::SetCustomTitlebar(custom) => {
-                if self.settings.custom_titlebar != custom {
-                    self.settings.custom_titlebar = custom;
-                    fastframe_titlebar::set_enabled(custom);
-                    self.mark_settings_dirty();
-                    // Decorations are fixed at creation. Replace only the
-                    // native window, keeping the page and playback.
-                    self.switch_intent = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            }
             Action::ToggleEq => {
                 self.settings.eq_on = !self.settings.eq_on;
                 self.push_eq();
@@ -15715,31 +15704,6 @@ mod tests {
             toasts + 1,
             "already local, nothing to explain"
         );
-    }
-
-    /// The title bar choice is saved and, because decorations are fixed when
-    /// a window is created, replaces only the main window's native window.
-    /// The mini player picks it up the next time the main window opens.
-    #[test]
-    fn choosing_the_custom_title_bar_recreates_the_window() {
-        let mut app = headless_app();
-        let ctx = egui::Context::default();
-        app.apply(Action::SetCustomTitlebar(true), &ctx);
-        assert!(app.settings.custom_titlebar);
-        assert!(app.switch_intent, "the main window is replaced");
-        assert_eq!(
-            fastframe_titlebar::enabled(),
-            cfg!(any(windows, target_os = "linux"))
-        );
-
-        app.switch_intent = false;
-        app.apply(Action::SetCustomTitlebar(true), &ctx);
-        assert!(!app.switch_intent, "an unchanged choice keeps the window");
-
-        app.apply(Action::SetCustomTitlebar(false), &ctx);
-        assert!(!app.settings.custom_titlebar);
-        assert!(app.switch_intent, "the main window is replaced");
-        assert!(!fastframe_titlebar::enabled());
     }
 
     /// Q in lyrics fullscreen flips the queue column without leaving

@@ -1413,8 +1413,6 @@ pub enum Action {
     ClearAudioCache,
     /// Clear local play history.
     ClearPlayHistory,
-    /// Windows: draw Spotifast's own title bar instead of the standard one.
-    SetCustomTitlebar(bool),
     /// Pick the folder a playlist's local files play from.
     ChooseLocalFilesFolder,
     /// Stop playing local files.

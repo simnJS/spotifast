@@ -7,6 +7,35 @@
 /// the help page the no-window dialog offers.
 pub const DOWNLOAD_PAGE: &str = "https://spotifast.rocks/download/";
 
+/// Asks Windows 11 to round the corners of the frameless window `hwnd`, as
+/// it does a framed one. Windows 10 has no such attribute and refuses it,
+/// leaving square corners.
+///
+/// # Safety
+///
+/// `hwnd` must be a live window handle.
+#[cfg(windows)]
+pub unsafe fn round_corners(hwnd: isize) {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+    };
+    let preference = DWMWCP_ROUND;
+    // SAFETY: the caller passes a live window; the attribute is a 32-bit
+    // value read during the call.
+    let result = unsafe {
+        DwmSetWindowAttribute(
+            hwnd as HWND,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            (&raw const preference).cast(),
+            std::mem::size_of_val(&preference) as u32,
+        )
+    };
+    if result < 0 {
+        log::debug!("Windows did not round the window's corners: {result:#x}");
+    }
+}
+
 /// The dialog fastframe-graphics shows when no window could open, in the
 /// interface language: Windows on ARM is pointed at Microsoft's
 /// compatibility pack, where its OpenGL comes from; anything else at the

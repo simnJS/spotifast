@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 pub mod artist;
 pub mod collection;
+pub mod corners;
 pub(crate) mod devices;
 mod dialogs;
 pub(crate) mod friends;
@@ -48,6 +49,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         toasts(app, ctx, 20.0);
         caption_buttons(ui, &app.palette, app.locale);
         fastframe_titlebar::resize(ui);
+        corners::paint(ctx, &app.palette);
         return;
     }
     let soloist_view = app.soloist_view();
@@ -61,6 +63,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         toasts(app, ctx, 20.0);
         caption_buttons(ui, &app.palette, app.locale);
         fastframe_titlebar::resize(ui);
+        corners::paint(ctx, &app.palette);
         return;
     }
     if titlebar_spans_window(cfg!(target_os = "macos"), fastframe_titlebar::enabled()) {
@@ -101,6 +104,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     toasts(app, ctx, theme::PLAYER_BAR_HEIGHT + 16.0);
     caption_buttons(ui, &app.palette, app.locale);
     fastframe_titlebar::resize(ui);
+    corners::paint(ctx, &app.palette);
 }
 
 /// The main window's narrowest width with these panels open: their least
@@ -574,8 +578,8 @@ fn header_shadow(ui: &egui::Ui, page: Rect, scrolled: f32, dark: bool) {
 
 /// Without a native title bar, the top of every panel drags the window, not
 /// only the page's top bar.
-const fn titlebar_spans_window(on_macos: bool, custom_titlebar: bool) -> bool {
-    on_macos || custom_titlebar
+const fn titlebar_spans_window(on_macos: bool, own_titlebar: bool) -> bool {
+    on_macos || own_titlebar
 }
 
 /// The room the top bar's own controls need beside the caption buttons: the

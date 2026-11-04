@@ -474,7 +474,10 @@ pub(crate) fn run() -> eframe::Result<()> {
         settings.device_name = name;
     }
     fastframe_titlebar::init();
-    fastframe_titlebar::set_enabled(settings.custom_titlebar);
+    // Windows and Linux always draw Spotifast's own title bar and window
+    // buttons; macOS keeps its native traffic lights (the crate ignores the
+    // choice there).
+    fastframe_titlebar::set_enabled(true);
     // Colour emoji: the fonts are found off this thread. A demo capture
     // draws every picture in the frame that shows it.
     #[cfg(feature = "demo")]
@@ -680,6 +683,19 @@ pub(crate) fn run() -> eframe::Result<()> {
                 }
                 toolbar
             };
+            // Windows 11 rounds the frameless window when asked; Windows 10
+            // ignores the request.
+            #[cfg(windows)]
+            {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if fastframe_titlebar::enabled()
+                    && let Ok(handle) = cc.window_handle()
+                    && let RawWindowHandle::Win32(window) = handle.as_raw()
+                {
+                    // SAFETY: the handle is this live window's, on its thread.
+                    unsafe { spotifast::window::round_corners(window.hwnd.get()) };
+                }
+            }
             Ok(Box::new(Shell {
                 app,
                 recovery_checked: false,
@@ -720,8 +736,8 @@ fn main_geometry(app: &app::App) -> Geometry {
     }
 }
 
-const fn main_window_decorated(custom_titlebar: bool) -> bool {
-    !custom_titlebar
+const fn main_window_decorated(own_titlebar: bool) -> bool {
+    !own_titlebar
 }
 
 #[cfg(any(test, feature = "demo"))]
@@ -806,9 +822,13 @@ fn native_options(
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)
             .with_title_shown(false)
-            // Windows has no equivalent to macOS's floating traffic lights.
-            // Removing its decorations lets the app surface fill the window.
+            // Windows and Linux have no equivalent to macOS's floating
+            // traffic lights. Removing their decorations lets the app
+            // surface fill the window, and the app draws the buttons.
             .with_decorations(main_window_decorated(fastframe_titlebar::enabled()))
+            // Linux: see-through, so the app can round its own corners
+            // (src/ui/corners.rs).
+            .with_transparent(spotifast::ui::corners::transparent_window())
             .with_inner_size(size)
             .with_min_inner_size(inner_size.unwrap_or(spotifast::window::MAIN_MIN_SIZE))
             .with_fullscreen(fullscreen);
@@ -944,6 +964,10 @@ mod native_window_tests {
             Some(!fastframe_titlebar::enabled())
         );
         assert_eq!(options.viewport.fullsize_content_view, Some(true));
+        assert_eq!(
+            options.viewport.transparent,
+            Some(spotifast::ui::corners::transparent_window())
+        );
         assert_eq!(options.viewport.titlebar_shown, Some(false));
         assert_eq!(options.viewport.title_shown, Some(false));
     }
@@ -1322,8 +1346,12 @@ impl eframe::App for Shell {
         self.stalls = stalls;
     }
 
-    /// The window paints itself over eframe's own ground.
+    /// The window paints itself over eframe's own ground. A transparent
+    /// window starts clear, so its rounded corners show the desktop.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        if spotifast::ui::corners::transparent_window() {
+            return [0.0; 4];
+        }
         egui::Color32::from_rgba_unmultiplied(12, 12, 12, 180).to_normalized_gamma_f32()
     }
 
