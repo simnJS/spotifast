@@ -992,120 +992,14 @@ fn play_here(app: &mut App) {
     app.local.position_ms = now.as_ref().map_or(0, |now| now.position_ms);
 }
 
-/// Half a second of stereo sound shaped like a busy mix, the same every
-/// time: a bass line, chords and their overtones at uneven levels up
-/// through the mids and highs, a bright hi-hat hiss and pink noise
-/// beneath, so a visualizer shows peaks across the whole range rather
-/// than a slope from the bass.
-#[cfg(feature = "demo")]
-pub(crate) fn demo_sound() -> Vec<f64> {
-    // Frequency and level of each partial, uneven on purpose so
-    // neighbouring bands stand at different heights.
-    const PARTIALS: [(f64, f64); 18] = [
-        (55.0, 0.16),
-        (110.0, 0.07),
-        (146.8, 0.1),
-        (196.0, 0.04),
-        (246.9, 0.09),
-        (392.0, 0.03),
-        (523.3, 0.08),
-        (740.0, 0.025),
-        (880.0, 0.07),
-        (1174.7, 0.02),
-        (1568.0, 0.06),
-        (2093.0, 0.018),
-        (2637.0, 0.05),
-        (3520.0, 0.014),
-        (4698.6, 0.04),
-        (6271.9, 0.012),
-        (8372.0, 0.03),
-        (11175.3, 0.01),
-    ];
-    let rate = f64::from(librespot_playback::SAMPLE_RATE);
-    let mut seed = 0x2545_f491_u32;
-    let mut white = move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 17;
-        seed ^= seed << 5;
-        f64::from(seed) / f64::from(u32::MAX) - 0.5
-    };
-    // Paul Kellet's economy filter turns white noise pink; the difference
-    // of two white samples leaves only the treble, like a hi-hat.
-    let (mut b0, mut b1, mut b2, mut last) = (0.0, 0.0, 0.0, 0.0);
-    (0..librespot_playback::SAMPLE_RATE as usize / 2)
-        .flat_map(|index| {
-            let time = index as f64 / rate;
-            let noise = white();
-            b0 = 0.99765 * b0 + noise * 0.099_046;
-            b1 = 0.963 * b1 + noise * 0.296_516_4;
-            b2 = 0.57 * b2 + noise * 1.052_691_3;
-            let pink = (b0 + b1 + b2 + noise * 0.1848) * 0.12;
-            let hiss = (noise - last) * 0.05;
-            last = noise;
-            let sample = PARTIALS
-                .iter()
-                .map(|(hertz, level)| {
-                    // Everything above the bass half again as loud, so the
-                    // skin's bars, four bands each, stand tall too.
-                    let level = if *hertz > 100.0 { level * 1.5 } else { *level };
-                    level * (time * hertz * std::f64::consts::TAU).sin()
-                })
-                .sum::<f64>()
-                + pink
-                + hiss;
-            [sample, sample]
-        })
-        .collect()
-}
-
 /// A Client ID of the right shape that Spotify never issued.
 #[cfg(feature = "demo")]
 const DEMO_CLIENT_ID: &str = "0123456789abcdef0123456789abcdef";
-
-/// Copies a skin into the demo's skins folder and says what it is called
-/// there. The demo may be pointed at a skin in someone's real folder, so it
-/// writes nothing through a link and never opens the file it would replace:
-/// the copy arrives by rename, which replaces a name, not what it points at.
-fn place_skin(source: &std::path::Path, folder: &std::path::Path) -> std::io::Result<String> {
-    use std::io::{Error, ErrorKind};
-    let name = source
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "the skin has no file name"))?;
-    // The folder, or the config folder holding it, linked elsewhere would
-    // put the writes below in someone's real data.
-    for level in folder.ancestors().take(2) {
-        if std::fs::symlink_metadata(level).is_ok_and(|meta| meta.file_type().is_symlink()) {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "the demo's skins folder is a link",
-            ));
-        }
-    }
-    std::fs::create_dir_all(folder)?;
-    let target = folder.join(&name);
-    let source = source.canonicalize()?;
-    if target.canonicalize().is_ok_and(|target| target == source) {
-        return Ok(name);
-    }
-    let temporary = folder.join(format!(".{name}.{}.part", std::process::id()));
-    let written = std::fs::File::open(&source).and_then(|mut from| {
-        let mut to = std::fs::File::create_new(&temporary)?;
-        std::io::copy(&mut from, &mut to)?;
-        std::fs::rename(&temporary, &target)
-    });
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    written.map(|()| name)
-}
 
 /// Select sample pages and UI states for deterministic, unauthenticated demos.
 /// The By You fixtures cover owned rows and an intentionally unmatched search.
 #[cfg(feature = "demo")]
 pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
-    // Default screenshots to the main window regardless of saved settings.
-    app.settings.winamp_window = false;
     if matches!(page, Some("prerelease" | "prerelease-fog-lake")) {
         let uri = "spotify:prerelease:0kRaNkRxpO16BjxJU0IQAL";
         if let Ok(mut data) =
@@ -1226,8 +1120,6 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
             }
             "soloist-audio" => {
                 app.soloist_audio = true;
-                app.settings.player_bar_vis = crate::settings::PlayerBarVis::Spectrum;
-                app.winamp.tap.push(&demo_sound(), 1.0);
             }
             "soloist-welcome" => {
                 app.soloist_onboarding = crate::settings::SoloistOnboarding::Welcome;
@@ -1373,21 +1265,6 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 // as without this override.
                 play_here(app);
                 app.local.playback = crate::player::Playback::Paused;
-            }
-            "player-bar-spectrum" | "player-bar-waveform" => {
-                app.settings.player_bar_vis = if surface == "player-bar-spectrum" {
-                    crate::settings::PlayerBarVis::Spectrum
-                } else {
-                    crate::settings::PlayerBarVis::Waveform
-                };
-                play_here(app);
-                app.local.playback = crate::player::Playback::Playing;
-                app.winamp.tap.push(&demo_sound(), 1.0);
-                // Read the cover's colours, as a change of song does, so the
-                // visualizer draws in them.
-                if let Some(now) = app.now_playing() {
-                    app.tint_for(now.art_small.or(now.art_url).as_deref());
-                }
             }
             // The sign-in card and the card while the session connects.
             "signed-out" => {
@@ -1640,13 +1517,6 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 app.settings.theme = crate::settings::ThemeChoice::Dark;
                 app.actions.push(Action::SettingsChanged);
             }
-            // Settings filtered down to the skin cards.
-            "settings-skins" => {
-                app.winamp.demo_settings_filter = Some("Mini player".into());
-            }
-            "settings-player-skins" => {
-                app.winamp.demo_settings_filter = Some("Windows Media Player".into());
-            }
             // Follow system on a desktop fixed light or dark (Linux), for
             // shots of the light and dark mode themes.
             "system-light" | "system-dark" => {
@@ -1695,64 +1565,6 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 app.resume_position_ms = 19_566;
                 app.actions.push(Action::Next);
             }
-            // Use the built-in skin for deterministic screenshots.
-            "winamp" | "winamp-bars" | "winamp-scope" | "winamp-turkish" => {
-                app.settings.winamp_window = true;
-                app.settings.skin = None;
-                // Two screen pixels per skin pixel, whatever the display, so
-                // captures match the pages that show them.
-                app.settings.skin_scale = Some(2);
-                if surface == "winamp-turkish"
-                    && let Some(remote) = &mut app.remote
-                    && let Some(PlayableItem::Track(track)) = &mut remote.state.item
-                {
-                    // A dotless i must keep the skin font for the whole title.
-                    track.name = "Tokyo Manifesto".into();
-                    track.duration_ms = 265_000;
-                    track.artists[0].name = "Cihangir Eryıldız".into();
-                }
-                if matches!(surface, "winamp-bars" | "winamp-scope") {
-                    app.settings.vis = if surface == "winamp-bars" {
-                        crate::settings::VisMode::Bars
-                    } else {
-                        crate::settings::VisMode::Scope
-                    };
-                    play_here(app);
-                    app.local.playback = crate::player::Playback::Playing;
-                    app.winamp.tap.push(&demo_sound(), 1.0);
-                }
-            }
-            surface if surface.starts_with("wmp-run=") => {
-                // `|` stands for the comma that separates surfaces.
-                let script = surface["wmp-run=".len()..].replace('|', ",");
-                app.winamp.demo_scripts.push(script);
-            }
-            surface if surface.starts_with("wmp-skin=") => {
-                // Through the skins folder, as the real load path reads it.
-                let path = std::path::Path::new(&surface["wmp-skin=".len()..]);
-                let placed = place_skin(path, &app.dirs.skins_dir());
-                if let Err(error) = &placed {
-                    log::warn!("the demo left {} alone: {error}", path.display());
-                }
-                if let Ok(name) = placed {
-                    app.settings.winamp_window = true;
-                    app.settings.skin = Some(name);
-                    app.settings.skin_scale = Some(1);
-                    app.settings.vis = crate::settings::VisMode::Bars;
-                    play_here(app);
-                    app.local.playback = crate::player::Playback::Playing;
-                    app.winamp.tap.push(&demo_sound(), 1.0);
-                }
-            }
-            "playlist" => app.settings.playlist_open = true,
-            "shade" => app.settings.winamp_shaded = true,
-            "playlist-shade" => app.settings.playlist_shaded = true,
-            "eq" => {
-                app.settings.eq_open = true;
-                app.settings.eq_on = true;
-                app.settings.eq_bands_db = crate::eq::PRESETS[13].bands_db;
-            }
-            "presets" => app.winamp.open_presets = true,
             // A headphone correction saved as a preset, and in use.
             "eq-user-presets" => {
                 let bands_db = [1.2, 0.0, -1.9, -2.0, 0.0, 1.6, 1.6, 2.6, 0.0, -4.4];
@@ -1788,7 +1600,6 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 ];
                 app.collapsed_folders = vec!["f2".into()];
             }
-            "small" => app.settings.skin_scale = Some(1),
             "windows-taskbar" => app.demo_windows_controls = true,
             "start-in-tray" => {
                 app.autostart = Some(fastframe_autostart::State::On(
@@ -1798,10 +1609,6 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
             "compact" => {
                 app.settings.sidebar_compact = true;
                 app.settings.tracklist_compact = true;
-            }
-            "eq-shade" => {
-                app.settings.eq_open = true;
-                app.settings.eq_shaded = true;
             }
             "pins" => {
                 app.settings.pinned_contexts =
@@ -4268,111 +4075,6 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// `wmp-skin=` pointed at the real skins folder must leave it whole: it
-    /// once truncated a skin by copying it through a link onto itself.
-    #[cfg(unix)]
-    #[test]
-    fn placing_a_demo_skin_never_writes_through_a_link_or_onto_its_source() {
-        use std::os::unix::fs::symlink;
-        let root = std::env::temp_dir().join(format!("spotifast-demo-skin-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let real = root.join("real");
-        std::fs::create_dir_all(&real).unwrap();
-        let skin = real.join("skin.wmz");
-        std::fs::write(&skin, b"the skin").unwrap();
-        let read = |path: &std::path::Path| std::fs::read(path).unwrap();
-
-        // A plain copy, and the source stays put.
-        let plain = root.join("plain/skins");
-        assert_eq!(place_skin(&skin, &plain).unwrap(), "skin.wmz");
-        assert_eq!(read(&plain.join("skin.wmz")), b"the skin");
-
-        // The folder the skin is already in: nothing to write.
-        assert_eq!(place_skin(&skin, &real).unwrap(), "skin.wmz");
-        assert_eq!(read(&skin), b"the skin");
-
-        // A linked skins folder is refused, even though the source is there.
-        let linked = root.join("linked");
-        std::fs::create_dir_all(&linked).unwrap();
-        symlink(&real, linked.join("skins")).unwrap();
-        assert!(place_skin(&skin, &linked.join("skins")).is_err());
-        assert_eq!(read(&skin), b"the skin");
-
-        // So is a linked config folder above it.
-        symlink(&root, root.join("config")).unwrap();
-        assert!(place_skin(&skin, &root.join("config/real")).is_err());
-        assert_eq!(read(&skin), b"the skin");
-
-        // A link where the copy goes is replaced; what it points at is not
-        // touched, however that file is reached.
-        let other = root.join("other.wmz");
-        std::fs::write(&other, b"another skin").unwrap();
-        let folder = root.join("links");
-        std::fs::create_dir_all(&folder).unwrap();
-        symlink(&other, folder.join("skin.wmz")).unwrap();
-        assert_eq!(place_skin(&skin, &folder).unwrap(), "skin.wmz");
-        assert_eq!(read(&other), b"another skin");
-        assert!(
-            !std::fs::symlink_metadata(folder.join("skin.wmz"))
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-
-        // A link back to the source itself: nothing to write.
-        let looped = root.join("looped");
-        std::fs::create_dir_all(&looped).unwrap();
-        symlink(&skin, looped.join("skin.wmz")).unwrap();
-        assert_eq!(place_skin(&skin, &looped).unwrap(), "skin.wmz");
-        assert_eq!(read(&skin), b"the skin");
-
-        // A hard link shares the source's contents; it is replaced too.
-        let hard = root.join("hard");
-        std::fs::create_dir_all(&hard).unwrap();
-        std::fs::hard_link(&skin, hard.join("skin.wmz")).unwrap();
-        assert_eq!(place_skin(&skin, &hard).unwrap(), "skin.wmz");
-        assert_eq!(read(&skin), b"the skin");
-        assert_eq!(read(&hard.join("skin.wmz")), b"the skin");
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// A Windows Media Player skin is listed under its own title, even from
-    /// a `.zip`, and choosing one says what it lacks before it has loaded.
-    #[test]
-    fn the_mini_player_settings_give_each_kind_of_skin_its_own_source() {
-        let (ctx, mut app) = accessible_app("settings-media-player-skin");
-        let folder = app.dirs.skins_dir();
-        std::fs::create_dir_all(&folder).unwrap();
-        let archive = crate::skin::zip::write(&[(
-            "chrome.wms",
-            br#"<VIEW width="30" height="20"/>"#.as_slice(),
-            false,
-        )]);
-        std::fs::write(folder.join("chrome.zip"), archive).unwrap();
-        // The folder is listed on another thread.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut text = settings_text(&ctx, &mut app, "Mini player");
-        while !text.iter().any(|text| text == "chrome") {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the skins were not listed: {text:?}"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            text = settings_text(&ctx, &mut app, "Mini player");
-        }
-        let count = |wanted: &str| text.iter().filter(|text| *text == wanted).count();
-        assert_eq!(count("Winamp"), 1);
-        assert_eq!(count("Windows Media Player"), 1);
-        assert_eq!(count("chrome"), 1);
-        assert_eq!(count("Skin Museum"), 1);
-        assert_eq!(count("Windows Media Player Skins Collection"), 1);
-        // One folder holds both kinds, so one button opens it, on its own row.
-        assert_eq!(count("Skins folder"), 1);
-        assert_eq!(count("Open folder"), 1);
-        let _ = std::fs::remove_dir_all(folder.parent().unwrap().parent().unwrap());
-    }
-
     /// The About card ends with the author's credit, and the name opens
     /// the author's website.
     #[test]
@@ -4458,16 +4160,6 @@ mod tests {
     #[test]
     fn settings_search_never_shows_a_section_for_an_unavailable_row() {
         let (ctx, mut app) = accessible_app("settings-search-availability");
-        let text = settings_text(&ctx, &mut app, "Show in taskbar");
-        assert_eq!(text.iter().any(|text| text == "Mini player"), cfg!(windows));
-        if !cfg!(windows) {
-            assert!(text.iter().any(|text| text.starts_with("No settings for")));
-        }
-        app.demo_windows_controls = true;
-        let text = settings_text(&ctx, &mut app, "Show in taskbar");
-        assert!(text.iter().any(|text| text == "Mini player"));
-        assert!(text.iter().any(|text| text == "Show in taskbar"));
-
         app.settings.web_client_id = None;
         app.web_app = None;
         let text = settings_text(&ctx, &mut app, "Spotifast registered");
@@ -4937,45 +4629,6 @@ mod tests {
         app.backend.shutdown();
     }
 
-    #[test]
-    fn the_windows_taskbar_setting_keeps_its_choice_without_closing_settings() {
-        use egui::accesskit::Role;
-        let (ctx, mut app) = accessible_app("winamp-taskbar-setting");
-        app.open(Page::Settings);
-        accessible_frame(&ctx, &mut app, vec![]);
-        let tree = accessible_frame(&ctx, &mut app, vec![]);
-        if !cfg!(windows) {
-            assert!(
-                !tree
-                    .nodes
-                    .iter()
-                    .any(|(_, node)| node.label() == Some("Show the mini player in taskbar"))
-            );
-        }
-        app.demo_windows_controls = true;
-        for _ in 0..4 {
-            accessible_frame(&ctx, &mut app, vec![]);
-        }
-        let tree = accessible_frame(&ctx, &mut app, vec![]);
-        let control = accessible_node(&tree, "Show the mini player in taskbar", Role::CheckBox);
-        accessible_frame(
-            &ctx,
-            &mut app,
-            vec![accessible_action(
-                control,
-                egui::accesskit::Action::Click,
-                None,
-            )],
-        );
-        assert!(!app.settings.winamp_show_taskbar);
-        assert!(!app.settings.winamp_window && !app.switch_intent);
-        let path = app.dirs.config.join("winamp-taskbar-choice.json");
-        app.settings.save(&path);
-        app.settings = Settings::load(&path);
-        assert!(!app.settings.winamp_show_taskbar);
-        app.backend.shutdown();
-    }
-
     /// Linux offers middle-click autoscroll as a switch that starts off and
     /// is saved; Windows always autoscrolls and macOS never does, so neither
     /// shows the row.
@@ -5018,47 +4671,6 @@ mod tests {
         app.settings.save(&path);
         app.settings = Settings::load(&path);
         assert!(app.settings.middle_click_autoscroll);
-        app.backend.shutdown();
-    }
-
-    /// X11 can hide the mini player's taskbar entry, so it gets the same row
-    /// and menu item as Windows; Wayland and macOS never show them.
-    #[test]
-    fn the_taskbar_setting_follows_the_window_backend() {
-        let (ctx, mut app) = accessible_app("x11-taskbar-setting");
-        app.taskbar_hiding_supported = true;
-        let text = settings_text(&ctx, &mut app, "Show in taskbar");
-        assert!(text.iter().any(|text| text == "Mini player"));
-        assert!(text.iter().any(|text| text == "Show in taskbar"));
-
-        app.taskbar_hiding_supported = false;
-        let text = settings_text(&ctx, &mut app, "Show in taskbar");
-        assert_eq!(text.iter().any(|text| text == "Mini player"), cfg!(windows));
-        app.backend.shutdown();
-    }
-
-    #[test]
-    fn wayland_on_top_setting_is_disabled_and_does_not_look_active() {
-        use egui::accesskit::{Role, Toggled};
-        let (ctx, mut app) = accessible_app("wayland-on-top");
-        app.window_level_supported = false;
-        app.settings.winamp_on_top = true;
-        app.open(Page::Settings);
-        accessible_frame(&ctx, &mut app, vec![]);
-        let tree = accessible_frame(&ctx, &mut app, vec![]);
-        let id = accessible_node(&tree, "Always on top", Role::CheckBox);
-        let node = &tree
-            .nodes
-            .iter()
-            .find(|(node_id, _)| *node_id == id)
-            .unwrap()
-            .1;
-        assert!(node.is_disabled());
-        assert_eq!(node.toggled(), Some(Toggled::False));
-        assert!(
-            app.settings.winamp_on_top,
-            "the saved preference is preserved"
-        );
         app.backend.shutdown();
     }
 
@@ -5702,67 +5314,6 @@ mod tests {
         view_frame(ctx, app, events, crate::ui::search::show)
     }
 
-    /// Beside an artist line shorter than the title, the player bar's empty
-    /// space is the visualizer's control (#979), and the words keep their
-    /// links.
-    #[test]
-    fn a_click_beside_the_playing_artist_changes_the_visualizer() {
-        use crate::player::{LocalState, LocalTrack, Playback};
-
-        let (ctx, mut app) = accessible_app("player-bar-beside-artist");
-        app.settings.player_bar_vis_click = true;
-        app.local = LocalState {
-            playback: Playback::Playing,
-            track: Some(LocalTrack {
-                uri: "spotify:track:long".into(),
-                title: "A song with a rather long title".into(),
-                artists: vec![ArtistRef {
-                    id: Some("short".into()),
-                    name: "Abba".into(),
-                    uri: Some("spotify:artist:short".into()),
-                }],
-                duration_ms: 200_000,
-                ..LocalTrack::default()
-            }),
-            ..LocalState::default()
-        };
-        let view = crate::ui::player_bar::show;
-        view_frame(&ctx, &mut app, vec![], view);
-        let text = view_frame(&ctx, &mut app, vec![], view);
-        let rect = |label: &str| text.iter().find(|(text, _)| text == label).unwrap().1;
-        let title = rect("A song with a rather long title");
-        let artist = rect("Abba");
-        assert!(title.right() > artist.right() + 40.0);
-
-        app.actions.clear();
-        let beside = egui::pos2((artist.right() + title.right()) / 2.0, artist.center().y);
-        view_frame(
-            &ctx,
-            &mut app,
-            pointer_click(beside, egui::PointerButton::Primary),
-            view,
-        );
-        assert!(
-            matches!(app.actions.as_slice(), [Action::CyclePlayerBarVis]),
-            "{:?}",
-            app.actions
-        );
-
-        app.actions.clear();
-        view_frame(
-            &ctx,
-            &mut app,
-            pointer_click(artist.center(), egui::PointerButton::Primary),
-            view,
-        );
-        assert!(
-            matches!(app.actions.as_slice(), [Action::Open(Page::Artist(id))] if id == "short"),
-            "{:?}",
-            app.actions
-        );
-        app.backend.shutdown();
-    }
-
     #[test]
     fn playing_artist_links_work_before_web_metadata_and_after_focus_returns() {
         use crate::player::{LocalState, LocalTrack, Playback};
@@ -6059,194 +5610,6 @@ mod tests {
             (heading - album).abs() < 1.0,
             "album heading at {heading}, album names at {album}"
         );
-    }
-
-    /// The player bar's visualizer draws only when chosen and while the
-    /// song plays on this computer, and asks for frames only then.
-    #[cfg(feature = "demo")]
-    #[test]
-    fn the_player_bar_visualizer_moves_only_when_chosen_and_playing() {
-        use crate::settings::PlayerBarVis;
-        let (ctx, mut app) = accessible_app("player-bar-vis");
-        let draw = |app: &mut App| {
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1280.0, 800.0),
-                    )),
-                    ..Default::default()
-                },
-                |ui| crate::ui::player_bar::show(app, ui),
-            );
-            output.textures_delta.clear();
-            output
-        };
-        // Both draw an untextured mesh; the waveform also strokes its line
-        // in many short runs.
-        let lines = |output: &egui::FullOutput| {
-            output
-                .shapes
-                .iter()
-                .filter(|shape| matches!(&shape.shape, egui::Shape::Path(_)))
-                .count()
-        };
-        let drawn = |output: &egui::FullOutput| {
-            output.shapes.iter().any(|shape| {
-                matches!(&shape.shape, egui::Shape::Mesh(mesh)
-                    if mesh.texture_id == egui::TextureId::default() && !mesh.vertices.is_empty())
-            })
-        };
-        let spectrum = |output: &egui::FullOutput| drawn(output) && lines(output) < 20;
-        let waveform = |output: &egui::FullOutput| drawn(output) && lines(output) >= 20;
-        let wants_frames = |output: &egui::FullOutput| {
-            output
-                .viewport_output
-                .get(&egui::ViewportId::ROOT)
-                .is_some_and(|viewport| {
-                    viewport.repaint_delay < std::time::Duration::from_millis(100)
-                })
-        };
-
-        // #given a song playing here with the spectrum chosen
-        apply_flags(&mut app, None, Some("player-bar-spectrum"));
-        draw(&mut app);
-        let output = draw(&mut app);
-        assert!(spectrum(&output), "the spectrum is drawn");
-        assert!(wants_frames(&output));
-
-        // #when the waveform is chosen
-        app.settings.player_bar_vis = PlayerBarVis::Waveform;
-        let output = draw(&mut app);
-        assert!(waveform(&output), "the waveform is drawn");
-        assert!(!spectrum(&output));
-
-        // #when it is turned off
-        app.settings.player_bar_vis = PlayerBarVis::Off;
-        let output = draw(&mut app);
-        assert!(!drawn(&output));
-        assert!(!wants_frames(&output), "nothing to animate");
-
-        // #when the song is paused
-        app.settings.player_bar_vis = PlayerBarVis::Waveform;
-        app.local.playback = crate::player::Playback::Paused;
-        let output = draw(&mut app);
-        assert!(!waveform(&output), "a paused song is still");
-        app.backend.shutdown();
-    }
-
-    /// A click on the player bar's empty space moves the visualizer to its
-    /// next mode, and a click on a control does not.
-    #[cfg(feature = "demo")]
-    #[test]
-    fn clicking_the_player_bars_empty_space_cycles_the_visualizer() {
-        let (ctx, mut app) = accessible_app("player-bar-cycle");
-        let draw = |app: &mut App, events: Vec<egui::Event>| {
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1280.0, 800.0),
-                    )),
-                    events,
-                    ..Default::default()
-                },
-                |ui| crate::ui::player_bar::show(app, ui),
-            );
-            output.textures_delta.clear();
-        };
-        draw(&mut app, vec![]);
-        // The margin at the bar's left edge, beside the cover.
-        let empty = egui::pos2(6.0, 796.0);
-        draw(&mut app, pointer_click(empty, egui::PointerButton::Primary));
-        assert!(
-            app.actions
-                .iter()
-                .any(|action| matches!(action, Action::CyclePlayerBarVis))
-        );
-
-        app.actions.clear();
-        app.settings.player_bar_vis_click = false;
-        draw(&mut app, pointer_click(empty, egui::PointerButton::Primary));
-        assert!(
-            !app.actions
-                .iter()
-                .any(|action| matches!(action, Action::CyclePlayerBarVis))
-        );
-        app.settings.player_bar_vis_click = true;
-
-        // The play button, in the middle of the bar, is still the play button.
-        app.actions.clear();
-        let play = egui::pos2(640.0, 800.0 - crate::theme::PLAYER_BAR_HEIGHT / 2.0 - 10.0);
-        draw(&mut app, pointer_click(play, egui::PointerButton::Primary));
-        assert!(
-            !app.actions
-                .iter()
-                .any(|action| matches!(action, Action::CyclePlayerBarVis)),
-            "{:?}",
-            app.actions
-        );
-        app.backend.shutdown();
-    }
-
-    /// The empty space's tooltip belongs to the empty space: once shown, it
-    /// closes when the pointer moves onto a control drawn over the bar.
-    #[cfg(feature = "demo")]
-    #[test]
-    fn the_visualizer_tooltip_stays_off_the_player_bar_controls() {
-        let (ctx, mut app) = accessible_app("player-bar-tooltip");
-        ctx.global_style_mut(|style| style.interaction.tooltip_delay = 0.0);
-        let mut time = 0.0;
-        let mut draw = |app: &mut App, pos: egui::Pos2| {
-            time += 1.0;
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1280.0, 800.0),
-                    )),
-                    time: Some(time),
-                    events: vec![egui::Event::PointerMoved(pos)],
-                    ..Default::default()
-                },
-                |ui| crate::ui::player_bar::show(app, ui),
-            );
-            output.textures_delta.clear();
-            fn texts(shape: &egui::epaint::Shape, found: &mut Vec<String>) {
-                match shape {
-                    egui::epaint::Shape::Text(text) => found.push(text.galley.job.text.clone()),
-                    egui::epaint::Shape::Vec(shapes) => {
-                        shapes.iter().for_each(|shape| texts(shape, found));
-                    }
-                    _ => {}
-                }
-            }
-            let mut found = Vec::new();
-            output
-                .shapes
-                .iter()
-                .for_each(|clipped| texts(&clipped.shape, &mut found));
-            found
-        };
-        let tip = "Click to change the visualizer";
-
-        // #given the tooltip shown over the empty margin beside the cover
-        let empty = egui::pos2(6.0, 796.0);
-        for _ in 0..3 {
-            draw(&mut app, empty);
-        }
-        assert!(draw(&mut app, empty).iter().any(|text| text == tip));
-
-        // #when the pointer moves onto the play button
-        let play = egui::pos2(640.0, 800.0 - crate::theme::PLAYER_BAR_HEIGHT / 2.0 - 10.0);
-        for _ in 0..3 {
-            draw(&mut app, play);
-        }
-
-        // #then the tooltip is gone
-        let shown = draw(&mut app, play);
-        assert!(!shown.iter().any(|text| text == tip), "{shown:?}");
-        app.backend.shutdown();
     }
 
     #[test]
@@ -7551,202 +6914,6 @@ mod tests {
         output.textures_delta.clear();
     }
 
-    /// The rolled-up player keeps the real analyser, its repaint cadence,
-    /// and its local-audio-only behaviour inside the skin's tiny display.
-    #[cfg(feature = "demo")]
-    #[test]
-    fn the_collapsed_winamp_visualizer_draws_and_repaints_only_while_moving() {
-        use crate::settings::VisMode;
-        let (ctx, mut app) = accessible_app("winamp-shade-vis");
-        app.backend.set_offline(true);
-        apply_flags(&mut app, None, Some("winamp-bars,shade"));
-        let mut frame = 0;
-        let mut draw = |app: &mut App| {
-            frame += 1;
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    time: Some(f64::from(frame) / 60.0),
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(550.0, 28.0),
-                    )),
-                    ..Default::default()
-                },
-                |ui| crate::ui::winamp::show(app, ui),
-            );
-            output.textures_delta.clear();
-            output
-        };
-        let display = egui::Rect::from_min_size(egui::pos2(158.0, 10.0), egui::vec2(76.0, 10.0));
-        let pixels = |output: &egui::FullOutput| {
-            output
-                .shapes
-                .iter()
-                .filter_map(|shape| match &shape.shape {
-                    egui::Shape::Rect(rect)
-                        if display.contains_rect(rect.rect) && rect.rect != display =>
-                    {
-                        Some(rect.rect)
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
-        let wants_frames = |output: &egui::FullOutput| {
-            output.viewport_output[&egui::ViewportId::ROOT].repaint_delay
-                < std::time::Duration::from_millis(100)
-        };
-        draw(&mut app);
-        let bars = draw(&mut app);
-        assert!(!pixels(&bars).is_empty(), "local sound draws compact bars");
-        assert!(
-            wants_frames(&bars),
-            "shade mode must keep the animation cadence"
-        );
-        assert!(!app.winamp.analyser.settled());
-
-        // A loading/live item can have no seek duration. That early return
-        // must still report that the visualiser is moving.
-        app.local.track.as_mut().unwrap().duration_ms = 0;
-        assert!(wants_frames(&draw(&mut app)));
-
-        app.settings.vis = VisMode::Scope;
-        let wave = draw(&mut app);
-        assert_ne!(pixels(&wave), pixels(&bars));
-        assert!(wants_frames(&wave));
-        assert!(
-            pixels(&wave)
-                .iter()
-                .any(|rect| rect.top() != pixels(&wave)[0].top())
-        );
-
-        app.local.playback = crate::player::Playback::Paused;
-        draw(&mut app);
-        let paused = draw(&mut app);
-        let flat = pixels(&paused);
-        assert!(!flat.is_empty());
-        assert!(flat.iter().all(|rect| rect.top() == flat[0].top()));
-        assert!(
-            !wants_frames(&paused),
-            "a paused scope needs no animation frames"
-        );
-
-        app.settings.vis = VisMode::Off;
-        draw(&mut app);
-        let off = draw(&mut app);
-        assert!(pixels(&off).is_empty());
-        assert!(!wants_frames(&off));
-
-        // A remote device must not display the old samples left in the tap.
-        app.local = Default::default();
-        assert!(app.now_playing().is_some_and(|now| !now.local));
-        app.settings.vis = VisMode::Bars;
-        app.winamp.analyser.reset();
-        draw(&mut app);
-        let remote = draw(&mut app);
-        assert!(pixels(&remote).is_empty());
-        assert!(!wants_frames(&remote));
-        app.backend.shutdown();
-    }
-
-    #[cfg(feature = "demo")]
-    #[test]
-    fn clicking_the_collapsed_visualizer_cycles_without_unshading_or_seeking() {
-        use crate::settings::VisMode;
-        let (ctx, mut app) = accessible_app("winamp-shade-vis-click");
-        app.backend.set_offline(true);
-        apply_flags(&mut app, None, Some("winamp-bars,shade"));
-        let draw = |app: &mut App, events: Vec<egui::Event>| {
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        crate::ui::winamp::initial_size(&app.settings, &app.winamp.skin),
-                    )),
-                    events,
-                    ..Default::default()
-                },
-                |ui| crate::ui::winamp::show(app, ui),
-            );
-            output.textures_delta.clear();
-        };
-        // The hit target scales with the skin, and remains active when off.
-        for scale in 1..=4 {
-            app.settings.skin_scale = Some(scale);
-            for mode in [VisMode::Bars, VisMode::Scope, VisMode::Off] {
-                app.settings.vis = mode;
-                draw(&mut app, Vec::new());
-                draw(&mut app, Vec::new());
-                app.actions.clear();
-                let at = egui::pos2(98.0, 7.0) * f32::from(scale);
-                draw(&mut app, pointer_click(at, egui::PointerButton::Primary));
-                assert!(matches!(app.actions.as_slice(), [Action::CycleVisualiser]));
-                assert!(app.settings.winamp_shaded);
-                assert!(!app.winamp.time_remaining);
-            }
-        }
-        app.backend.shutdown();
-    }
-
-    /// A click just past the end of the mini player's volume bar is near
-    /// the balance slider, which egui would hand it to, but it leaves the
-    /// balance alone; a click on the balance slider's own track still moves
-    /// it (#804).
-    #[cfg(feature = "demo")]
-    #[test]
-    fn a_click_beside_the_balance_slider_leaves_the_balance_centred() {
-        let (ctx, mut app) = accessible_app("winamp-balance-halo");
-        app.backend.set_offline(true);
-        apply_flags(&mut app, None, Some("winamp"));
-        let draw = |app: &mut App, events: Vec<egui::Event>| {
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(550.0, 232.0),
-                    )),
-                    events,
-                    ..Default::default()
-                },
-                |ui| app.frame_ui(ui),
-            );
-            output.textures_delta.clear();
-        };
-        draw(&mut app, Vec::new());
-        draw(&mut app, Vec::new());
-        // Two points per skin pixel. The volume bar ends at x 175 and the
-        // balance slider starts at 177, both centred on y 63.5.
-        let y = 63.5 * 2.0;
-        for x in [175.6, 176.4, 176.9] {
-            draw(
-                &mut app,
-                pointer_click(egui::pos2(x * 2.0, y), egui::PointerButton::Primary),
-            );
-            draw(&mut app, Vec::new());
-            assert_eq!(app.settings.balance, 0.0, "a click at x {x}");
-        }
-        // Just outside the slider, above and below.
-        for dy in [-8.0, 8.0] {
-            draw(
-                &mut app,
-                pointer_click(
-                    egui::pos2(200.0 * 2.0, y + dy * 2.0),
-                    egui::PointerButton::Primary,
-                ),
-            );
-            draw(&mut app, Vec::new());
-            assert_eq!(app.settings.balance, 0.0, "a click {dy} skin pixels off");
-        }
-        // The right end of the balance track.
-        draw(
-            &mut app,
-            pointer_click(egui::pos2(214.0 * 2.0, y), egui::PointerButton::Primary),
-        );
-        draw(&mut app, Vec::new());
-        assert_eq!(app.settings.balance, 1.0);
-        app.backend.shutdown();
-    }
-
     /// Every line of the sign-in card is drawn whole, without a scroll bar,
     /// in each state at the smallest main window and a usual one (#782).
     #[test]
@@ -8103,161 +7270,6 @@ mod tests {
             "zoom control should read minus, percent, plus; got - at {minus}, 100% at {}, + at {plus}",
             percent.1
         );
-        app.backend.shutdown();
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// The frame rate is a dial with detents: it stops at the rates
-    /// worth having, names the one it is on, and moving it one notch
-    /// lands on the next of them rather than somewhere in between.
-    #[test]
-    fn the_frame_rate_dial_steps_between_its_stops() {
-        let root =
-            std::env::temp_dir().join(format!("spotifast-fps-dial-test-{}", std::process::id()));
-        let dirs = AppDirs {
-            config: root.join("config"),
-            state: root.join("state"),
-            cache: root.join("cache"),
-        };
-        let ctx = egui::Context::default();
-        let waker = crate::backend::Waker::default();
-        waker.attach(&ctx);
-        let mut app = App::new(
-            &waker,
-            dirs,
-            Settings::default(),
-            AppOptions {
-                media_controls: false,
-                restore_sign_in: false,
-                tray: false,
-                autostart: false,
-            },
-        );
-        app.attach(&ctx);
-        populate(&mut app);
-        app.screen_hz = 144;
-        app.settings.visualizer_fps = 60;
-        app.open(Page::Settings);
-
-        // Read labels from the real Settings page.
-        let drawn = |app: &mut App, ctx: &egui::Context| -> Vec<String> {
-            let input = egui::RawInput {
-                // Draw the full Settings page.
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1280.0, 4000.0),
-                )),
-                ..Default::default()
-            };
-            let mut output = ctx.run_ui(input, |ui| app.frame_ui(ui));
-            output.textures_delta.clear();
-            let mut said = Vec::new();
-            fn walk(shape: &egui::epaint::Shape, said: &mut Vec<String>) {
-                match shape {
-                    egui::epaint::Shape::Text(text) => said.push(text.galley.job.text.clone()),
-                    egui::epaint::Shape::Vec(shapes) => {
-                        shapes.iter().for_each(|shape| walk(shape, said))
-                    }
-                    _ => {}
-                }
-            }
-            for clipped in &output.shapes {
-                walk(&clipped.shape, &mut said);
-            }
-            said
-        };
-
-        for _ in 0..3 {
-            let said = drawn(&mut app, &ctx);
-            assert!(
-                said.iter().any(|text| text.contains("60 fps")),
-                "the dial names the rate it is on: {said:?}"
-            );
-        }
-
-        // Every stop can be reached, and each names itself.
-        for (rate, expected) in [
-            (144, "144 fps, your screen"),
-            (0, "Uncapped"),
-            (30, "30 fps"),
-        ] {
-            app.settings.visualizer_fps = rate;
-            let said = drawn(&mut app, &ctx);
-            assert!(
-                said.iter().any(|text| text == expected),
-                "the dial on {rate} should read {expected}: {said:?}"
-            );
-        }
-        app.backend.shutdown();
-    }
-
-    /// The visualizers' frame-rate dial names the rate of the screen showing
-    /// the main window as the screen's.
-    #[test]
-    fn the_visualizer_dial_knows_the_screen() {
-        let root =
-            std::env::temp_dir().join(format!("spotifast-screen-dial-test-{}", std::process::id()));
-        let dirs = AppDirs {
-            config: root.join("config"),
-            state: root.join("state"),
-            cache: root.join("cache"),
-        };
-        let ctx = egui::Context::default();
-        let waker = crate::backend::Waker::default();
-        waker.attach(&ctx);
-        let mut app = App::new(
-            &waker,
-            dirs,
-            Settings::default(),
-            AppOptions {
-                media_controls: false,
-                restore_sign_in: false,
-                tray: false,
-                autostart: false,
-            },
-        );
-        app.attach(&ctx);
-        populate(&mut app);
-        app.open(Page::Settings);
-
-        // Read labels from the real Settings page.
-        let drawn = |app: &mut App, ctx: &egui::Context| -> Vec<String> {
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1280.0, 4000.0),
-                )),
-                ..Default::default()
-            };
-            let mut output = ctx.run_ui(input, |ui| app.frame_ui(ui));
-            output.textures_delta.clear();
-            let mut said = Vec::new();
-            fn walk(shape: &egui::epaint::Shape, said: &mut Vec<String>) {
-                match shape {
-                    egui::epaint::Shape::Text(text) => said.push(text.galley.job.text.clone()),
-                    egui::epaint::Shape::Vec(shapes) => {
-                        shapes.iter().for_each(|shape| walk(shape, said))
-                    }
-                    _ => {}
-                }
-            }
-            for clipped in &output.shapes {
-                walk(&clipped.shape, &mut said);
-            }
-            said
-        };
-
-        app.screen_hz = 165;
-        app.settings.visualizer_fps = 165;
-        let mut said = Vec::new();
-        for _ in 0..3 {
-            said = drawn(&mut app, &ctx);
-        }
-        assert!(
-            said.iter().any(|text| text == "165 fps, your screen"),
-            "the dial names the window's screen: {said:?}"
-        );
-
         app.backend.shutdown();
         let _ = std::fs::remove_dir_all(root);
     }
@@ -8734,7 +7746,6 @@ mod tests {
                 "Local files",
                 "Audio cache",
                 "Equalizer",
-                "Player bar visualizer",
             ] {
                 let text = settings_text(&ctx, &mut app, title);
                 assert_eq!(
@@ -8791,11 +7802,12 @@ mod tests {
         let (ctx, mut app) = accessible_app("soloist-processing");
         app.settings.soloist_enabled = true;
         app.soloist_audio = true;
-        for title in ["Equalizer", "Player bar visualizer"] {
+        {
+            let title = "Equalizer";
             let text = settings_text(&ctx, &mut app, title);
             // Windows can observe the owned process but cannot apply EQ to
-            // its audible output. Keep the visualizers without promising EQ.
-            let supported = title != "Equalizer" || !cfg!(target_os = "windows");
+            // its audible output.
+            let supported = !cfg!(target_os = "windows");
             assert_eq!(
                 text.iter().filter(|label| *label == title).count() > 1,
                 supported,
@@ -8812,7 +7824,6 @@ mod tests {
         }
         app.soloist_audio = false;
         assert!(!app.audio_processing_available());
-        assert!(!app.visualizers_available());
         app.backend.shutdown();
     }
 
@@ -8932,12 +7943,8 @@ mod tests {
         );
 
         app.soloist_audio = true;
-        assert!(app.visualizer_sounding(app.now_playing().as_ref()));
-        assert_eq!(app.visualizer_lag(), 0);
         app.selected_device = Some("someone-elses-soloist".into());
         app.remote.as_mut().unwrap().state.device = app.devices.last().cloned();
-        assert!(!app.visualizer_sounding(app.now_playing().as_ref()));
-        assert_eq!(app.visualizer_lag(), crate::vis::LAG);
         accessible_frame(&ctx, &mut app, vec![]);
         let tree = accessible_frame(&ctx, &mut app, vec![]);
         assert!(!app.targets_own_soloist());

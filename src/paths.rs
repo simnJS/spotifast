@@ -140,11 +140,6 @@ impl AppDirs {
         self.config.join("settings.json")
     }
 
-    /// Winamp skins the listener has added, as `.wsz` files or folders.
-    pub fn skins_dir(&self) -> PathBuf {
-        self.config.join("skins")
-    }
-
     pub fn session_file(&self) -> PathBuf {
         self.state.join("session.json")
     }
@@ -196,11 +191,6 @@ impl AppDirs {
 
     pub fn art_cache_dir(&self) -> PathBuf {
         self.cache.join("art")
-    }
-
-    /// Pictures of the installed skins, for their cards in Settings.
-    pub fn skin_preview_dir(&self) -> PathBuf {
-        self.cache.join("skin-previews")
     }
 
     pub fn lyrics_cache_dir(&self) -> PathBuf {

@@ -79,49 +79,6 @@ pub struct HomeSettings {
     pub recommendations: HomeShelfSettings,
 }
 
-/// What moves behind the player bar's controls.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PlayerBarVis {
-    #[default]
-    Off,
-    Spectrum,
-    Waveform,
-}
-
-impl PlayerBarVis {
-    /// The mode a click on the player bar moves to: spectrum, waveform,
-    /// then off, as Winamp's visualizer cycles.
-    pub fn next(self) -> Self {
-        match self {
-            Self::Off => Self::Spectrum,
-            Self::Spectrum => Self::Waveform,
-            Self::Waveform => Self::Off,
-        }
-    }
-}
-
-/// Mini-player visualizer mode.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum VisMode {
-    #[default]
-    Bars,
-    Scope,
-    Off,
-}
-
-impl VisMode {
-    /// Next mode in the display's click cycle.
-    pub fn next(self) -> Self {
-        match self {
-            Self::Bars => Self::Scope,
-            Self::Scope => Self::Off,
-            Self::Off => Self::Bars,
-        }
-    }
-}
-
 /// The interface language: the operating system's, or one chosen in Settings.
 ///
 /// Stored as `"system"` or a locale tag such as `"es"` or `"pt-BR"`. A file
@@ -313,13 +270,6 @@ pub struct Settings {
     pub home: HomeSettings,
     /// Tint the interface with the colour of the playing album's art.
     pub accent_from_art: bool,
-    /// A spectrum or waveform of the playing song behind the player bar.
-    pub player_bar_vis: PlayerBarVis,
-    /// Allow clicks on the player bar background to cycle visualizer modes.
-    pub player_bar_vis_click: bool,
-    /// How many frames a second the player bar's visualizer and the mini
-    /// player's analyser draw; 0 is uncapped.
-    pub visualizer_fps: u32,
     /// Last local volume, 0..=65535.
     pub volume: u16,
     /// Whether the library sidebar is visible.
@@ -380,31 +330,9 @@ pub struct Settings {
     pub library_by_you: bool,
     /// Interface zoom, egui's zoom factor; Ctrl+plus/minus changes it.
     pub zoom: f32,
-    /// The Winamp window is open.
-    pub winamp_window: bool,
-    /// Windows and X11: keep a taskbar button while the Winamp window is visible.
-    pub winamp_show_taskbar: bool,
     /// Windows and Linux: draw Spotifast's own title bar and window buttons
     /// instead of the desktop frame.
     pub custom_titlebar: bool,
-    /// Skin file or folder name. `None` selects the built-in skin.
-    pub skin: Option<String>,
-    /// Pick a different skin each time the mini player opens; `skin` holds
-    /// the one picked.
-    pub random_skin: bool,
-    /// Screen pixels per skin pixel; `None` picks double size for the
-    /// display.
-    pub skin_scale: Option<u8>,
-    /// The Winamp window stays above other windows.
-    pub winamp_on_top: bool,
-    /// The mini player's visualiser: bars, scope, or off.
-    pub vis: VisMode,
-    /// The playlist window is open under the mini player.
-    pub playlist_open: bool,
-    /// How tall the playlist window is, in skin pixels.
-    pub playlist_height: u32,
-    /// The equalizer window is open under the mini player.
-    pub eq_open: bool,
     /// The equalizer shapes local playback.
     pub eq_on: bool,
     /// The preamp, in decibels, never above zero.
@@ -417,12 +345,6 @@ pub struct Settings {
     pub balance: f32,
     /// Play both channels the same.
     pub mono: bool,
-    /// The playlist window is rolled up to its title bar.
-    pub playlist_shaded: bool,
-    /// The equalizer window is rolled up to its title bar.
-    pub eq_shaded: bool,
-    /// The main window is rolled up to its title bar.
-    pub winamp_shaded: bool,
     /// Which proxy to use. Older files without this field stay on `system`.
     #[serde(default, skip_serializing_if = "proxy_mode_is_system")]
     pub proxy_mode: ProxyMode,
@@ -488,9 +410,6 @@ impl Default for Settings {
             theme_pair: crate::theme::ThemePair::default(),
             home: HomeSettings::default(),
             accent_from_art: true,
-            player_bar_vis: PlayerBarVis::Off,
-            player_bar_vis_click: true,
-            visualizer_fps: crate::frame_rate::DEFAULT_FPS,
             volume: (u16::MAX as u32 * 70 / 100) as u16,
             sidebar_visible: true,
             art_expanded: false,
@@ -520,28 +439,13 @@ impl Default for Settings {
             library_sort: std::collections::BTreeMap::new(),
             library_by_you: false,
             zoom: 1.0,
-            winamp_window: false,
-            winamp_show_taskbar: true,
             custom_titlebar: false,
-            // New installs open the mini player in our own wide skin; a file
-            // that says null keeps the classic one it chose.
-            skin: Some(crate::skin::WIDE.into()),
-            random_skin: false,
-            skin_scale: None,
-            winamp_on_top: false,
-            vis: VisMode::default(),
-            playlist_open: false,
-            playlist_height: 174,
-            eq_open: false,
             eq_on: false,
             eq_preamp_db: 0.0,
             eq_bands_db: [0.0; 10],
             eq_user_presets: Vec::new(),
             balance: 0.0,
             mono: false,
-            playlist_shaded: false,
-            eq_shaded: false,
-            winamp_shaded: false,
             proxy_mode: ProxyMode::System,
             proxy: String::new(),
             proxy_host: String::new(),
@@ -1282,51 +1186,45 @@ mod tests {
     }
 
     #[test]
-    fn older_settings_keep_the_winamp_window_closed_and_get_our_wide_skin() {
+    fn older_settings_keep_the_equalizer_defaults() {
         let settings: Settings = serde_json::from_str(r#"{"zoom": 1.2}"#).unwrap();
-        assert!(!settings.winamp_window);
-        assert!(settings.winamp_show_taskbar);
-        assert_eq!(settings.skin.as_deref(), Some(crate::skin::WIDE));
-        let chose_classic: Settings = serde_json::from_str(r#"{"skin": null}"#).unwrap();
-        assert_eq!(
-            chose_classic.skin, None,
-            "a saved choice of the classic skin stays"
-        );
-        assert_eq!(settings.skin_scale, None);
-        assert!(!settings.winamp_on_top);
-        assert_eq!(settings.vis, super::VisMode::Bars);
-        assert!(!settings.playlist_open);
-        assert_eq!(settings.playlist_height, 174);
         assert!(!settings.eq_on);
         assert_eq!(settings.eq_bands_db, [0.0; 10]);
         assert_eq!(settings.balance, 0.0);
         assert!(!settings.mono);
-        assert!(!settings.playlist_shaded);
-        assert!(!settings.eq_shaded);
-        assert!(!settings.winamp_shaded);
     }
 
+    /// Files written while the player-bar visualizer and the mini player
+    /// existed still hold their keys. They are ignored, and everything else
+    /// in the file loads.
     #[test]
-    fn the_visualiser_cycles_bars_scope_off() {
-        use super::VisMode;
-        assert_eq!(VisMode::Bars.next(), VisMode::Scope);
-        assert_eq!(VisMode::Scope.next(), VisMode::Off);
-        assert_eq!(VisMode::Off.next(), VisMode::Bars);
-        let settings: Settings = serde_json::from_str(r#"{"vis": "scope"}"#).unwrap();
-        assert_eq!(settings.vis, VisMode::Scope);
-    }
-
-    #[test]
-    fn a_chosen_skin_round_trips() {
-        let settings = Settings {
-            winamp_window: true,
-            skin: Some("Zaxon.wsz".into()),
-            skin_scale: Some(3),
-            ..Settings::default()
-        };
-        let json = serde_json::to_string(&settings).unwrap();
-        let restored: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored, settings);
+    fn old_files_with_visualizer_and_mini_player_keys_still_load() {
+        let old = r#"{
+            "volume": 4242,
+            "eq_on": true,
+            "player_bar_vis": "spectrum",
+            "player_bar_vis_click": false,
+            "visualizer_fps": 144,
+            "winamp_window": true,
+            "winamp_show_taskbar": false,
+            "skin": "Zaxon.wsz",
+            "random_skin": true,
+            "skin_scale": 3,
+            "winamp_on_top": true,
+            "vis": "scope",
+            "playlist_open": true,
+            "playlist_height": 300,
+            "eq_open": true,
+            "playlist_shaded": true,
+            "eq_shaded": true,
+            "winamp_shaded": true
+        }"#;
+        let settings: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!(settings.volume, 4242);
+        assert!(settings.eq_on);
+        let session: super::SessionState =
+            serde_json::from_str(r#"{"winamp_pos":[1.0,2.0],"window_pos":[3.0,4.0]}"#).unwrap();
+        assert_eq!(session.window_pos, Some([3.0, 4.0]));
     }
 
     #[test]
@@ -1388,55 +1286,6 @@ mod tests {
         assert!(restored.tracklist_compact);
     }
 
-    /// The main window's visualizers draw 60 frames a second until the user
-    /// picks another rate, and the rate they pick, uncapped included, is
-    /// the rate they get back.
-    #[test]
-    fn the_visualizer_frame_rate_defaults_to_60_and_round_trips() {
-        let settings: Settings = serde_json::from_str("{}").unwrap();
-        assert_eq!(settings.visualizer_fps, 60);
-        assert_eq!(Settings::default().visualizer_fps, 60);
-        for rate in [30, 144, 0] {
-            let chosen = Settings {
-                visualizer_fps: rate,
-                ..Settings::default()
-            };
-            let json = serde_json::to_string(&chosen).unwrap();
-            let restored: Settings = serde_json::from_str(&json).unwrap();
-            assert_eq!(restored.visualizer_fps, rate);
-        }
-        let old: Settings =
-            serde_json::from_value(serde_json::json!({"milkdrop_fps": 30})).unwrap();
-        assert_eq!(old.visualizer_fps, 60, "the old MilkDrop rate is ignored");
-    }
-
-    /// Files written while MilkDrop existed still hold its keys. They are
-    /// ignored, and everything else in the file loads.
-    #[test]
-    fn old_files_with_milkdrop_keys_still_load() {
-        let old = r#"{
-            "volume": 4242,
-            "milkdrop_open": true,
-            "milkdrop_seconds": 20,
-            "milkdrop_fps": 144,
-            "milkdrop_screen_hz": 144,
-            "milkdrop_scale": 2,
-            "milkdrop_fullscreen": true,
-            "milkdrop_panel_height": 300,
-            "lyrics_milkdrop": true,
-            "milkdrop_size": [800.0, 600.0]
-        }"#;
-        let settings: Settings = serde_json::from_str(old).unwrap();
-        assert_eq!(settings.volume, 4242);
-        assert_eq!(
-            settings.visualizer_fps, 60,
-            "the visualizer rate is its own"
-        );
-        let session: crate::settings::SessionState =
-            serde_json::from_str(r#"{"winamp_pos":[1.0,2.0],"milkdrop_pos":[3.0,4.0]}"#).unwrap();
-        assert_eq!(session.winamp_pos, Some([1.0, 2.0]));
-    }
-
     /// Older files keep today's colour icon, and the choice round-trips as
     /// a lowercase word (#128).
     #[test]
@@ -1458,42 +1307,6 @@ mod tests {
             let restored: Settings = serde_json::from_value(json).unwrap();
             assert_eq!(restored.tray_icon, choice);
         }
-    }
-
-    #[test]
-    fn the_player_bar_visualizer_is_opt_in_and_round_trips() {
-        use super::PlayerBarVis;
-        let settings: Settings = serde_json::from_str("{}").unwrap();
-        assert_eq!(settings.player_bar_vis, PlayerBarVis::Off);
-        assert!(settings.player_bar_vis_click);
-        let disabled = Settings {
-            player_bar_vis_click: false,
-            ..Settings::default()
-        };
-        let json = serde_json::to_string(&disabled).unwrap();
-        let restored: Settings = serde_json::from_str(&json).unwrap();
-        assert!(!restored.player_bar_vis_click);
-        for mode in [PlayerBarVis::Spectrum, PlayerBarVis::Waveform] {
-            let settings = Settings {
-                player_bar_vis: mode,
-                ..Settings::default()
-            };
-            let json = serde_json::to_string(&settings).unwrap();
-            let restored: Settings = serde_json::from_str(&json).unwrap();
-            assert_eq!(restored.player_bar_vis, mode);
-        }
-        let spectrum: Settings = serde_json::from_str(r#"{"player_bar_vis":"spectrum"}"#).unwrap();
-        assert_eq!(spectrum.player_bar_vis, PlayerBarVis::Spectrum);
-        assert_eq!(PlayerBarVis::Off.next(), PlayerBarVis::Spectrum);
-        assert_eq!(PlayerBarVis::Spectrum.next(), PlayerBarVis::Waveform);
-        assert_eq!(PlayerBarVis::Waveform.next(), PlayerBarVis::Off);
-    }
-
-    #[test]
-    fn older_settings_keep_the_chosen_skin() {
-        let settings: Settings = serde_json::from_str(r#"{"skin":"A.wsz"}"#).unwrap();
-        assert!(!settings.random_skin);
-        assert_eq!(settings.skin.as_deref(), Some("A.wsz"));
     }
 
     #[test]
@@ -1852,8 +1665,6 @@ pub struct SessionState {
     pub queue_open: Option<bool>,
     /// Which tab the queue panel showed: `queue` or `recents`.
     pub queue_tab: Option<String>,
-    /// Last outer position of the Winamp window.
-    pub winamp_pos: Option<[f32; 2]>,
     /// The window mode fullscreen lyrics left, when the app closed while
     /// showing them. eframe restores the window full screen, so the next
     /// start returns it to this mode instead.
@@ -1966,14 +1777,12 @@ mod session_tests {
     /// window size and positions, and reads as an ordinary window.
     #[test]
     fn old_sessions_keep_their_window_geometry() {
-        let state: SessionState = serde_json::from_str(
-            r#"{"window_size":[1100.0,700.0],"window_pos":[100.0,150.0],"winamp_pos":[300.0,200.0]}"#,
-        )
-        .unwrap();
+        let state: SessionState =
+            serde_json::from_str(r#"{"window_size":[1100.0,700.0],"window_pos":[100.0,150.0]}"#)
+                .unwrap();
         assert_eq!(state.window_size, Some([1100.0, 700.0]));
         assert_eq!(state.window_pos, Some([100.0, 150.0]));
         assert!(!state.window_maximized);
-        assert_eq!(state.winamp_pos, Some([300.0, 200.0]));
     }
 
     #[test]

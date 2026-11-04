@@ -34,12 +34,12 @@ const SEARCH_FLOOR: f32 = 130.0;
 // Keep the original 80-point minimum inside the page's own toolbar.
 const SEARCH_MIN: f32 = 80.0;
 /// Everything at the right end whose width never changes: the page padding,
-/// the avatar, the gap the account menu leaves, the three icon buttons, and
+/// the avatar, the gap the account menu leaves, the settings button, and
 /// the spacing between them. The cursor stops at the left edge of the last
-/// button, so this counts three gaps, not four. The spinner and the badges
+/// button, so this counts one gap, not two. The spinner and the badges
 /// are measured on top of it because they come and go.
 const RIGHT_CONTROLS_WIDTH: f32 =
-    super::widgets::PAGE_PADDING + AVATAR_SIZE + 4.0 + 3.0 * ICON_BUTTON_SIZE + 3.0 * ITEM_SPACING;
+    super::widgets::PAGE_PADDING + AVATAR_SIZE + 4.0 + ICON_BUTTON_SIZE + ITEM_SPACING;
 
 /// What precedes the field until the bar has drawn once: the page padding,
 /// the back and forward buttons and the gaps after them.
@@ -328,11 +328,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     + badge_width(update_galley.as_ref(), UPDATE_BADGE_PADDING, labels)
             };
             let controls = RIGHT_CONTROLS_WIDTH
-                - if !app.visualizers_available() {
-                    ICON_BUTTON_SIZE + ITEM_SPACING
-                } else {
-                    0.0
-                }
                 + if !app.network_reachable {
                     ICON_BUTTON_SIZE + 4.0
                 } else {
@@ -558,21 +553,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 .clicked()
                 {
                     app.actions.push(Action::Open(Page::Settings));
-                }
-                if theme::icon_button(
-                    ui,
-                    Icon::Shrink,
-                    ICON_BUTTON_ICON,
-                    palette.secondary,
-                    palette.text,
-                    super::keys::platform_shortcut(
-                        &gettext(locale, "Mini player (Ctrl+M)"),
-                        &gettext(locale, "Mini player (Cmd+Shift+M)"),
-                    ),
-                )
-                .clicked()
-                {
-                    app.actions.push(Action::ToggleWinampWindow);
                 }
                 // A quiet spinner once the app has been at something in the
                 // background for a while, long enough that fast requests

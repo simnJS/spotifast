@@ -94,24 +94,16 @@ fastframe-dirs = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 # Windows, Now Playing on macOS. The media keys and those panels send
 # commands back, and closing the window keeps the music playing.
 fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
-# Reading installed fonts for the Winamp playlist's
-# pixel text, and the playlist face. skrifa is the parser epaint already
-# rasterizes with, and the version has to track epaint's or the binary
-# compiles two copies of it; memmap2 keeps the search for the playlist face
-# to the few pages of each font that name it. fastframe-fonts uses both.
-skrifa = "0.44"
-memmap2 = "0.9"
-# bmp is for Winamp skins, whose bitmaps are BMP files; gif is for Windows
-# Media Player skins, which are often drawn as GIFs. webp is for cover
-# URLs: Spotify's CDN sometimes serves the same cover as WebP, and without
+# webp is for cover URLs: Spotify's CDN sometimes serves the same cover as WebP, and without
 # this every size of it fails to decode and the placeholder is drawn.
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "webp", "gif"] }
-# Inflating the zip a Winamp skin comes as (src/skin/zip.rs). Already
-# compiled for reqwest's gzip support, so this adds no code to the build.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# Inflating the gzip Soloist's download comes as (src/soloist/install.rs).
+# Already compiled for reqwest's gzip support, so this adds no code to the
+# build.
 flate2 = "1"
-# Filling glyph outlines with no anti-aliasing for the Winamp playlist's
-# text (src/ui/winamp/pixel_text.rs). Already compiled for the SVG icons
-# through egui_extras and resvg, so this adds no code to the build.
+# Drawing the Windows taskbar thumbnail buttons (src/thumbbar.rs). Already
+# compiled for the SVG icons through egui_extras and resvg, so this adds no
+# code to the build.
 tiny-skia = "0.11"
 # Detect the live window backend.
 # eframe already compiles this crate.
@@ -228,10 +220,6 @@ zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-tokio-c
 # (src/appearance.rs). fastframe-now-playing's MPRIS already compiles this
 # version.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
-# Keeps the X11 mini player out of the taskbar with _NET_WM_STATE_SKIP_TASKBAR
-# (src/window.rs), which winit only offers on Windows. winit already
-# compiles this version.
-x11rb = { version = "0.13", default-features = false }
 
 [build-dependencies]
 # Compile the small macOS and Windows Soloist audio adapters.

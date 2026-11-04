@@ -21,12 +21,10 @@ pub mod search;
 pub mod settings;
 pub mod show;
 pub mod sidebar;
-pub mod skin_cards;
 mod soloist;
 pub mod topbar;
 mod update;
 pub mod widgets;
-pub mod winamp;
 
 use egui::{Align2, Color32, Context, CornerRadius, Frame, Id, Margin, Rect, Stroke, vec2};
 
@@ -40,9 +38,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let ctx = &ctx;
     keys::handle(app, ctx);
-    for path in winamp::dropped_skins(ctx) {
-        app.actions.push(Action::InstallSkin(path));
-    }
     let signed_in = app.is_connected() && app.user.is_some();
     let connecting = matches!(app.auth, AuthStatus::Connecting | AuthStatus::Starting)
         || (app.is_connected() && app.user.is_none());
