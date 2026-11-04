@@ -10,8 +10,159 @@ use std::borrow::Cow;
 
 /// A palette file from the themes directory.
 pub type CustomTheme = fastframe_theme::CustomTheme<Palette>;
+
+/// The palette Spotifast bundles on top of fastframe-theme's shared ones.
+const BUNDLED: &[(&str, &str)] = &[(
+    "Spotify.json",
+    include_str!("../assets/themes/Spotify.json"),
+)];
+
+/// Writes each bundled palette into `directory`, creating it when missing,
+/// unless something already has its name: a file the user edited, or a link,
+/// is theirs and is never touched. Files go through a temporary file and a
+/// rename, as fastframe-theme's own presets do.
+///
+/// # Errors
+///
+/// When the directory or a palette cannot be written.
+pub fn install_bundled(directory: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(directory)?;
+    for (name, contents) in BUNDLED {
+        let path = directory.join(name);
+        if std::fs::symlink_metadata(&path).is_ok() {
+            continue;
+        }
+        let temporary = directory.join(format!(".{name}.tmp"));
+        let written =
+            std::fs::write(&temporary, contents).and_then(|()| std::fs::rename(&temporary, &path));
+        if let Err(error) = written {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// A scan waiting for the bundled palettes to be written first.
+struct Install {
+    done: std::sync::mpsc::Receiver<()>,
+    directory: std::path::PathBuf,
+    selected: Vec<String>,
+    waker: fastframe_theme::Waker,
+}
+
 /// The palette files, and the Omarchy palette where the desktop has one.
-pub type Catalog = fastframe_theme::Catalog<Palette>;
+///
+/// fastframe-theme's catalogue, with the bundled palettes written into the
+/// themes folder, off the UI thread, before each scan lists it.
+#[derive(Default)]
+pub struct Catalog {
+    inner: fastframe_theme::Catalog<Palette>,
+    install: Option<Install>,
+}
+
+impl std::ops::Deref for Catalog {
+    type Target = fastframe_theme::Catalog<Palette>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for Catalog {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl Catalog {
+    /// A catalogue already holding `themes`, without touching the disk.
+    #[must_use]
+    pub fn preview(themes: Vec<CustomTheme>, follows_omarchy: bool) -> Self {
+        Self {
+            inner: fastframe_theme::Catalog::preview(themes, follows_omarchy),
+            install: None,
+        }
+    }
+
+    /// Writes the bundled palettes, then lists `directory` in the
+    /// background; both happen off the calling thread. A request made while
+    /// the palettes are being written replaces the waiting one.
+    pub fn start(
+        &mut self,
+        directory: std::path::PathBuf,
+        selected: impl IntoIterator<Item = String>,
+        waker: &fastframe_theme::Waker,
+    ) {
+        let selected: Vec<String> = selected.into_iter().collect();
+        if let Some(install) = &mut self.install {
+            install.directory = directory;
+            install.selected = selected;
+            install.waker = waker.clone();
+            return;
+        }
+        let (sender, done) = std::sync::mpsc::channel();
+        let target = directory.clone();
+        let wake = waker.clone();
+        let spawned = std::thread::Builder::new()
+            .name("spotifast-bundled-themes".to_owned())
+            .spawn(move || {
+                if let Err(error) = install_bundled(&target) {
+                    log::warn!("unable to install the bundled palettes: {error}");
+                }
+                if sender.send(()).is_ok() {
+                    wake.wake();
+                }
+            });
+        match spawned {
+            Ok(_) => {
+                self.install = Some(Install {
+                    done,
+                    directory,
+                    selected,
+                    waker: waker.clone(),
+                });
+            }
+            Err(error) => {
+                log::warn!("unable to start the bundled palette installer: {error}");
+                self.inner.start(directory, selected, waker);
+            }
+        }
+    }
+
+    /// Starts the waiting scan once the bundled palettes are written, and
+    /// takes a finished scan's result. Returns `true` when the catalogue
+    /// changed.
+    pub fn poll(&mut self) -> bool {
+        if let Some(install) = &self.install {
+            // A closed channel means the writer ended without reporting.
+            if matches!(
+                install.done.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ) {
+                return false;
+            }
+            if let Some(install) = self.install.take() {
+                self.inner
+                    .start(install.directory, install.selected, &install.waker);
+            }
+        }
+        self.inner.poll()
+    }
+
+    /// Whether the bundled palettes or a scan are still being worked on.
+    pub fn loading(&self) -> bool {
+        self.install.is_some() || self.inner.loading()
+    }
+
+    /// What to say under the theme setting, given the selected filename.
+    pub fn status(&self, selected: Option<&str>) -> Option<fastframe_theme::Status> {
+        if self.install.is_some() {
+            return Some(fastframe_theme::Status::Loading);
+        }
+        self.inner.status(selected)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Palette {
@@ -1028,6 +1179,81 @@ pub fn subtle(ui: &mut egui::Ui, palette: &Palette, label: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "spotifast-theme-{name}-{:016x}",
+            rand::random::<u64>()
+        ))
+    }
+
+    #[test]
+    fn the_bundled_spotify_palette_is_a_valid_dark_one() {
+        // #given the file shipped in the binary
+        let (name, text) = BUNDLED[0];
+
+        // #when it is read as a palette
+        let palette: Palette = fastframe_theme::parse_palette(text).expect("a valid palette");
+
+        // #then it is the dark Spotify one
+        assert_eq!(name, "Spotify.json");
+        assert!(palette.dark);
+        assert_eq!(palette.window, Color32::from_rgb(0, 0, 0));
+        assert_eq!(palette.accent, Color32::from_rgb(0x1e, 0xd7, 0x60));
+        assert_eq!(palette.overlay, Color32::from_rgb(0x28, 0x28, 0x28));
+    }
+
+    #[test]
+    fn bundled_palettes_are_written_when_missing_and_never_overwritten() {
+        // #given a themes folder that does not exist yet
+        let directory = scratch("install").join("themes");
+
+        // #when the bundled palettes are installed
+        install_bundled(&directory).expect("installed");
+
+        // #then Spotify.json is there, whole
+        let path = directory.join("Spotify.json");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            include_str!("../assets/themes/Spotify.json")
+        );
+
+        // #when the user edits it and the app starts again
+        std::fs::write(&path, "{\"base\":\"dark\",\"colors\":{}}").unwrap();
+        install_bundled(&directory).expect("installed again");
+
+        // #then their file is kept
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"base\":\"dark\",\"colors\":{}}"
+        );
+        let _ = std::fs::remove_dir_all(directory.parent().unwrap());
+    }
+
+    #[test]
+    fn a_fresh_launch_lists_spotify_after_the_scan() {
+        // #given a catalogue started on an empty themes folder
+        let directory = scratch("scan").join("themes");
+        let mut catalog = Catalog::default();
+        catalog.start(
+            directory.clone(),
+            Vec::new(),
+            &fastframe_theme::Waker::default(),
+        );
+        assert!(catalog.loading());
+
+        // #when the install and the scan finish
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while catalog.loading() && std::time::Instant::now() < deadline {
+            catalog.poll();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        // #then Spotify is a listed dark palette
+        let spotify = catalog.find("Spotify.json").expect("Spotify is listed");
+        assert!(spotify.palette.dark);
+        let _ = std::fs::remove_dir_all(directory.parent().unwrap());
+    }
 
     /// The logo drawn in the app is the app icon's own picture, not a
     /// disc in the theme's accent colour: it uploads the icon's pixels.
