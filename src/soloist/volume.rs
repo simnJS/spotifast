@@ -6,7 +6,9 @@ use serde_json::Value;
 use std::time::{Duration, Instant};
 
 /// How long a restored level may go unconfirmed before it is asked for again.
-const RESTORE_RETRY: Duration = Duration::from_secs(2);
+/// Never longer than the lead that holds it, or a report slips in between.
+const RESTORE_RETRY: Duration = Duration::from_millis(1000);
+const _: () = assert!(RESTORE_RETRY.as_millis() <= super::audio::LEAD_HOLD.as_millis());
 /// How many times a player taking commands may ignore it before its level stands.
 const RESTORE_TRIES: u32 = 5;
 
@@ -57,7 +59,14 @@ impl ListeningVolume {
                 }
             }
         }
-        (None, output.remember(percent))
+        // Only a real change is a listening level; a snapshot at a track
+        // change can be a fresh stream at unity.
+        let kept = message["type"] == "volume_changed" && output.remember(percent);
+        log::debug!(
+            "Soloist reported volume {percent} in {} (remembered: {kept})",
+            message["type"].as_str().unwrap_or_default()
+        );
+        (None, kept)
     }
 }
 
@@ -258,9 +267,9 @@ mod tests {
         let now = Instant::now();
         assert_eq!(
             restore.observe(&listening(33), true, &output, now),
-            (None, true)
+            (None, false)
         );
-        assert_eq!(output.remembered(), Some(33));
+        assert_eq!(output.remembered(), None, "a snapshot is never kept");
 
         let mut restore = ListeningVolume::default();
         output.remember(70);
@@ -275,7 +284,33 @@ mod tests {
             );
         }
         assert_eq!(sent, RESTORE_TRIES as usize);
-        assert_eq!(output.remembered(), Some(33));
+        assert_eq!(output.remembered(), Some(70));
+    }
+
+    #[test]
+    fn a_snapshot_at_unity_after_a_track_change_is_not_remembered() {
+        let mut restore = ListeningVolume::default();
+        let output = OutputVolume::default();
+        let now = Instant::now();
+        assert_eq!(
+            restore.observe(&event(45), true, &output, now),
+            (None, true)
+        );
+        assert_eq!(
+            restore.observe(&listening(100), true, &output, now),
+            (None, false)
+        );
+        assert_eq!(output.remembered(), Some(45));
+        assert_eq!(
+            restore.observe(&event(30), true, &output, now),
+            (None, true)
+        );
+        assert_eq!(output.remembered(), Some(30));
+    }
+
+    #[test]
+    fn the_restore_is_asked_again_before_the_lead_runs_out() {
+        assert!(RESTORE_RETRY <= super::super::audio::LEAD_HOLD);
     }
 
     #[test]

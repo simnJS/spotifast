@@ -54,7 +54,7 @@ impl Repairs {
 
 /// How long a level set here outranks what Soloist reports. Longer than its
 /// round trip, short enough for a change made elsewhere to get through.
-const LEAD_HOLD: Duration = Duration::from_millis(1500);
+pub(super) const LEAD_HOLD: Duration = Duration::from_millis(1500);
 /// The route's level before Soloist has reported one.
 const NO_LEVEL: u8 = u8::MAX;
 
@@ -112,16 +112,28 @@ impl OutputVolume {
         let mut lead = self.0.lead.lock().unwrap_or_else(|p| p.into_inner());
         *lead = Some((percent, Instant::now() + LEAD_HOLD));
     }
-    /// Takes Soloist's level, unless it is behind what was set here.
+    /// Takes Soloist's level, unless it is behind what was set here. Returns
+    /// whether the route now plays at `percent`.
+    ///
+    /// Only a `volume_changed` event (`changed`) moves a route that has a
+    /// level. A snapshot can confirm it, or give the first one: a new stream
+    /// at a track change reports unity, which is not a request to be loud.
     #[cfg(target_os = "linux")]
-    fn report(&self, percent: u8, now: Instant) {
+    fn report(&self, percent: u8, changed: bool, now: Instant) -> bool {
         let percent = percent.min(100);
         let mut lead = self.0.lead.lock().unwrap_or_else(|p| p.into_inner());
         if lead.is_some_and(|(wanted, until)| wanted != percent && now < until) {
-            return;
+            return false;
+        }
+        if !changed && self.0.route.load(Ordering::Relaxed) != NO_LEVEL {
+            if lead.is_some_and(|(wanted, _)| wanted == percent) {
+                *lead = None;
+            }
+            return self.0.route.load(Ordering::Relaxed) == percent;
         }
         *lead = None;
         self.0.route.store(percent, Ordering::Relaxed);
+        true
     }
 }
 
@@ -354,9 +366,19 @@ impl Bridge {
                 .volume
                 .store(volume.min(100) as u8, Ordering::Relaxed);
             #[cfg(target_os = "linux")]
-            self.state
-                .route_volume
-                .report(volume.min(100) as u8, Instant::now());
+            {
+                let percent = volume.min(100) as u8;
+                let changed = message["type"] == "volume_changed";
+                let applied = self
+                    .state
+                    .route_volume
+                    .report(percent, changed, Instant::now());
+                log::debug!(
+                    "Soloist reported volume {percent} in {} (route level {})",
+                    message["type"].as_str().unwrap_or("an untyped message"),
+                    if applied { "applied" } else { "unchanged" },
+                );
+            }
         }
         if let Some(status) = message["status"].as_str() {
             match status {
@@ -414,15 +436,15 @@ mod tests {
         let volume = OutputVolume::default();
         let now = Instant::now();
         assert_eq!(volume.route_percent(), None, "nothing to play at yet");
-        volume.report(40, now);
+        volume.report(40, true, now);
         assert_eq!(volume.route_percent(), Some(40));
         volume.lead(70);
         assert_eq!(volume.route_percent(), Some(70), "with no round trip");
-        volume.report(40, now);
-        volume.report(55, now);
+        volume.report(40, true, now);
+        volume.report(55, true, now);
         assert_eq!(volume.route_percent(), Some(70));
-        volume.report(70, now);
-        volume.report(30, now);
+        volume.report(70, true, now);
+        volume.report(30, true, now);
         assert_eq!(
             volume.route_percent(),
             Some(30),
@@ -437,8 +459,27 @@ mod tests {
         let volume = OutputVolume::default();
         volume.lead(70);
         let later = Instant::now() + LEAD_HOLD + Duration::from_millis(1);
-        volume.report(40, later);
+        volume.report(40, true, later);
         assert_eq!(volume.route_percent(), Some(40));
+    }
+
+    /// A fresh stream at a track change reports unity in a snapshot; that must
+    /// not be played, while a change made elsewhere still is.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_snapshot_never_moves_the_route_but_an_event_does() {
+        let volume = OutputVolume::default();
+        let now = Instant::now();
+        assert!(
+            volume.report(35, false, now),
+            "the first level may be a snapshot's"
+        );
+        assert!(!volume.report(100, false, now));
+        assert_eq!(volume.route_percent(), Some(35));
+        assert!(volume.report(60, true, now), "a phone's change is followed");
+        assert_eq!(volume.route_percent(), Some(60));
+        assert!(!volume.report(100, false, now + LEAD_HOLD * 2));
+        assert_eq!(volume.route_percent(), Some(60));
     }
 
     /// The route is rebuilt under Soloist's running stream, which must wait
@@ -3370,7 +3411,7 @@ mod pipewire {
             }
             let silent = capture(&output).await;
             assert_eq!(silent, 0.0, "zero volume must silence the native output");
-            bridge.update(&json!({"volume":50}));
+            bridge.update(&json!({"type":"volume_changed", "volume":50}));
             tokio::time::sleep(Duration::from_millis(150)).await;
             let half = capture(&output).await;
             assert!(
@@ -3380,7 +3421,7 @@ mod pipewire {
             bridge.update(&json!({"status":"paused"}));
             tokio::time::sleep(Duration::from_millis(150)).await;
             assert!(tap.window(512, 0).iter().all(|v| *v == 0.0));
-            bridge.update(&json!({"status":"playing", "volume":100}));
+            bridge.update(&json!({"type":"volume_changed", "status":"playing", "volume":100}));
             tokio::time::sleep(Duration::from_millis(250)).await;
             let full = capture(&output).await;
             assert!((full - 0.2).abs() < 0.01, "resumed output: {full}");
