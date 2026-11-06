@@ -760,6 +760,26 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
     {
         app.actions.push(Action::ToggleLyricsPanel);
     }
+    // Spotify's "Now playing view" button sits left of Lyrics. It gives way
+    // before the transport does, as Listening activity does.
+    let left = ui.min_rect().left() - ui.spacing().item_spacing.x - (18.0 + theme::ICON_BUTTON_PAD);
+    if left - transport_right >= TRANSPORT_GAP
+        && theme::icon_button(
+            ui,
+            Icon::CirclePlay,
+            18.0,
+            if app.now_playing_panel_shown() {
+                palette.accent
+            } else {
+                palette.secondary
+            },
+            palette.text,
+            &gettext(app.locale, "Now playing view"),
+        )
+        .clicked()
+    {
+        app.actions.push(Action::ToggleNowPlayingPanel);
+    }
     // The Listening activity button is the first to go in a narrow window,
     // so it never crowds the transport.
     let left = ui.min_rect().left() - ui.spacing().item_spacing.x - (18.0 + theme::ICON_BUTTON_PAD);

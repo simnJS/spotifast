@@ -587,6 +587,238 @@ fn pathfinder_count(count: &serde_json::Value) -> Option<u64> {
     }
 }
 
+/// Spotify's persisted Pathfinder query for the Now Playing panel, as the web
+/// player of 2026-11 sends it. It answers the first artist and the song.
+const NPV_ARTIST_HASH: &str = "e1ae46a21911a3075c1aa29bf09a6c60f9a45b6a2b1132429f10ad06c299b5d7";
+/// How many contributors Spotify's own panel asks for.
+const NPV_CONTRIBUTORS: u32 = 10;
+
+/// The Now Playing panel's data for the song `track_uri` by `artist_uri`:
+/// About the artist, Credits, Related music videos and On tour. A refused
+/// query (a hash Spotify retired, for one) is an error; the panel then
+/// shows what playback already knows.
+pub async fn now_playing_view(
+    session: &Session,
+    web: &crate::api::ApiClient,
+    track_uri: &str,
+    artist_uri: &str,
+) -> anyhow::Result<crate::model::NowPlayingView> {
+    let login = session.login5().auth_token().await?;
+    let client_token = session.spclient().client_token().await?;
+    let query = serde_json::json!({
+        "operationName": "queryNpvArtist",
+        "variables": {
+            "artistUri": artist_uri,
+            "trackUri": track_uri,
+            "contributorsLimit": NPV_CONTRIBUTORS,
+            "contributorsOffset": 0,
+            "enableRelatedVideos": true,
+            "enableRelatedAudioTracks": false,
+        },
+        "extensions": {
+            "persistedQuery": {"version": 1, "sha256Hash": NPV_ARTIST_HASH}
+        }
+    });
+    let body = web
+        .partner_request(&login.access_token, &client_token, &query)
+        .await?;
+    npv_from(&body)
+}
+
+/// Reads a `queryNpvArtist` answer. Every section is optional; an answer
+/// with errors and neither union is refused.
+pub(crate) fn npv_from(body: &serde_json::Value) -> anyhow::Result<crate::model::NowPlayingView> {
+    let artist = body.pointer("/data/artistUnion");
+    let track = body.pointer("/data/trackUnion");
+    let has = |value: Option<&serde_json::Value>| value.is_some_and(|value| !value.is_null());
+    if !has(artist) && !has(track) {
+        let message = body
+            .pointer("/errors/0/message")
+            .and_then(|message| message.as_str())
+            .unwrap_or("Spotify answered without the song's details");
+        anyhow::bail!("{message}");
+    }
+    let mut view = crate::model::NowPlayingView::default();
+    if let Some(artist) = artist.filter(|artist| artist["__typename"] == "Artist") {
+        view.artist = npv_artist(artist);
+        if let Some(concerts) = artist.pointer("/goods/concerts") {
+            let items = concerts
+                .get("items")
+                .and_then(|items| items.as_array())
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            view.concerts = items.iter().filter_map(npv_concert).collect();
+            view.concerts.sort_by(|a, b| a.date.cmp(&b.date));
+            view.concerts_total = concerts.get("totalCount").and_then(pathfinder_count);
+        }
+    }
+    if let Some(track) = track.filter(|track| track["__typename"] == "Track") {
+        view.credits = npv_credits(track);
+        view.related_videos = track
+            .pointer("/relatedVideos/items")
+            .and_then(|items| items.as_array())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(npv_video)
+            .collect();
+    }
+    Ok(view)
+}
+
+fn json_text(value: &serde_json::Value, path: &str) -> Option<String> {
+    value
+        .pointer(path)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// The widest source of a Pathfinder `sources` list that `keep` accepts.
+fn widest_source(
+    sources: Option<&serde_json::Value>,
+    keep: impl Fn(u64, u64) -> bool,
+) -> Option<String> {
+    sources?
+        .as_array()?
+        .iter()
+        .filter_map(|source| {
+            let url = json_text(source, "/url")?;
+            let width = source.get("width").and_then(|w| w.as_u64()).unwrap_or(0);
+            let height = source.get("height").and_then(|h| h.as_u64()).unwrap_or(0);
+            keep(width, height).then_some((width, url))
+        })
+        .max_by_key(|(width, _)| *width)
+        .map(|(_, url)| url)
+}
+
+fn npv_artist(artist: &serde_json::Value) -> Option<crate::model::NpvArtist> {
+    let uri = json_text(artist, "/uri")?;
+    let name = json_text(artist, "/profile/name")?;
+    // Spotify's panel takes the first landscape gallery picture.
+    let gallery_image = artist
+        .pointer("/visuals/gallery/items")
+        .and_then(|items| items.as_array())
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                widest_source(item.get("sources"), |width, height| {
+                    width > 0 && width >= height
+                })
+            })
+        });
+    Some(crate::model::NpvArtist {
+        uri,
+        name,
+        verified: artist
+            .pointer("/profile/verified")
+            .and_then(|verified| verified.as_bool())
+            .unwrap_or(false),
+        monthly_listeners: artist
+            .pointer("/stats/monthlyListeners")
+            .and_then(pathfinder_count),
+        biography: json_text(artist, "/profile/biography/text")
+            .map(|text| crate::util::strip_html(&text).trim().to_string())
+            .unwrap_or_default(),
+        gallery_image,
+        avatar: widest_source(artist.pointer("/visuals/avatarImage/sources"), |_, _| true),
+    })
+}
+
+/// A ConcertV2 row. Its `location` is the venue, with the city inside.
+fn npv_concert(item: &serde_json::Value) -> Option<crate::model::Concert> {
+    let data = item.get("data").unwrap_or(item);
+    let shaped = serde_json::json!({
+        "id": data.get("id"),
+        "uri": data.get("uri"),
+        "startDateIsoString": data.get("startDateIsoString"),
+        "date": data.get("date"),
+        "venue": json_text(data, "/location/name").or_else(|| json_text(data, "/venue/name")),
+        "city": json_text(data, "/location/city"),
+    });
+    concert_from(&shaped)
+}
+
+/// Contributors grouped by name, in the order they first appear, each with
+/// every role they had, capitalised.
+fn npv_credits(track: &serde_json::Value) -> Vec<crate::model::Credit> {
+    let mut credits: Vec<crate::model::Credit> = Vec::new();
+    let items = track
+        .pointer("/creditsTrait/contributors/items")
+        .and_then(|items| items.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    for item in items {
+        let Some(name) = json_text(item, "/name") else {
+            continue;
+        };
+        let uri = json_text(item, "/uri")
+            .or_else(|| json_text(item, "/reference/uri"))
+            .filter(|uri| uri.starts_with("spotify:artist:"));
+        let url = json_text(item, "/url")
+            .or_else(|| json_text(item, "/reference/url"))
+            .filter(|url| url.starts_with("https://"));
+        let role = json_text(item, "/role").map(|role| {
+            let mut letters = role.chars();
+            letters
+                .next()
+                .map(|first| first.to_uppercase().chain(letters).collect())
+                .unwrap_or_default()
+        });
+        let credit = match credits.iter_mut().find(|credit| credit.name == name) {
+            Some(credit) => credit,
+            None => {
+                credits.push(crate::model::Credit {
+                    name,
+                    ..Default::default()
+                });
+                credits.last_mut().expect("just pushed")
+            }
+        };
+        if let Some(role) = role
+            && !credit.roles.contains(&role)
+        {
+            credit.roles.push(role);
+        }
+        credit.uri = credit.uri.take().or(uri);
+        credit.url = credit.url.take().or(url);
+    }
+    credits
+}
+
+fn npv_video(item: &serde_json::Value) -> Option<crate::model::RelatedVideo> {
+    let data = item.pointer("/trackOfVideo/data")?;
+    if data["__typename"] != "Track" {
+        return None;
+    }
+    let uri = json_text(data, "/uri").filter(|uri| uri.starts_with("spotify:track:"))?;
+    let name = json_text(data, "/name")?;
+    let cover = data.pointer("/albumOfTrack/coverArt");
+    let color = cover
+        .and_then(|cover| json_text(cover, "/extractedColors/colorDark/hex"))
+        .and_then(|hex| {
+            let hex = hex.strip_prefix('#')?;
+            let value = u32::from_str_radix(hex, 16)
+                .ok()
+                .filter(|_| hex.len() == 6)?;
+            Some([(value >> 16) as u8, (value >> 8) as u8, value as u8])
+        });
+    Some(crate::model::RelatedVideo {
+        uri,
+        name,
+        artists: data
+            .pointer("/artists/items")
+            .and_then(|items| items.as_array())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|artist| json_text(artist, "/profile/name"))
+            .collect(),
+        image: widest_source(cover.and_then(|cover| cover.get("sources")), |_, _| true),
+        color,
+    })
+}
+
 /// Whether this account has already pre-saved the album resolved from the countdown page.
 pub async fn prerelease_saved(session: &Session, uri: &str) -> anyhow::Result<bool> {
     let body = crate::prerelease::contains_request(&session.username(), uri)?;
@@ -2067,6 +2299,114 @@ fn iso8601(timestamp_ms: i64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    fn npv_sample() -> serde_json::Value {
+        serde_json::from_str(include_str!("demo/npv-artist.json")).unwrap()
+    }
+
+    #[test]
+    fn now_playing_view_reads_the_artist() {
+        let view = super::npv_from(&npv_sample()).unwrap();
+        let artist = view.artist.unwrap();
+        assert_eq!(artist.uri, "spotify:artist:0cmWgDlu9CwTgxPhf403hb");
+        assert_eq!(artist.name, "Bonobo");
+        assert!(artist.verified);
+        assert_eq!(artist.monthly_listeners, Some(4_812_345));
+        // Links lose their markup and entities are decoded.
+        assert!(artist.biography.starts_with("Simon Green, better known"));
+        assert!(artist.biography.contains("makes electronic music"));
+        assert!(artist.biography.contains(".& His"));
+        // The portrait is skipped for the first landscape picture, widest.
+        assert_eq!(
+            artist.gallery_image.as_deref(),
+            Some("https://picsum.photos/seed/spotifast-npv-gallery/1280/720")
+        );
+        assert!(artist.avatar.is_some());
+    }
+
+    #[test]
+    fn now_playing_view_reads_concerts_soonest_first() {
+        let view = super::npv_from(&npv_sample()).unwrap();
+        assert_eq!(view.concerts_total, Some(7));
+        // The one with a malformed id is left out.
+        let places: Vec<_> = view
+            .concerts
+            .iter()
+            .map(|concert| (concert.venue.as_str(), concert.city.as_str()))
+            .collect();
+        assert_eq!(
+            places,
+            [("Alexandra Palace", "London"), ("Le Zénith", "Paris")]
+        );
+        assert_eq!(
+            view.concerts[1].url(),
+            "https://open.spotify.com/concert/3rTRuXmFo1Ol1mv2K2bzYK"
+        );
+    }
+
+    #[test]
+    fn now_playing_view_groups_credits_by_name() {
+        let view = super::npv_from(&npv_sample()).unwrap();
+        let credits: Vec<_> = view
+            .credits
+            .iter()
+            .map(|credit| (credit.name.as_str(), credit.roles.join(" • ")))
+            .collect();
+        assert_eq!(
+            credits,
+            [
+                ("Bonobo", "Main artist".to_string()),
+                ("Simon Green", "Composer • Producer".to_string()),
+                ("Jordan Rakei", "Featured artist".to_string()),
+                ("Label Liner Notes", "Writer".to_string()),
+            ]
+        );
+        assert_eq!(
+            view.credits[2].uri.as_deref(),
+            Some("spotify:artist:5mbIfjqcZyxx3ExqbFTPDp")
+        );
+        assert_eq!(
+            view.credits[3].url.as_deref(),
+            Some("https://example.com/credits")
+        );
+        assert!(view.credits[1].uri.is_none() && view.credits[1].url.is_none());
+    }
+
+    #[test]
+    fn now_playing_view_reads_related_videos() {
+        let view = super::npv_from(&npv_sample()).unwrap();
+        assert_eq!(view.related_videos.len(), 2, "a NotFound entry is skipped");
+        let first = &view.related_videos[0];
+        assert_eq!(first.uri, "spotify:track:6Qw0Hn0N6X4yOyH4M9Hc4b");
+        assert_eq!(first.name, "Rosewood (Official Video)");
+        assert_eq!(first.artists, ["Bonobo"]);
+        assert_eq!(first.color, Some([0x53, 0x53, 0x53]));
+        assert_eq!(
+            first.image.as_deref(),
+            Some("https://picsum.photos/seed/spotifast-npv-video1/300/300")
+        );
+        assert_eq!(view.related_videos[1].artists.len(), 2);
+    }
+
+    #[test]
+    fn now_playing_view_tolerates_missing_sections() {
+        let body = serde_json::json!({"data": {
+            "artistUnion": {"__typename": "NotFound"},
+            "trackUnion": {"__typename": "Track"}
+        }});
+        let view = super::npv_from(&body).unwrap();
+        assert_eq!(view, crate::model::NowPlayingView::default());
+    }
+
+    #[test]
+    fn now_playing_view_refuses_an_error_answer() {
+        let body = serde_json::json!({
+            "errors": [{"message": "PersistedQueryNotFound"}],
+            "data": null
+        });
+        let error = super::npv_from(&body).unwrap_err();
+        assert_eq!(error.to_string(), "PersistedQueryNotFound");
+    }
 
     /// Pathfinder's counts arrive as strings of digits; rows without a
     /// track URI or a count are left out, and every row counts toward the

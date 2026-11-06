@@ -827,6 +827,39 @@ pub fn populate(app: &mut App) {
             app.track_cache.insert(id.clone(), track.clone());
         }
     }
+    now_playing_view(app);
+    // Closed unless a demo asks for it, so every other surface keeps the
+    // page's full width.
+    app.show_now_playing_panel = false;
+}
+
+/// The Now Playing panel's data for the playing song, read from a sample
+/// `queryNpvArtist` answer, and the song's lyrics for its preview.
+fn now_playing_view(app: &mut App) {
+    let Some(now) = app.now_playing() else {
+        return;
+    };
+    let body: serde_json::Value =
+        serde_json::from_str(include_str!("demo/npv-artist.json")).expect("sample NPV answer");
+    let mut view = crate::session_reads::npv_from(&body).expect("sample NPV answer");
+    // About the artist names the song's own artist.
+    if let (Some(artist), Some(playing)) = (view.artist.as_mut(), now.artists.first()) {
+        artist.name = playing.name.clone();
+        if let Some(uri) = &playing.uri {
+            artist.uri = uri.clone();
+        }
+    }
+    app.now_playing_views.insert(
+        now.uri.clone(),
+        crate::app::NowPlayingRead {
+            view: Loadable::Loaded(view),
+            at: Instant::now(),
+        },
+    );
+    if app.lyrics_uri.is_none() {
+        app.lyrics_uri = Some(now.uri);
+        app.lyrics = Loadable::Loaded(Some(sample_lyrics()));
+    }
 }
 
 #[cfg(feature = "demo")]
@@ -1117,8 +1150,29 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
     if let Some(page) = page.and_then(Page::decode) {
         app.open(page);
     }
+    // The Now Playing panel over Home, as it opens by default.
+    if page == Some("now-playing") {
+        app.show_now_playing_panel = true;
+    }
     for surface in show.unwrap_or("").split(',').map(str::trim) {
         match surface {
+            "now-playing" => {
+                app.show_now_playing_panel = true;
+                app.show_queue_panel = false;
+                app.show_lyrics_panel = false;
+                app.show_friends_panel = false;
+            }
+            // The panel while Spotify's answer is on the way.
+            "now-playing-loading" => {
+                app.show_now_playing_panel = true;
+                app.show_queue_panel = false;
+                if let Some(read) = app
+                    .now_playing()
+                    .and_then(|now| app.now_playing_views.get_mut(&now.uri))
+                {
+                    read.view = Loadable::Loading;
+                }
+            }
             "recommendations-denied-before"
             | "recommendations-denied"
             | "recommendations-network"

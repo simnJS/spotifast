@@ -996,6 +996,58 @@ impl Concert {
     }
 }
 
+/// What the Now Playing panel shows about a song beyond what playback
+/// already knows, from Spotify's `queryNpvArtist` answer. Each part is
+/// optional: a section without data is left out.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NowPlayingView {
+    pub artist: Option<NpvArtist>,
+    pub credits: Vec<Credit>,
+    pub related_videos: Vec<RelatedVideo>,
+    /// The artist's upcoming concerts, soonest first.
+    pub concerts: Vec<Concert>,
+    /// How many concerts Spotify knows, when it says.
+    pub concerts_total: Option<u64>,
+}
+
+/// The song's first artist, for "About the artist".
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NpvArtist {
+    pub uri: String,
+    pub name: String,
+    pub verified: bool,
+    pub monthly_listeners: Option<u64>,
+    /// The biography as plain text.
+    pub biography: String,
+    /// A landscape gallery picture, drawn across the card's top.
+    pub gallery_image: Option<String>,
+    /// The round avatar, when there is no gallery picture.
+    pub avatar: Option<String>,
+}
+
+/// One contributor to a song, with every role they had on it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Credit {
+    pub name: String,
+    pub roles: Vec<String>,
+    /// A Spotify artist, whose page opens on click.
+    pub uri: Option<String>,
+    /// Or a web page.
+    pub url: Option<String>,
+}
+
+/// A music video Spotify relates to the song. Spotifast cannot play the
+/// (DRM-protected) video, so its card plays the track's audio.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RelatedVideo {
+    pub uri: String,
+    pub name: String,
+    pub artists: Vec<String>,
+    pub image: Option<String>,
+    /// The cover's dark extracted colour, behind the picture.
+    pub color: Option<[u8; 3]>,
+}
+
 /// A radio page: the songs Spotify mixed for its seed, which are the songs
 /// its Play button plays.
 #[derive(Default)]
@@ -1388,6 +1440,11 @@ pub enum Action {
     ToggleLyricsPanel,
     /// Show or hide what friends are listening to, in the right panel.
     ToggleFriendsPanel,
+    /// Show or hide the playing song's Now Playing panel, on the right.
+    ToggleNowPlayingPanel,
+    /// Read the Now Playing panel's data for the playing song, unless it is
+    /// here or on the way.
+    RequestNowPlayingView,
     SetLyricsFullscreen(bool),
     LyricsLineShown(Option<usize>),
     FollowLyrics,

@@ -895,6 +895,12 @@ pub enum Command {
         uri: String,
         generation: u64,
     },
+    /// Read the Now Playing panel's data for a song and its first artist.
+    NowPlayingView {
+        track_uri: String,
+        artist_uri: String,
+        generation: u64,
+    },
     /// Read what friends are listening to through the streaming session,
     /// for the app's request generation.
     FriendActivity(u64),
@@ -1116,6 +1122,13 @@ pub enum Event {
         uri: String,
         generation: u64,
         result: Result<session_reads::PageMetadata, String>,
+    },
+    /// The Now Playing panel's data for `track_uri`, or why it could not be
+    /// read.
+    NowPlayingView {
+        track_uri: String,
+        generation: u64,
+        result: Result<crate::model::NowPlayingView, String>,
     },
     /// Saved shows that Spotify's metadata marks as audiobooks. librespot
     /// cannot play them, so the Podcasts shelf leaves them out.
@@ -2802,6 +2815,11 @@ impl Worker {
                 }
                 Command::UserNames(ids) => self.fetch_user_names(ids),
                 Command::PlayCounts { uri, generation } => self.fetch_play_counts(uri, generation),
+                Command::NowPlayingView {
+                    track_uri,
+                    artist_uri,
+                    generation,
+                } => self.fetch_now_playing_view(track_uri, artist_uri, generation),
                 Command::FriendActivity(generation) => self.fetch_friend_activity(generation),
                 Command::LoadLikedSongsCache { generation } => {
                     if let Some(account) = self.api.account() {
@@ -4892,6 +4910,52 @@ impl Worker {
                 log::debug!("Play counts unavailable: {error}");
             }
             send(uri, result);
+        });
+    }
+
+    /// Ask Spotify for the Now Playing panel's sections. Like play counts,
+    /// it needs the playback session and a verified Web API grant; without
+    /// them the panel shows only what playback knows.
+    fn fetch_now_playing_view(&self, track_uri: String, artist_uri: String, generation: u64) {
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        let send = move |track_uri, result| {
+            let _ = events.send(Event::NowPlayingView {
+                track_uri,
+                generation,
+                result,
+            });
+            waker.wake();
+        };
+        let Some(engine) = self.engine.clone() else {
+            return send(
+                track_uri,
+                Err("The Now Playing panel needs playback enabled.".into()),
+            );
+        };
+        let Some(web) = self.api.prerelease_http_client() else {
+            return send(
+                track_uri,
+                Err("The Now Playing panel needs a signed-in account.".into()),
+            );
+        };
+        let mut cancelled = self.session.subscribe();
+        tokio::spawn(async move {
+            let read = tokio::time::timeout(
+                Duration::from_secs(15),
+                session_reads::now_playing_view(engine.session(), &web, &track_uri, &artist_uri),
+            );
+            let result = tokio::select! {
+                biased;
+                _ = cancelled.changed() => Err("The playback session ended.".to_string()),
+                result = read => result
+                    .map_err(|_| "Spotify took too long to answer.".to_string())
+                    .and_then(|result| result.map_err(|error| format!("{error:#}"))),
+            };
+            if let Err(error) = &result {
+                log::debug!("Now Playing panel data unavailable: {error}");
+            }
+            send(track_uri, result);
         });
     }
 

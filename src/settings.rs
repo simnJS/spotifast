@@ -1679,6 +1679,10 @@ pub struct SessionState {
     pub window_maximized: bool,
     /// Whether the queue panel was open.
     pub queue_open: Option<bool>,
+    /// Whether the Now Playing panel was wanted. Sessions saved before it
+    /// existed read as `None`, which opens it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub now_playing_open: Option<bool>,
     /// Which tab the queue panel showed: `queue` or `recents`.
     pub queue_tab: Option<String>,
     /// The window mode fullscreen lyrics left, when the app closed while

@@ -188,6 +188,16 @@ struct QueueShufflePending {
     at: Instant,
 }
 
+/// The Now Playing panel's data for one song, and when it was asked for or
+/// answered.
+pub struct NowPlayingRead {
+    pub view: Loadable<crate::model::NowPlayingView>,
+    pub at: Instant,
+}
+
+/// How many songs' panel data stays in memory.
+const NOW_PLAYING_VIEWS_KEPT: usize = 64;
+
 /// The playing item as the interface sees it, whichever device plays it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NowPlaying {
@@ -640,8 +650,13 @@ pub struct App {
     pub show_queue_panel: bool,
     pub show_lyrics_panel: bool,
     /// Friend activity takes the right panel's place, so at most one of the
-    /// Queue, Lyrics and Friend activity is open.
+    /// Queue, Lyrics, Friend activity and Now Playing is open.
     pub show_friends_panel: bool,
+    /// Whether the listener wants the Now Playing panel. It shows while
+    /// something plays and no other right panel is open.
+    pub show_now_playing_panel: bool,
+    /// The Now Playing panel's data, by track URI.
+    pub now_playing_views: HashMap<String, NowPlayingRead>,
     /// What friends last played. A refresh keeps the last answer on screen.
     pub friends: Loadable<Vec<crate::session_reads::FriendActivity>>,
     friends_in_flight: bool,
@@ -1347,6 +1362,11 @@ impl App {
             show_queue_panel: session.queue_open.unwrap_or(false),
             show_lyrics_panel: false,
             show_friends_panel: false,
+            // Open by default, unless the queue took its place or the
+            // listener closed it.
+            show_now_playing_panel: !session.queue_open.unwrap_or(false)
+                && session.now_playing_open.unwrap_or(true),
+            now_playing_views: HashMap::new(),
             friends: Loadable::NotLoaded,
             friends_in_flight: false,
             friends_fetched_at: None,
@@ -3001,6 +3021,11 @@ impl App {
                     generation,
                     result,
                 } => self.receive_play_counts(uri, generation, result),
+                Event::NowPlayingView {
+                    track_uri,
+                    generation,
+                    result,
+                } => self.receive_now_playing_view(track_uri, generation, result),
                 Event::AudiobookShows(uris) => {
                     self.audiobook_shows.extend(uris);
                 }
@@ -3660,6 +3685,7 @@ impl App {
         self.artist_metadata_reads.clear();
         self.play_counts.clear();
         self.play_count_reads.clear();
+        self.now_playing_views.clear();
         self.play_count_generation = self.play_count_generation.wrapping_add(1);
         self.show_pages.clear();
         self.album_types_requested.clear();
@@ -4255,6 +4281,115 @@ impl App {
             // queue column is open; a track change must refresh them.
             self.request_lyrics();
         }
+        if self.now_playing_panel_shown() {
+            self.refresh_now_playing_panel();
+        }
+    }
+
+    /// Whether the Now Playing panel is on screen: the listener wants it,
+    /// something plays, and no other right panel took its place.
+    pub fn now_playing_panel_shown(&self) -> bool {
+        self.show_now_playing_panel
+            && !self.show_queue_panel
+            && !self.show_lyrics_panel
+            && !self.show_friends_panel
+            && self.now_playing().is_some()
+    }
+
+    /// Whether any panel holds the window's right side.
+    pub fn right_panel_open(&self) -> bool {
+        self.show_queue_panel
+            || self.show_lyrics_panel
+            || self.show_friends_panel
+            || self.now_playing_panel_shown()
+    }
+
+    /// What the Now Playing panel draws from: the song's lyrics, the queue
+    /// for Next in queue, and Spotify's panel data.
+    fn refresh_now_playing_panel(&mut self) {
+        self.request_lyrics();
+        if !matches!(self.queue, Loadable::Loaded(_)) {
+            self.refresh_queue(true);
+        }
+        self.request_now_playing_view();
+    }
+
+    /// Asks Spotify for the playing song's panel data, once per song while
+    /// the answer is kept. A failed read is asked again a minute later; a
+    /// song played again keeps its answer, so the panel never flickers.
+    pub fn request_now_playing_view(&mut self) {
+        if !self.local_ready || !self.network_reachable || self.offline {
+            return;
+        }
+        let Some(now) = self.now_playing() else {
+            return;
+        };
+        if now.is_episode || !now.uri.starts_with("spotify:track:") {
+            return;
+        }
+        let Some(artist_uri) = now.artists.first().and_then(|artist| {
+            artist
+                .uri
+                .clone()
+                .or_else(|| artist.id.as_ref().map(|id| format!("spotify:artist:{id}")))
+        }) else {
+            return;
+        };
+        let due = match self.now_playing_views.get(&now.uri) {
+            None => true,
+            Some(read) => {
+                matches!(read.view, Loadable::Failed(_)) && read.at.elapsed() >= PLAY_COUNT_RETRY
+            }
+        };
+        if !due {
+            return;
+        }
+        if self.now_playing_views.len() >= NOW_PLAYING_VIEWS_KEPT {
+            // Keep the answers on the way; drop the rest.
+            self.now_playing_views
+                .retain(|_, read| matches!(read.view, Loadable::Loading));
+        }
+        self.now_playing_views.insert(
+            now.uri.clone(),
+            NowPlayingRead {
+                view: Loadable::Loading,
+                at: Instant::now(),
+            },
+        );
+        self.backend.send(Command::NowPlayingView {
+            track_uri: now.uri,
+            artist_uri,
+            generation: self.play_count_generation,
+        });
+    }
+
+    fn receive_now_playing_view(
+        &mut self,
+        track_uri: String,
+        generation: u64,
+        result: Result<crate::model::NowPlayingView, String>,
+    ) {
+        if generation != self.play_count_generation {
+            return;
+        }
+        let view = match result {
+            Ok(view) => Loadable::Loaded(view),
+            // A refresh that fails keeps the answer already shown.
+            Err(error) => match self.now_playing_views.remove(&track_uri) {
+                Some(NowPlayingRead {
+                    view: Loadable::Loaded(view),
+                    ..
+                }) => Loadable::Loaded(view),
+                _ => Loadable::Failed(error),
+            },
+        };
+        self.now_playing_views.insert(
+            track_uri,
+            NowPlayingRead {
+                view,
+                at: Instant::now(),
+            },
+        );
     }
 
     /// Asks what friends last played, unless an answer is on the way. The
@@ -12689,6 +12824,7 @@ impl App {
                 if self.show_queue_panel {
                     self.show_lyrics_panel = false;
                     self.show_friends_panel = false;
+                    self.show_now_playing_panel = false;
                     self.refresh_queue(true);
                 }
             }
@@ -12698,6 +12834,7 @@ impl App {
                 if self.show_lyrics_panel {
                     self.show_queue_panel = false;
                     self.show_friends_panel = false;
+                    self.show_now_playing_panel = false;
                     self.lyrics_following = true;
                     self.request_lyrics();
                 }
@@ -12707,9 +12844,22 @@ impl App {
                 if self.show_friends_panel {
                     self.show_queue_panel = false;
                     self.show_lyrics_panel = false;
+                    self.show_now_playing_panel = false;
                     self.refresh_friends();
                 }
             }
+            Action::ToggleNowPlayingPanel => {
+                if self.now_playing_panel_shown() {
+                    self.show_now_playing_panel = false;
+                } else {
+                    self.show_now_playing_panel = true;
+                    self.show_queue_panel = false;
+                    self.show_lyrics_panel = false;
+                    self.show_friends_panel = false;
+                    self.refresh_now_playing_panel();
+                }
+            }
+            Action::RequestNowPlayingView => self.request_now_playing_view(),
             Action::SetLyricsFullscreen(fullscreen) => {
                 if fullscreen && self.lyrics_fullscreen.is_none() {
                     self.lyrics_fullscreen =
@@ -12734,6 +12884,7 @@ impl App {
                     // lyrics panel yields, so normal mode never shows both.
                     if !self.show_queue_panel {
                         self.show_lyrics_panel = true;
+                        self.show_now_playing_panel = false;
                     }
                     self.show_friends_panel = false;
                     self.lyrics_following = true;
@@ -14053,6 +14204,7 @@ impl App {
                 window_pos: self.window_geometry.position,
                 window_maximized: self.window_geometry.maximized,
                 queue_open: Some(self.show_queue_panel),
+                now_playing_open: Some(self.show_now_playing_panel),
                 queue_tab: Some(self.queue_tab.encode().to_string()),
                 lyrics_fullscreen_from: self.lyrics_fullscreen.map(|fullscreen| {
                     crate::settings::WindowMode {
@@ -22618,6 +22770,155 @@ mod tests {
         app
     }
 
+    /// The Now Playing panel holds the right slot alone: opening any other
+    /// panel closes it, and opening it closes them.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn now_playing_panel_shares_the_right_slot() {
+        let ctx = egui::Context::default();
+        let mut app = test_app("now-playing-slot");
+        crate::demo::populate(&mut app);
+        assert!(!app.now_playing_panel_shown(), "the demo starts it closed");
+        app.apply(Action::ToggleNowPlayingPanel, &ctx);
+        assert!(app.now_playing_panel_shown() && app.right_panel_open());
+        app.apply(Action::ToggleQueuePanel, &ctx);
+        assert!(app.show_queue_panel && !app.show_now_playing_panel);
+        app.apply(Action::ToggleNowPlayingPanel, &ctx);
+        assert!(app.now_playing_panel_shown() && !app.show_queue_panel);
+        app.apply(Action::ToggleLyricsPanel, &ctx);
+        assert!(app.show_lyrics_panel && !app.show_now_playing_panel);
+        app.apply(Action::ToggleNowPlayingPanel, &ctx);
+        assert!(app.now_playing_panel_shown() && !app.show_lyrics_panel);
+        app.apply(Action::ToggleFriendsPanel, &ctx);
+        assert!(app.show_friends_panel && !app.show_now_playing_panel);
+        app.apply(Action::ToggleNowPlayingPanel, &ctx);
+        assert!(app.now_playing_panel_shown() && !app.show_friends_panel);
+        app.apply(Action::ToggleNowPlayingPanel, &ctx);
+        assert!(!app.right_panel_open(), "the button closes it again");
+        app.backend.shutdown();
+    }
+
+    /// Nothing playing, nothing to show: the wish stays, the panel waits.
+    #[test]
+    fn now_playing_panel_waits_for_something_to_play() {
+        let mut app = test_app("now-playing-idle");
+        assert!(app.show_now_playing_panel, "it opens by default");
+        assert!(app.now_playing().is_none());
+        assert!(!app.now_playing_panel_shown() && !app.right_panel_open());
+        app.backend.shutdown();
+    }
+
+    /// The panel opens by default, a closed panel stays closed after a
+    /// restart, and a session from before it existed opens it.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn now_playing_panel_choice_survives_a_restart() {
+        let ctx = egui::Context::default();
+        let mut app = test_app("now-playing-restart");
+        crate::demo::populate(&mut app);
+        app.show_now_playing_panel = true;
+        app.apply(Action::ToggleNowPlayingPanel, &ctx);
+        assert!(!app.show_now_playing_panel);
+        // The demo is offline, which saves no session.
+        app.offline = false;
+        app.save_session();
+        assert!(app.flush_files());
+        let dirs = app.dirs.clone();
+        app.backend.shutdown();
+        let session = SessionState::load(&dirs.session_file());
+        assert_eq!(session.now_playing_open, Some(false));
+        let mut restarted = App::new(
+            &Waker::default(),
+            dirs.clone(),
+            Settings::default(),
+            AppOptions {
+                media_controls: false,
+                restore_sign_in: false,
+                tray: false,
+                autostart: false,
+            },
+        );
+        assert!(!restarted.show_now_playing_panel);
+        restarted.backend.shutdown();
+
+        // An older session, without the field, opens it; one that had the
+        // Queue open keeps the Queue.
+        let old: SessionState = serde_json::from_str(r#"{"queue_open": false}"#).unwrap();
+        assert_eq!(old.now_playing_open, None);
+        let queue: SessionState = serde_json::from_str(r#"{"queue_open": true}"#).unwrap();
+        for (session, open) in [(old, true), (queue, false)] {
+            std::fs::write(dirs.session_file(), session.encode().unwrap()).unwrap();
+            let mut app = App::new(
+                &Waker::default(),
+                dirs.clone(),
+                Settings::default(),
+                AppOptions {
+                    media_controls: false,
+                    restore_sign_in: false,
+                    tray: false,
+                    autostart: false,
+                },
+            );
+            assert_eq!(app.show_now_playing_panel, open);
+            app.backend.shutdown();
+        }
+    }
+
+    /// The panel's data is asked once per song, kept while it plays again,
+    /// and a failed refresh never takes a shown answer away.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn now_playing_view_is_cached_per_song() {
+        let mut app = test_app("now-playing-cache");
+        crate::demo::populate(&mut app);
+        let uri = app.now_playing().unwrap().uri;
+        let sample = app.now_playing_views.remove(&uri).unwrap().view;
+        // Offline, or without the session, nothing is asked.
+        app.request_now_playing_view();
+        assert!(!app.now_playing_views.contains_key(&uri));
+        app.offline = false;
+        app.network_reachable = true;
+        app.local_ready = true;
+        app.request_now_playing_view();
+        assert!(matches!(
+            app.now_playing_views[&uri].view,
+            Loadable::Loading
+        ));
+        // An answer for another account is dropped.
+        let generation = app.play_count_generation;
+        app.receive_now_playing_view(
+            uri.clone(),
+            generation.wrapping_add(1),
+            Ok(NowPlayingView::default()),
+        );
+        assert!(matches!(
+            app.now_playing_views[&uri].view,
+            Loadable::Loading
+        ));
+        let Loadable::Loaded(view) = sample else {
+            panic!("the demo's sample answer");
+        };
+        app.receive_now_playing_view(uri.clone(), generation, Ok(view.clone()));
+        app.request_now_playing_view();
+        assert_eq!(
+            app.now_playing_views[&uri].view.get(),
+            Some(&view),
+            "a song with an answer is not asked again"
+        );
+        app.receive_now_playing_view(uri.clone(), generation, Err("offline".into()));
+        assert_eq!(app.now_playing_views[&uri].view.get(), Some(&view));
+        // A failure without an answer is shown as one, and asked again only
+        // after a while.
+        app.now_playing_views.clear();
+        app.receive_now_playing_view(uri.clone(), generation, Err("offline".into()));
+        app.request_now_playing_view();
+        assert!(matches!(
+            app.now_playing_views[&uri].view,
+            Loadable::Failed(_)
+        ));
+        app.backend.shutdown();
+    }
+
     #[test]
     fn soloist_spotify_access_retries_missing_features_without_switching_player() {
         let mut app = test_app("soloist-spotify-access");
@@ -22684,6 +22985,7 @@ mod tests {
         crate::demo::populate(&mut app);
         let mut shown_at = None;
         let mut button_at = None;
+        let mut npv_at = None;
         for width in (760..=1600).step_by(8) {
             let width = width as f32;
             let mut tree = None;
@@ -22721,17 +23023,44 @@ mod tests {
             } else {
                 assert!(button_at.is_none(), "it stays once shown, gone at {width}");
             }
+            let now_playing = button("Now playing view");
+            if let Some(view) = now_playing {
+                npv_at.get_or_insert(width);
+                assert!(
+                    view.x1 <= lyrics.x0,
+                    "Now playing view before Lyrics at {width}"
+                );
+                assert!(
+                    view.x0 - repeat.x1 >= 10.0,
+                    "Now playing view clear of Repeat at {width}"
+                );
+            } else {
+                assert!(
+                    npv_at.is_none(),
+                    "Now playing view stays once shown, gone at {width}"
+                );
+            }
             if let Some(friends) = button("Listening activity") {
                 shown_at.get_or_insert(width);
                 assert!(friends.y0 > 700.0, "in the player bar at {width}");
                 assert!(friends.x1 <= lyrics.x0, "before Lyrics at {width}");
+                assert!(
+                    now_playing.is_some_and(|view| friends.x1 <= view.x0),
+                    "before Now playing view at {width}"
+                );
                 assert!(friends.x0 - repeat.x1 >= 10.0, "clear of Repeat at {width}");
             } else {
                 assert!(shown_at.is_none(), "it stays once shown, gone at {width}");
             }
         }
         assert!(button_at.is_some_and(|width| width > 760.0 && width <= 840.0));
-        assert!(shown_at.is_some_and(|width| Some(width) > button_at && width <= 920.0));
+        // The Now playing view button gives way after Listening activity,
+        // which therefore needs a little more room than before it existed.
+        assert!(
+            shown_at.is_some_and(|width| Some(width) > npv_at && width <= 960.0),
+            "Listening activity first shows at {shown_at:?}, Now playing view at {npv_at:?}"
+        );
+        assert!(npv_at.is_some_and(|width| width <= 920.0), "{npv_at:?}");
         app.backend.shutdown();
     }
 

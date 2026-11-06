@@ -1,0 +1,138 @@
+{
+  "data": {
+    "artistUnion": {
+      "__typename": "Artist",
+      "id": "0cmWgDlu9CwTgxPhf403hb",
+      "uri": "spotify:artist:0cmWgDlu9CwTgxPhf403hb",
+      "profile": {
+        "name": "Bonobo",
+        "verified": true,
+        "biography": {
+          "text": "Simon Green, better known as Bonobo, makes <a href=\"spotify:genre:electronic\">electronic</a> music that moves between downtempo, house and orchestral textures.&amp; His live shows bring a full band on the road."
+        },
+        "externalLinks": {"items": []}
+      },
+      "stats": {"monthlyListeners": 4812345},
+      "visuals": {
+        "avatarImage": {
+          "sources": [
+            {"url": "https://picsum.photos/seed/spotifast-npv-avatar/320/320", "width": 320, "height": 320}
+          ]
+        },
+        "gallery": {
+          "items": [
+            {
+              "sources": [
+                {"url": "https://picsum.photos/seed/spotifast-npv-portrait/400/700", "width": 400, "height": 700}
+              ]
+            },
+            {
+              "sources": [
+                {"url": "https://picsum.photos/seed/spotifast-npv-gallery/1280/720", "width": 1280, "height": 720},
+                {"url": "https://picsum.photos/seed/spotifast-npv-gallery/640/360", "width": 640, "height": 360}
+              ]
+            }
+          ]
+        }
+      },
+      "goods": {
+        "concerts": {
+          "totalCount": 7,
+          "items": [
+            {
+              "data": {
+                "__typename": "ConcertV2",
+                "uri": "spotify:concert:3rTRuXmFo1Ol1mv2K2bzYK",
+                "id": "3rTRuXmFo1Ol1mv2K2bzYK",
+                "title": "Bonobo Live",
+                "startDateIsoString": "2027-03-14T20:00:00+01:00",
+                "location": {"name": "Le Zénith", "city": "Paris"}
+              }
+            },
+            {
+              "data": {
+                "__typename": "ConcertV2",
+                "uri": "spotify:concert:1AbCdEfGhIjKlMnOpQrStU",
+                "title": "Bonobo",
+                "startDateIsoString": "2027-02-02T19:30:00Z",
+                "location": {"name": "Alexandra Palace", "city": "London"}
+              }
+            },
+            {
+              "data": {
+                "__typename": "ConcertV2",
+                "uri": "spotify:concert:bad id",
+                "startDateIsoString": "2027-04-01",
+                "location": {"name": "Nowhere"}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "trackUnion": {
+      "__typename": "Track",
+      "creditsTrait": {
+        "contributors": {
+          "items": [
+            {"name": "Bonobo", "role": "main artist", "uri": "spotify:artist:0cmWgDlu9CwTgxPhf403hb"},
+            {"name": "Simon Green", "role": "composer"},
+            {"name": "Simon Green", "role": "producer"},
+            {"name": "Jordan Rakei", "role": "featured artist", "reference": {"uri": "spotify:artist:5mbIfjqcZyxx3ExqbFTPDp"}},
+            {"name": "Label Liner Notes", "role": "writer", "reference": {"url": "https://example.com/credits"}},
+            {"name": "", "role": "ignored"}
+          ]
+        }
+      },
+      "merch": {"items": []},
+      "relatedVideos": {
+        "__typename": "RelatedVideoPage",
+        "items": [
+          {
+            "trackOfVideo": {
+              "data": {
+                "__typename": "Track",
+                "uri": "spotify:track:6Qw0Hn0N6X4yOyH4M9Hc4b",
+                "name": "Rosewood (Official Video)",
+                "albumOfTrack": {
+                  "coverArt": {
+                    "sources": [
+                      {"url": "https://picsum.photos/seed/spotifast-npv-video1/300/300", "width": 300, "height": 300},
+                      {"url": "https://picsum.photos/seed/spotifast-npv-video1/64/64", "width": 64, "height": 64}
+                    ],
+                    "extractedColors": {"colorDark": {"hex": "#535353"}}
+                  }
+                },
+                "artists": {"items": [{"profile": {"name": "Bonobo"}}]}
+              }
+            }
+          },
+          {
+            "trackOfVideo": {
+              "data": {
+                "__typename": "Track",
+                "uri": "spotify:track:2Fs18NaCDuluPG1DHGw1XG",
+                "name": "Kerala (Official Video)",
+                "albumOfTrack": {
+                  "coverArt": {
+                    "sources": [
+                      {"url": "https://picsum.photos/seed/spotifast-npv-video2/300/300", "width": 300, "height": 300}
+                    ],
+                    "extractedColors": {"colorDark": {"hex": "#7A3B12"}}
+                  }
+                },
+                "artists": {"items": [{"profile": {"name": "Bonobo"}}, {"profile": {"name": "Jacknife Lee"}}]}
+              }
+            }
+          },
+          {
+            "trackOfVideo": {
+              "data": {"__typename": "NotFound"}
+            }
+          }
+        ]
+      }
+    }
+  },
+  "extensions": {}
+}
