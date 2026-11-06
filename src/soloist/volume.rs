@@ -14,11 +14,20 @@ const RESTORE_TRIES: u32 = 5;
 
 /// Spotify's player starts at a level of its own every launch, so the level
 /// it was left at is kept here and given back once it can take a command.
+/// How long after playback starts or resumes Spotify's player may reset its
+/// own level. It reopens its audio output then and, a second or two later,
+/// reports a jump to 100% as a real change that nobody made.
+const RESET_WINDOW: Duration = Duration::from_secs(5);
+
 #[derive(Default)]
 pub(super) struct ListeningVolume {
     restored: bool,
     asked: Option<Instant>,
     tries: u32,
+    /// Whether the last status Soloist reported was playing.
+    playing: bool,
+    /// When playback last started or resumed.
+    started: Option<Instant>,
 }
 impl ListeningVolume {
     /// Returns the level to send, and whether the level to keep changed.
@@ -34,6 +43,13 @@ impl ListeningVolume {
             Some("playback_state" | "volume_changed")
         ) {
             return (None, false);
+        }
+        if let Some(status) = message["status"].as_str() {
+            let playing = matches!(status, "playing" | "buffering");
+            if playing && !self.playing {
+                self.started = Some(now);
+            }
+            self.playing = playing;
         }
         let Some(percent) = message["volume"].as_u64().map(|v| v.min(100) as u8) else {
             return (None, false);
@@ -58,6 +74,20 @@ impl ListeningVolume {
                     return (Some(wanted), false);
                 }
             }
+        }
+        // Spotify's player resets itself to 100% when it reopens its output
+        // after a pause or a track start. That jump is not the listener's:
+        // give the kept level back before the route can follow it.
+        if message["type"] == "volume_changed"
+            && percent == 100
+            && self
+                .started
+                .is_some_and(|at| now.duration_since(at) < RESET_WINDOW)
+            && let Some(wanted) = output.remembered().filter(|wanted| *wanted != 100)
+        {
+            log::debug!("Soloist's player reset itself to 100%; restoring {wanted}");
+            output.lead(wanted);
+            return (Some(wanted), false);
         }
         // Only a real change is a listening level; a snapshot at a track
         // change can be a fresh stream at unity.
@@ -258,6 +288,36 @@ mod tests {
             (None, true)
         );
         assert_eq!(output.remembered(), Some(40));
+    }
+
+    #[test]
+    fn a_reset_to_full_volume_on_resume_is_undone() {
+        let mut restore = ListeningVolume::default();
+        let output = OutputVolume::default();
+        let now = Instant::now();
+        let status = |status: &str, volume: u8| json!({"type":"playback_state", "volume":volume, "is_active":true, "status":status});
+        assert_eq!(
+            restore.observe(&event(45), true, &output, now),
+            (None, true)
+        );
+        restore.observe(&status("paused", 45), true, &output, now);
+        let resumed = now + Duration::from_secs(60);
+        restore.observe(&status("playing", 45), true, &output, resumed);
+        // As logged: a second after resuming, the player jumps to 100%.
+        let reset = resumed + Duration::from_secs(1);
+        assert_eq!(
+            restore.observe(&event(100), true, &output, reset),
+            (Some(45), false)
+        );
+        assert_eq!(output.remembered(), Some(45));
+        assert_eq!(output.route_percent(), Some(45), "never heard at 100%");
+        // Long after playback started, a change to 100% is the listener's.
+        let later = resumed + RESET_WINDOW * 2;
+        assert_eq!(
+            restore.observe(&event(100), true, &output, later),
+            (None, true)
+        );
+        assert_eq!(output.remembered(), Some(100));
     }
 
     #[test]
