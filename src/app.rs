@@ -4372,6 +4372,12 @@ impl App {
         if generation != self.play_count_generation {
             return;
         }
+        if let Ok(view) = &result
+            && let Some(artist) = &view.artist
+        {
+            // About the artist's Follow button shows Spotify's own answer.
+            self.request_contains(vec![artist.uri.clone()]);
+        }
         let view = match result {
             Ok(view) => Loadable::Loaded(view),
             // A refresh that fails keeps the answer already shown.
@@ -22898,7 +22904,13 @@ mod tests {
         let Loadable::Loaded(view) = sample else {
             panic!("the demo's sample answer");
         };
+        let artist = view.artist.as_ref().unwrap().uri.clone();
+        app.saved.remove(&artist);
         app.receive_now_playing_view(uri.clone(), generation, Ok(view.clone()));
+        assert!(
+            app.saved_pending.contains(&artist),
+            "whether the artist is followed is asked with the answer"
+        );
         app.request_now_playing_view();
         assert_eq!(
             app.now_playing_views[&uri].view.get(),

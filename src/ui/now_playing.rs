@@ -32,7 +32,6 @@ const SKELETONS: usize = 3;
 
 pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
-    let locale = app.locale;
     let Some(now) = app.now_playing() else {
         return;
     };
@@ -87,7 +86,6 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
         let output = scroll.show(ui, |ui| contents(app, ui, &now));
         header_shadow(ui, header_bottom, output.state.offset.y);
     });
-    let _ = locale;
     // The panel shares the Queue panel's width, so switching between them
     // never moves the page.
     let width = response.response.rect.width();
@@ -644,7 +642,8 @@ fn about_artist(app: &mut App, ui: &mut egui::Ui, artist: &NpvArtist) {
                         }
                     });
                     ui.add_space(8.0);
-                    let following = app.is_saved(&artist.uri).unwrap_or(false);
+                    // Shown once Spotify says whether the artist is followed.
+                    let following = app.is_saved(&artist.uri);
                     let mut follow = false;
                     egui::Sides::new().shrink_left().show(
                         ui,
@@ -663,6 +662,9 @@ fn about_artist(app: &mut App, ui: &mut egui::Ui, artist: &NpvArtist) {
                             }
                         },
                         |ui| {
+                            let Some(following) = following else {
+                                return;
+                            };
                             let label = if following {
                                 pgettext(locale, "artist", "Following")
                             } else {
