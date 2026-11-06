@@ -263,10 +263,10 @@ class CiScopeTest(unittest.TestCase):
         for path in ["Cargo.lock", ".cargo/config.toml", ".github/workflows/ci.yml"]:
             self.assertEqual(ci_scope.scope("pull_request", [path], set())[1], ci_scope.EVERYTHING)
 
-    def test_macos_code_adds_macos(self):
+    def test_ci_never_tests_on_macos(self):
         _code, systems = ci_scope.scope("pull_request", ["src/platform/macos.rs"], set())
-        self.assertIn("macos-latest", systems)
-        self.assertNotIn("windows-11-arm", systems)
+        self.assertEqual(systems, ci_scope.PULL_REQUEST)
+        self.assertNotIn("macos-latest", ci_scope.EVERYTHING)
 
     def test_documentation_alone_tests_on_linux(self):
         self.assertEqual(ci_scope.scope("push", ["docs/_guide/winamp.md", "README.md"], set()), (False, [ci_scope.LINUX]))

@@ -78,6 +78,13 @@ Spotify lyrics without changing players.
 | **Themes** | Choose light, dark, system appearance, or custom colours, with one theme for light mode and one for dark mode that switch with the system. On Omarchy, follow your desktop theme. |
 | **Desktop controls** | Use keyboard shortcuts and media keys. Keep music playing from the tray when supported by your desktop and settings, and start Spotifast with your computer, with its window or in the tray. |
 
+## Download
+
+This fork's builds for Windows (installer or portable ZIP) and Linux
+(AppImage or archive) are on its
+[latest release](https://github.com/simnJS/spotifast/releases/latest), with
+install steps in the notes. They update themselves from this fork's releases.
+
 ## Install
 
 | Platform | Installation |

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Decides how much of CI a change needs.
 
-Every repository on the account shares one pool of hosted runners, and a
-macOS or Windows on ARM job holds a slot far longer than a Linux one. So a
-pull request tests on Linux and Windows, and the full four-system matrix runs
+This fork ships for Linux and Windows only, so CI never tests on macOS.
+A Windows on ARM job holds a slot far longer than a Linux one. So a pull
+request tests on Linux and Windows x64, and the full three-system matrix runs
 on main, in the merge queue, by hand, and on a pull request that touches the
-dependencies, the CI itself, macOS code, or carries the `all-platforms` label.
+dependencies, the CI itself, or carries the `all-platforms` label.
 A change to Markdown, the site, or the repository's GitHub settings alone is
 tested on Linux only (the branding test reads the guide) and skips the Rust
 lints and the Nix package.
@@ -24,7 +24,7 @@ import subprocess
 LABEL = "all-platforms"
 LINUX = "ubuntu-latest"
 PULL_REQUEST = [LINUX, "windows-latest"]
-EVERYTHING = [LINUX, "macos-latest", "windows-latest", "windows-11-arm"]
+EVERYTHING = [LINUX, "windows-latest", "windows-11-arm"]
 NO_BUILD = ["docs/*", "*.md", ".github/*"]
 FULL = ["Cargo.toml", "Cargo.lock", ".cargo/*", "rust-toolchain*", "build.rs", ".github/workflows/ci.yml"]
 
@@ -45,10 +45,7 @@ def scope(event, paths, labels):
         return True, EVERYTHING
     if any(matches(path, FULL) for path in paths):
         return True, EVERYTHING
-    systems = list(PULL_REQUEST)
-    if any("macos" in path.lower() for path in paths):
-        systems.insert(1, "macos-latest")
-    return True, systems
+    return True, list(PULL_REQUEST)
 
 
 def api(path, jq):

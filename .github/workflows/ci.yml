@@ -56,11 +56,12 @@ jobs:
           python3 .github/scripts/check-new-settings.py --base "$BASE" "${approved[@]}"
 
   # Every repository on the account shares the hosted runners, so a pull
-  # request tests on Linux and Windows, and macOS and Windows on ARM join on
-  # main and when ci-scope.py says the change needs them. A change to the
-  # docs alone skips the Rust lints and the Nix package. This job is not a
-  # required check, so a skipped one never blocks a merge. After adding the
-  # all-platforms label to a pull request, re-run all its jobs.
+  # request tests on Linux and Windows, and Windows on ARM joins on main and
+  # when ci-scope.py says the change needs them. The fork never tests on
+  # macOS. A change to the docs alone skips the Rust lints and the Nix
+  # package. This job is not a required check, so a skipped one never blocks
+  # a merge. After adding the all-platforms label to a pull request, re-run
+  # all its jobs.
   scope:
     name: scope
     runs-on: ubuntu-latest
@@ -166,7 +167,7 @@ jobs:
       - name: Tests (all features)
         run: mbx test --locked --all-targets --all-features
       - name: Native credential store (dummy grants)
-        if: runner.os == 'Windows' || runner.os == 'macOS'
+        if: runner.os == 'Windows'
         # Switching feature sets can relink the test binary on a cold runner.
         timeout-minutes: 5
         run: mbx test --locked --lib credentials::tests::native_store_round_trip -- --ignored --exact
@@ -232,24 +233,6 @@ jobs:
           if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
           python packaging\windows\test-msi.py $iscc -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: macOS bundle identity and helper startup
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          mbx build --locked
-          version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
-          app="$RUNNER_TEMP/spotifast-bundle-check/Spotifast.app"
-          bash packaging/macos/bundle.sh target/debug/spotifast "$app" "$version"
-          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
-          "$app/Contents/MacOS/$executable" --version
-          # A missing job must reach our error handler, not die during launch.
-          set +e
-          "$app/Contents/MacOS/$executable" --apply-update "$RUNNER_TEMP/spotifast-missing-job.json" 2> "$RUNNER_TEMP/spotifast-helper-check.log"
-          status=$?
-          set -e
-          test "$status" -eq 1
-          test -s "$RUNNER_TEMP/spotifast-helper-check.log"
 
   nix:
     name: Nix package

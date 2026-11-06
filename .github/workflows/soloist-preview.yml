@@ -16,7 +16,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        # This fork builds no macOS app.
+        os: [windows-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -54,17 +55,6 @@ jobs:
           Copy-Item $binary, README.md, LICENSE, packaging\spotifast-portable.txt 'dist\Spotifast Preview'
           Copy-Item packaging\soloist-preview.txt 'dist\Spotifast Preview\READ ME.txt'
           Compress-Archive 'dist\Spotifast Preview' 'dist\Spotifast-Preview-Windows.zip'
-      - name: Package, sign and notarize Mac preview
-        if: runner.os == 'macOS'
-        shell: bash
-        env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-        run: bash packaging/macos/soloist-preview.sh
       - name: Upload audition build
         uses: actions/upload-artifact@v7
         with:

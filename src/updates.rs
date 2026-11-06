@@ -30,7 +30,7 @@ pub const CONFIG: UpdateConfig = UpdateConfig {
     // next one.
     appimage: true,
     ..UpdateConfig::new(
-        "crmne/spotifast",
+        "simnJS/spotifast",
         "Spotifast",
         "spotifast",
         env!("CARGO_PKG_VERSION"),
@@ -147,6 +147,19 @@ mod tests {
             "updates must require a publisher signature"
         );
         CONFIG.validate().unwrap();
+    }
+
+    /// This fork updates from its own releases, never from upstream's: an
+    /// upstream release would replace the fork and is signed with another key.
+    #[test]
+    fn updates_come_from_the_fork() {
+        assert_eq!(CONFIG.repository, "simnJS/spotifast");
+        assert_eq!(
+            CONFIG.publisher_key.map(str::trim),
+            Some("84cacd5c5717f21f558991146b962600e8d6d8586e9334ddcd3340dbe04d30e7"),
+            "the fork's release key, whose private half signs checksums.txt"
+        );
+        assert!(CONFIG.additional_publisher_keys.is_empty());
     }
 
     /// An AppImage may replace itself only because the release workflow

@@ -69,8 +69,10 @@ class ReleaseNamesTest(unittest.TestCase):
     def test_a_wrong_or_missing_update_information_fails(self):
         for arch, information, message in [
             ("x86_64", release_names.update_information("aarch64"), "carries"),
-            ("x86_64", "gh-releases-zsync|crmne|spotifast|latest|spotifast-*-x86_64.AppImage", "carries"),
+            ("x86_64", "gh-releases-zsync|simnJS|spotifast|latest|spotifast-*-x86_64.AppImage", "carries"),
             ("aarch64", "", "carries ''"),
+            # Upstream's: AppImageUpdate would replace the fork with it.
+            ("x86_64", "gh-releases-zsync|crmne|spotifast|latest|spotifast-*-x86_64.AppImage.zsync", "carries"),
         ]:
             with tempfile.TemporaryDirectory() as directory:
                 root = release(Path(directory))
