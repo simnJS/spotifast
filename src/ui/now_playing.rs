@@ -8,7 +8,7 @@ use egui::{
     Align, Color32, CornerRadius, Frame, Layout, Margin, Rect, Sense, UiBuilder, Vec2, pos2, vec2,
 };
 
-use crate::app::{App, NowPlaying};
+use crate::app::{App, CanvasRead, NowPlaying};
 use crate::i18n::{gettext, ngettext, pgettext};
 use crate::model::{Action, Concert, Credit, Loadable, NowPlayingView, NpvArtist, Page};
 use crate::theme::{self, Icon, Palette};
@@ -193,9 +193,7 @@ fn fade(painter: &egui::Painter, rect: Rect, top: Color32, bottom: Color32) {
 
 fn contents(app: &mut App, ui: &mut egui::Ui, now: &NowPlaying) {
     ui.spacing_mut().item_spacing.y = 0.0;
-    let width = ui.available_width();
-    let (media, cover) = ui.allocate_exact_size(Vec2::splat(width), Sense::click());
-    header_media(app, ui, media, now);
+    let (cover, over_canvas) = header_media(app, ui, now);
     if let Some(id) = now.album_id.clone() {
         let cover = cover.on_hover_cursor(egui::CursorIcon::PointingHand);
         if cover.clicked() {
@@ -203,7 +201,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui, now: &NowPlaying) {
         }
     }
     ui.add_space(SECTION_GAP);
-    title_row(app, ui, now);
+    title_row(app, ui, now, over_canvas);
     let view = app
         .now_playing_views
         .get(&now.uri)
@@ -227,24 +225,143 @@ fn contents(app: &mut App, ui: &mut egui::Ui, now: &NowPlaying) {
     next_in_queue(app, ui);
 }
 
-/// Draws the panel's header media in `rect`: the cover today. This is the
-/// one place the header's picture is drawn, so a Canvas video can take its
-/// place here.
-pub fn header_media(app: &App, ui: &egui::Ui, rect: Rect, now: &NowPlaying) {
-    widgets::playing_cover(
-        ui,
-        &app.palette,
-        app.backend.art(),
-        "now-playing-panel",
-        now.art_url.as_deref().or(now.art_small.as_deref()),
-        rect,
-        f32::from(SECTION_RADIUS),
+/// Draws the panel's header media: the cover, or the song's Canvas looping
+/// in a tall box as Spotify's own panel does. This is the one place the
+/// header's picture is drawn. Returns the media's response and whether a
+/// Canvas shows, which turns the text below it to the full text colour.
+pub fn header_media(app: &mut App, ui: &mut egui::Ui, now: &NowPlaying) -> (egui::Response, bool) {
+    let ctx = ui.ctx().clone();
+    let width = ui.available_width();
+    let texture = canvas_frame(app, &ctx, now);
+    // The box stays tall while the next song's Canvas is asked for, so
+    // going from one Canvas to another never bounces the panel.
+    let tall_id = egui::Id::new("now-playing-canvas-tall");
+    let was_tall = ctx
+        .data(|data| data.get_temp::<bool>(tall_id))
+        .unwrap_or(false);
+    let failed = app.canvas.as_ref().is_some_and(|canvas| {
+        canvas.track_uri == now.uri && canvas.player.error().is_some() && texture.is_none()
+    });
+    let tall = !failed
+        && match app.canvases.get(&now.uri) {
+            Some(CanvasRead::Video) => true,
+            Some(CanvasRead::Loading) => was_tall,
+            _ => false,
+        };
+    ctx.data_mut(|data| data.insert_temp(tall_id, tall));
+    let grow = ctx.animate_bool_with_time(
+        egui::Id::new("now-playing-canvas-height"),
+        tall,
+        crate::motion::seconds(&ctx, CANVAS_FADE),
     );
+    // Spotify's 9/14.5, or 9/11 in a panel under 608 points tall.
+    let ratio = if ui.clip_rect().height() < 608.0 {
+        11.0 / 9.0
+    } else {
+        14.5 / 9.0
+    };
+    let height = egui::lerp(width..=width * ratio, grow);
+    let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    // Keyed by song, so a new song's video fades in over its own cover and
+    // the last song's never shows.
+    let shown = ctx.animate_bool_with_time(
+        egui::Id::new(("now-playing-canvas-fade", &now.uri)),
+        texture.is_some(),
+        crate::motion::seconds(&ctx, CANVAS_FADE),
+    );
+    let radius = f32::from(SECTION_RADIUS);
+    if shown < 1.0 {
+        let side = width.min(height);
+        widgets::playing_cover(
+            ui,
+            &app.palette,
+            app.backend.art(),
+            "now-playing-panel",
+            now.art_url.as_deref().or(now.art_small.as_deref()),
+            Rect::from_center_size(rect.center(), Vec2::splat(side)),
+            radius,
+        );
+    }
+    if let Some(texture) = texture
+        && shown > 0.0
+    {
+        egui::Image::from_texture(&texture)
+            .uv(fill_uv(texture.size_vec2(), rect.size()))
+            .corner_radius(radius)
+            .tint(Color32::WHITE.gamma_multiply(shown))
+            .paint_at(ui, rect);
+        canvas_gradient(ui.painter(), rect, app.palette.panel, shown);
+    }
+    (response, shown >= 0.5)
+}
+
+/// How long the header takes to grow for a Canvas, and the video to fade in
+/// over the cover: Spotify's `.6s`.
+const CANVAS_FADE: f32 = 0.6;
+
+/// The playing song's Canvas frame, if it has one decoded. It plays with
+/// the music and holds its frame while paused or when less motion is asked
+/// for.
+fn canvas_frame(
+    app: &mut App,
+    ctx: &egui::Context,
+    now: &NowPlaying,
+) -> Option<egui::TextureHandle> {
+    let canvas = app
+        .canvas
+        .as_mut()
+        .filter(|canvas| canvas.track_uri == now.uri)?;
+    let at = std::time::Instant::now();
+    if now.playing && !crate::motion::reduced(ctx) {
+        canvas.player.resume();
+    } else {
+        canvas.player.pause(at);
+    }
+    canvas.player.frame(ctx, at)
+}
+
+/// The part of a `texture` sized picture that fills `size` without
+/// stretching, centred, as CSS's `object-fit: cover`.
+fn fill_uv(texture: Vec2, size: Vec2) -> Rect {
+    if texture.x <= 0.0 || texture.y <= 0.0 || size.x <= 0.0 || size.y <= 0.0 {
+        return Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    }
+    let picture = texture.x / texture.y;
+    let target = size.x / size.y;
+    if picture > target {
+        let keep = target / picture;
+        Rect::from_min_max(pos2((1.0 - keep) / 2.0, 0.0), pos2((1.0 + keep) / 2.0, 1.0))
+    } else {
+        let keep = picture / target;
+        Rect::from_min_max(pos2(0.0, (1.0 - keep) / 2.0), pos2(1.0, (1.0 + keep) / 2.0))
+    }
+}
+
+/// Spotify's gradient over a Canvas, in the panel's colour:
+/// `linear-gradient(#121212d9 0%, #12121200 30% 80%, #121212cc 93.25%,
+/// #121212 100%)`, scaled by `strength` while the video fades in.
+fn canvas_gradient(painter: &egui::Painter, rect: Rect, panel: Color32, strength: f32) {
+    let color = |alpha: f32| panel.gamma_multiply(alpha * strength);
+    let band = |from: f32, to: f32| {
+        Rect::from_min_max(
+            pos2(rect.left(), rect.top() + rect.height() * from),
+            pos2(rect.right(), rect.top() + rect.height() * to),
+        )
+    };
+    fade(painter, band(0.0, 0.3), color(0.85), color(0.0));
+    fade(painter, band(0.8, 0.9325), color(0.0), color(0.8));
+    fade(painter, band(0.9325, 1.0), color(0.8), color(1.0));
 }
 
 /// The title, its artists as links, and the saved check.
-fn title_row(app: &mut App, ui: &mut egui::Ui, now: &NowPlaying) {
+fn title_row(app: &mut App, ui: &mut egui::Ui, now: &NowPlaying, over_canvas: bool) {
     let palette = app.palette;
+    // Over a Canvas the artists take the full text colour, as Spotify's do.
+    let subdued = if over_canvas {
+        palette.text
+    } else {
+        palette.secondary
+    };
     let locale = app.locale;
     let mut open = None;
     let saved = app.is_saved(&now.uri).unwrap_or(false);
@@ -274,14 +391,13 @@ fn title_row(app: &mut App, ui: &mut egui::Ui, now: &NowPlaying) {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     if now.artists.is_empty() {
-                        theme::text(ui, &now.subtitle, theme::regular(15.0), palette.secondary);
+                        theme::text(ui, &now.subtitle, theme::regular(15.0), subdued);
                     }
                     for (index, artist) in now.artists.iter().enumerate() {
                         if index > 0 {
-                            theme::text(ui, ", ", theme::regular(15.0), palette.secondary);
+                            theme::text(ui, ", ", theme::regular(15.0), subdued);
                         }
-                        let link =
-                            theme::link(ui, &artist.name, theme::regular(15.0), palette.secondary);
+                        let link = theme::link(ui, &artist.name, theme::regular(15.0), subdued);
                         if let Some(id) = artist.id.clone()
                             && link.clicked()
                         {
@@ -305,7 +421,7 @@ fn title_row(app: &mut App, ui: &mut egui::Ui, now: &NowPlaying) {
             } else {
                 (
                     Icon::CirclePlus,
-                    palette.secondary,
+                    subdued,
                     palette.text,
                     gettext(locale, "Save to Liked Songs"),
                 )

@@ -32,6 +32,15 @@ const MAX_CANVAS_BYTES: usize = 24 * 1024 * 1024;
 /// Downloaded files held in memory, newest first, so returning to a track
 /// does not fetch its Canvas again.
 const HELD_BYTES: usize = 48 * 1024 * 1024;
+/// Tracks whose Canvas, or lack of one, is remembered.
+const LOOKUPS_KEPT: usize = 256;
+
+/// Six 72x128 frames at 12 fps, High profile with B-frames, made with
+/// `ffmpeg -f lavfi -i testsrc2=size=72x128:rate=12 -frames:v 6 -an
+/// -c:v libx264 -profile:v high -pix_fmt yuv420p -bf 2 -g 6`. The tests
+/// decode it, and the demo loops it in the Now Playing panel.
+#[cfg(any(test, feature = "demo"))]
+pub const FIXTURE: &[u8] = include_bytes!("fixture.mp4");
 
 /// A track's Canvas as Pathfinder describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,6 +121,65 @@ fn parse(body: &serde_json::Value) -> anyhow::Result<Option<Canvas>> {
         kind,
         file_id: text("fileId"),
     }))
+}
+
+/// Which Canvas recent tracks have, and the files of the recent ones, so a
+/// track played again asks Spotify nothing.
+pub struct Library {
+    downloads: Downloads,
+    lookups: Mutex<VecDeque<(String, Option<Canvas>)>>,
+}
+
+impl Library {
+    pub fn new(http: Http) -> Self {
+        Self {
+            downloads: Downloads::new(http),
+            lookups: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    /// The video to loop for `track_uri`, or `None` when the track has no
+    /// Canvas or a still or GIF one, which leaves the cover.
+    pub async fn video(
+        &self,
+        session: &Session,
+        web: &ApiClient,
+        track_uri: &str,
+    ) -> anyhow::Result<Option<Arc<[u8]>>> {
+        let canvas = match self.lookup(track_uri) {
+            Some(canvas) => canvas,
+            None => {
+                let canvas = fetch(session, web, track_uri).await?;
+                self.remember(track_uri, canvas.clone());
+                canvas
+            }
+        };
+        match canvas {
+            Some(Canvas {
+                kind: Kind::Video,
+                url,
+                ..
+            }) => Ok(Some(self.downloads.get(&url).await?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// The remembered answer for `track_uri`: `Some(None)` for a track known
+    /// to have no Canvas, `None` when it was never asked.
+    fn lookup(&self, track_uri: &str) -> Option<Option<Canvas>> {
+        let lookups = self.lookups.lock().unwrap_or_else(|p| p.into_inner());
+        lookups
+            .iter()
+            .find(|(uri, _)| uri == track_uri)
+            .map(|(_, canvas)| canvas.clone())
+    }
+
+    fn remember(&self, track_uri: &str, canvas: Option<Canvas>) {
+        let mut lookups = self.lookups.lock().unwrap_or_else(|p| p.into_inner());
+        lookups.retain(|(uri, _)| uri != track_uri);
+        lookups.push_front((track_uri.to_string(), canvas));
+        lookups.truncate(LOOKUPS_KEPT);
+    }
 }
 
 /// Downloads Canvas files and keeps the recent ones in memory.
@@ -269,6 +337,27 @@ mod tests {
             query["extensions"]["persistedQuery"]["sha256Hash"],
             CANVAS_HASH
         );
+    }
+
+    #[test]
+    fn remembers_recent_tracks_with_or_without_a_canvas() {
+        let library = Library::new(Http::default());
+        assert_eq!(library.lookup("spotify:track:a"), None);
+        library.remember("spotify:track:a", None);
+        assert_eq!(library.lookup("spotify:track:a"), Some(None));
+        let canvas = Canvas {
+            uri: None,
+            url: "https://canvaz.scdn.co/a.mp4".into(),
+            kind: Kind::Video,
+            file_id: None,
+        };
+        library.remember("spotify:track:a", Some(canvas.clone()));
+        assert_eq!(library.lookup("spotify:track:a"), Some(Some(canvas)));
+        for index in 0..LOOKUPS_KEPT {
+            library.remember(&format!("spotify:track:{index}"), None);
+        }
+        assert_eq!(library.lookup("spotify:track:a"), None, "the oldest goes");
+        assert_eq!(library.lookup("spotify:track:0"), Some(None));
     }
 
     #[test]

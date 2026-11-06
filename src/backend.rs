@@ -901,6 +901,11 @@ pub enum Command {
         artist_uri: String,
         generation: u64,
     },
+    /// Find and download a song's Canvas video for the Now Playing panel.
+    Canvas {
+        track_uri: String,
+        generation: u64,
+    },
     /// Read what friends are listening to through the streaming session,
     /// for the app's request generation.
     FriendActivity(u64),
@@ -1129,6 +1134,13 @@ pub enum Event {
         track_uri: String,
         generation: u64,
         result: Result<crate::model::NowPlayingView, String>,
+    },
+    /// `track_uri`'s Canvas video, `None` when it has none to loop, or why
+    /// it could not be read. The panel keeps the cover unless it is a video.
+    Canvas {
+        track_uri: String,
+        generation: u64,
+        result: Result<Option<Arc<[u8]>>, String>,
     },
     /// Saved shows that Spotify's metadata marks as audiobooks. librespot
     /// cannot play them, so the Podcasts shelf leaves them out.
@@ -1895,6 +1907,8 @@ struct Worker {
     api: Arc<ApiGateway>,
     made_for_you: Arc<crate::made_for_you::MadeForYou>,
     new_releases: Arc<crate::new_releases::NewReleases>,
+    /// Recent tracks' Canvas answers and files, for any account.
+    canvas: Arc<crate::canvas::Library>,
     connect: Arc<crate::sonos::Controller>,
     /// Reopening or refreshing the picker reuses an in-flight browse.
     receiver_discovery: Option<tokio::task::JoinHandle<()>>,
@@ -2020,6 +2034,7 @@ impl Worker {
             api: Arc::new(ApiGateway::new(http.clone(), activity)),
             made_for_you: Arc::new(crate::made_for_you::MadeForYou::new(http.clone())),
             new_releases: Arc::new(crate::new_releases::NewReleases::new(http.clone())),
+            canvas: Arc::new(crate::canvas::Library::new(http.clone())),
             connect: Arc::default(),
             receiver_discovery: None,
             background_session: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -2820,6 +2835,10 @@ impl Worker {
                     artist_uri,
                     generation,
                 } => self.fetch_now_playing_view(track_uri, artist_uri, generation),
+                Command::Canvas {
+                    track_uri,
+                    generation,
+                } => self.fetch_canvas(track_uri, generation),
                 Command::FriendActivity(generation) => self.fetch_friend_activity(generation),
                 Command::LoadLikedSongsCache { generation } => {
                     if let Some(account) = self.api.account() {
@@ -4954,6 +4973,48 @@ impl Worker {
             };
             if let Err(error) = &result {
                 log::debug!("Now Playing panel data unavailable: {error}");
+            }
+            send(track_uri, result);
+        });
+    }
+
+    /// Find `track_uri`'s Canvas through Pathfinder and download its video.
+    /// Like the panel's other data it needs the playback session and a
+    /// signed-in account; without them, or on any failure, the panel keeps
+    /// the cover.
+    fn fetch_canvas(&self, track_uri: String, generation: u64) {
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        let send = move |track_uri, result| {
+            let _ = events.send(Event::Canvas {
+                track_uri,
+                generation,
+                result,
+            });
+            waker.wake();
+        };
+        let Some(engine) = self.engine.clone() else {
+            return send(track_uri, Err("Canvas needs playback enabled.".into()));
+        };
+        let Some(web) = self.api.prerelease_http_client() else {
+            return send(track_uri, Err("Canvas needs a signed-in account.".into()));
+        };
+        let library = Arc::clone(&self.canvas);
+        let mut cancelled = self.session.subscribe();
+        tokio::spawn(async move {
+            let read = tokio::time::timeout(
+                Duration::from_secs(30),
+                library.video(engine.session(), &web, &track_uri),
+            );
+            let result = tokio::select! {
+                biased;
+                _ = cancelled.changed() => Err("The playback session ended.".to_string()),
+                result = read => result
+                    .map_err(|_| "Spotify took too long to answer.".to_string())
+                    .and_then(|result| result.map_err(|error| format!("{error:#}"))),
+            };
+            if let Err(error) = &result {
+                log::debug!("Canvas unavailable: {error}");
             }
             send(track_uri, result);
         });

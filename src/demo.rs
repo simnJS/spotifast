@@ -1162,6 +1162,24 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 app.show_lyrics_panel = false;
                 app.show_friends_panel = false;
             }
+            // The panel with the playing song's Canvas looping in its
+            // header, from the canvas module's test clip.
+            "now-playing-canvas" => {
+                app.show_now_playing_panel = true;
+                app.show_queue_panel = false;
+                app.show_lyrics_panel = false;
+                app.show_friends_panel = false;
+                if let Some(now) = app.now_playing() {
+                    app.canvases
+                        .insert(now.uri.clone(), crate::app::CanvasRead::Video);
+                    app.canvas = Some(crate::app::CanvasPlayer {
+                        track_uri: now.uri,
+                        player: crate::canvas::Player::new(std::sync::Arc::from(
+                            crate::canvas::FIXTURE,
+                        )),
+                    });
+                }
+            }
             // The panel while Spotify's answer is on the way.
             "now-playing-loading" => {
                 app.show_now_playing_panel = true;

@@ -198,6 +198,26 @@ pub struct NowPlayingRead {
 /// How many songs' panel data stays in memory.
 const NOW_PLAYING_VIEWS_KEPT: usize = 64;
 
+/// What the Now Playing panel knows of a song's Canvas. The video itself
+/// lives in [`App::canvas`] for the playing song only; the backend keeps
+/// recent files, so a song played again starts its Canvas from memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanvasRead {
+    Loading,
+    /// The song has a video Canvas.
+    Video,
+    /// No Canvas, or a still or GIF one: the cover stays.
+    None,
+    /// The read failed at this time; the cover stays until a retry.
+    Failed(Instant),
+}
+
+/// The Canvas looping in the Now Playing panel's header.
+pub struct CanvasPlayer {
+    pub track_uri: String,
+    pub player: crate::canvas::Player,
+}
+
 /// The playing item as the interface sees it, whichever device plays it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NowPlaying {
@@ -657,6 +677,10 @@ pub struct App {
     pub show_now_playing_panel: bool,
     /// The Now Playing panel's data, by track URI.
     pub now_playing_views: HashMap<String, NowPlayingRead>,
+    /// Which songs have a Canvas, by track URI.
+    pub canvases: HashMap<String, CanvasRead>,
+    /// The playing song's Canvas, decoding on its own thread.
+    pub canvas: Option<CanvasPlayer>,
     /// What friends last played. A refresh keeps the last answer on screen.
     pub friends: Loadable<Vec<crate::session_reads::FriendActivity>>,
     friends_in_flight: bool,
@@ -1367,6 +1391,8 @@ impl App {
             show_now_playing_panel: !session.queue_open.unwrap_or(false)
                 && session.now_playing_open.unwrap_or(true),
             now_playing_views: HashMap::new(),
+            canvases: HashMap::new(),
+            canvas: None,
             friends: Loadable::NotLoaded,
             friends_in_flight: false,
             friends_fetched_at: None,
@@ -3026,6 +3052,11 @@ impl App {
                     generation,
                     result,
                 } => self.receive_now_playing_view(track_uri, generation, result),
+                Event::Canvas {
+                    track_uri,
+                    generation,
+                    result,
+                } => self.receive_canvas(track_uri, generation, result),
                 Event::AudiobookShows(uris) => {
                     self.audiobook_shows.extend(uris);
                 }
@@ -3686,6 +3717,8 @@ impl App {
         self.play_counts.clear();
         self.play_count_reads.clear();
         self.now_playing_views.clear();
+        self.canvases.clear();
+        self.canvas = None;
         self.play_count_generation = self.play_count_generation.wrapping_add(1);
         self.show_pages.clear();
         self.album_types_requested.clear();
@@ -4312,6 +4345,7 @@ impl App {
             self.refresh_queue(true);
         }
         self.request_now_playing_view();
+        self.request_canvas();
     }
 
     /// Asks Spotify for the playing song's panel data, once per song while
@@ -4396,6 +4430,94 @@ impl App {
                 at: Instant::now(),
             },
         );
+    }
+
+    /// Asks the backend for the playing song's Canvas, unless its video is
+    /// already looping or the song is known to have none. A failed read is
+    /// asked again a minute later. Until a video arrives the header keeps
+    /// the cover, so nothing flickers.
+    pub fn request_canvas(&mut self) {
+        if !self.local_ready || !self.network_reachable || self.offline {
+            return;
+        }
+        let Some(now) = self.now_playing() else {
+            return;
+        };
+        if now.is_episode || !now.uri.starts_with("spotify:track:") {
+            return;
+        }
+        if self
+            .canvas
+            .as_ref()
+            .is_some_and(|canvas| canvas.track_uri == now.uri)
+        {
+            return;
+        }
+        let due = match self.canvases.get(&now.uri) {
+            // A video whose player was dropped starts again from the
+            // backend's copy.
+            None | Some(CanvasRead::Video) => true,
+            Some(CanvasRead::Loading | CanvasRead::None) => false,
+            Some(CanvasRead::Failed(at)) => at.elapsed() >= PLAY_COUNT_RETRY,
+        };
+        if !due {
+            return;
+        }
+        if self.canvases.len() >= NOW_PLAYING_VIEWS_KEPT {
+            self.canvases
+                .retain(|_, read| matches!(read, CanvasRead::Loading));
+        }
+        self.canvases.insert(now.uri.clone(), CanvasRead::Loading);
+        self.backend.send(Command::Canvas {
+            track_uri: now.uri,
+            generation: self.play_count_generation,
+        });
+    }
+
+    fn receive_canvas(
+        &mut self,
+        track_uri: String,
+        generation: u64,
+        result: Result<Option<std::sync::Arc<[u8]>>, String>,
+    ) {
+        if generation != self.play_count_generation {
+            return;
+        }
+        let read = match result {
+            Ok(Some(bytes)) => {
+                // Only the playing song's video is decoded; another one's
+                // bytes stay with the backend for when it plays.
+                if self.now_playing().is_some_and(|now| now.uri == track_uri) {
+                    self.canvas = Some(CanvasPlayer {
+                        track_uri: track_uri.clone(),
+                        player: crate::canvas::Player::new(bytes),
+                    });
+                }
+                CanvasRead::Video
+            }
+            Ok(None) => CanvasRead::None,
+            Err(_) => CanvasRead::Failed(Instant::now()),
+        };
+        self.canvases.insert(track_uri, read);
+    }
+
+    /// Stops the Canvas when the panel no longer shows it: a hidden panel
+    /// holds its frame, and another song drops it. The panel itself pauses
+    /// it with the music.
+    fn sync_canvas(&mut self) {
+        let Some(track_uri) = self.canvas.as_ref().map(|canvas| canvas.track_uri.clone()) else {
+            return;
+        };
+        if self.now_playing().is_none_or(|now| now.uri != track_uri) {
+            self.canvas = None;
+            return;
+        }
+        let shown = self.now_playing_panel_shown();
+        if let Some(canvas) = &mut self.canvas
+            && !shown
+        {
+            canvas.player.pause(Instant::now());
+        }
     }
 
     /// Asks what friends last played, unless an answer is on the way. The
@@ -14062,6 +14184,7 @@ impl App {
             self.lyrics_following = false;
         }
         self.refresh_frame_now();
+        self.sync_canvas();
         self.sync_media_controls(ctx);
 
         if !self.toasts.is_empty() {
@@ -22928,6 +23051,116 @@ mod tests {
             app.now_playing_views[&uri].view,
             Loadable::Failed(_)
         ));
+        app.backend.shutdown();
+    }
+
+    /// A song's Canvas is asked for once: a song without one keeps its
+    /// cover and is not asked again, a failure waits before a retry, and a
+    /// video starts only for the playing song.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn now_playing_canvas_is_asked_once_per_song() {
+        let mut app = test_app("now-playing-canvas-cache");
+        crate::demo::populate(&mut app);
+        let uri = app.now_playing().unwrap().uri;
+        app.request_canvas();
+        assert!(app.canvases.is_empty(), "offline, nothing is asked");
+        app.offline = false;
+        app.network_reachable = true;
+        app.local_ready = true;
+        app.request_canvas();
+        assert_eq!(app.canvases[&uri], CanvasRead::Loading);
+        let generation = app.play_count_generation;
+        let video = || Ok(Some(std::sync::Arc::from(crate::canvas::FIXTURE)));
+        app.receive_canvas(uri.clone(), generation.wrapping_add(1), video());
+        assert_eq!(app.canvases[&uri], CanvasRead::Loading, "another account's");
+        assert!(app.canvas.is_none());
+
+        app.receive_canvas(uri.clone(), generation, Ok(None));
+        app.request_canvas();
+        assert_eq!(app.canvases[&uri], CanvasRead::None, "not asked again");
+
+        app.receive_canvas(uri.clone(), generation, Err("offline".into()));
+        app.request_canvas();
+        assert!(matches!(app.canvases[&uri], CanvasRead::Failed(_)));
+        assert!(app.canvas.is_none(), "the cover stays");
+
+        app.receive_canvas("spotify:track:other".into(), generation, video());
+        assert_eq!(app.canvases["spotify:track:other"], CanvasRead::Video);
+        assert!(app.canvas.is_none(), "only the playing song's is decoded");
+
+        app.canvases.remove(&uri);
+        app.request_canvas();
+        app.receive_canvas(uri.clone(), generation, video());
+        assert_eq!(app.canvases[&uri], CanvasRead::Video);
+        assert_eq!(app.canvas.as_ref().unwrap().track_uri, uri);
+        app.request_canvas();
+        assert_eq!(app.canvases[&uri], CanvasRead::Video, "already looping");
+        app.backend.shutdown();
+    }
+
+    /// The panel's header loops the Canvas while the music plays, holds its
+    /// frame while paused or while the panel is hidden, and drops it when
+    /// another song plays.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn now_playing_canvas_plays_only_while_seen() {
+        let draw = |ctx: &egui::Context, app: &mut App| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.frame_ui(ui));
+            output.textures_delta.clear();
+        };
+        let mut app = test_app("now-playing-canvas-plays");
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        crate::demo::populate(&mut app);
+        crate::demo::apply_flags(&mut app, None, Some("now-playing-canvas"));
+        assert!(app.now_playing_panel_shown());
+        let shown = |app: &App| {
+            app.canvas
+                .as_ref()
+                .and_then(|canvas| canvas.player.shown_at())
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while shown(&app).is_none() {
+            assert!(Instant::now() < deadline, "the Canvas never showed");
+            draw(&ctx, &mut app);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.canvas.as_ref().unwrap().player.is_playing());
+
+        if let Some(remote) = app.remote.as_mut() {
+            remote.state.is_playing = false;
+        }
+        app.optimistic_playing = None;
+        draw(&ctx, &mut app);
+        assert!(!app.now_playing().unwrap().playing);
+        assert!(
+            !app.canvas.as_ref().unwrap().player.is_playing(),
+            "paused music holds the frame"
+        );
+
+        if let Some(remote) = app.remote.as_mut() {
+            remote.state.is_playing = true;
+        }
+        draw(&ctx, &mut app);
+        assert!(app.canvas.as_ref().unwrap().player.is_playing());
+        app.show_now_playing_panel = false;
+        draw(&ctx, &mut app);
+        assert!(
+            !app.canvas.as_ref().unwrap().player.is_playing(),
+            "a hidden panel holds it"
+        );
+
+        app.canvas.as_mut().unwrap().track_uri = "spotify:track:other".into();
+        draw(&ctx, &mut app);
+        assert!(app.canvas.is_none(), "another song's Canvas is dropped");
         app.backend.shutdown();
     }
 

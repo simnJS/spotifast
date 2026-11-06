@@ -13,6 +13,10 @@ use super::video::{Frame, Video};
 const AHEAD: usize = 3;
 /// How soon to look again while the decoder has nothing ready yet.
 const WAITING: Duration = Duration::from_millis(15);
+/// A gap between two draws longer than this means the clip was off screen
+/// (a hidden panel, a minimized window). That time is not played, so the
+/// decoder never races through it to catch up.
+const UNSEEN: Duration = Duration::from_millis(500);
 
 const TEXTURE: egui::TextureOptions = egui::TextureOptions::LINEAR;
 
@@ -25,6 +29,8 @@ pub struct Player {
     /// When the frame on screen is due, on the clip's own timeline.
     shown: Option<Duration>,
     clock: Clock,
+    /// When [`Player::frame`] last ran.
+    drawn: Option<Instant>,
     error: Option<String>,
 }
 
@@ -66,6 +72,7 @@ impl Player {
             texture: None,
             shown: None,
             clock: Clock::default(),
+            drawn: None,
             error,
         }
     }
@@ -78,6 +85,14 @@ impl Player {
         if self.texture.is_none() {
             let first = self.receive()?;
             self.upload(ctx, first);
+        }
+        if let Some(drawn) = self.drawn.replace(now)
+            && self.clock.playing
+            && now.saturating_duration_since(drawn) > UNSEEN
+        {
+            // Played up to the last draw, then on from now.
+            self.clock.pause(drawn);
+            self.clock.playing = true;
         }
         if !self.clock.playing {
             return self.texture.clone();
@@ -242,6 +257,23 @@ mod tests {
         player.frame(&ctx, resumed + Duration::from_millis(70));
         assert_eq!(player.shown_at(), Some(Duration::from_nanos(166_666_666)));
         assert!(player.error().is_none());
+    }
+
+    #[test]
+    fn time_off_screen_is_not_played() {
+        let ctx = egui::Context::default();
+        let start = Instant::now();
+        let mut player = player();
+        let _ = first_frame(&mut player, &ctx, start);
+        player.frame(&ctx, start + Duration::from_millis(90));
+        assert_eq!(player.shown_at(), Some(Duration::from_nanos(83_333_333)));
+        // Drawn again ten seconds later, it carries on from where it was
+        // seen rather than skipping ten seconds of clip.
+        let back = start + Duration::from_secs(10);
+        player.frame(&ctx, back);
+        assert_eq!(player.shown_at(), Some(Duration::from_nanos(83_333_333)));
+        player.frame(&ctx, back + Duration::from_millis(80));
+        assert_eq!(player.shown_at(), Some(Duration::from_nanos(166_666_666)));
     }
 
     #[test]

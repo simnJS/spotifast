@@ -258,10 +258,7 @@ fn annex_b(mut sample: &[u8], length_size: usize, out: &mut Vec<u8>) -> anyhow::
 pub(crate) mod tests {
     use super::*;
 
-    /// Six 72x128 frames at 12 fps, High profile with B-frames, made with
-    /// `ffmpeg -f lavfi -i testsrc2=size=72x128:rate=12 -frames:v 6 -an
-    /// -c:v libx264 -profile:v high -pix_fmt yuv420p -bf 2 -g 6`.
-    pub(crate) const FIXTURE: &[u8] = include_bytes!("fixture.mp4");
+    pub(crate) use crate::canvas::FIXTURE;
 
     #[test]
     fn decodes_every_frame_at_its_time_and_loops() {
