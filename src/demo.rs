@@ -2578,8 +2578,23 @@ mod tests {
             app.locale = locale;
             accessible_frame(&ctx, &mut app, vec![]);
             let tree = accessible_frame(&ctx, &mut app, vec![]);
-            let home = accessible_node(&tree, &gettext(locale, "Home"), Role::Button);
-            let search = accessible_node(&tree, &gettext(locale, "Search"), Role::Button);
+            // The top bar has its own Home button and search pill, as in
+            // Spotify; the sidebar's pair is the leftmost of each.
+            let leftmost = |label: &str| {
+                tree.nodes
+                    .iter()
+                    .filter(|(_, node)| node.label() == Some(label) && node.role() == Role::Button)
+                    .min_by(|(_, a), (_, b)| {
+                        let x = |node: &egui::accesskit::Node| {
+                            node.bounds().map_or(f64::MAX, |rect| rect.x0)
+                        };
+                        x(a).total_cmp(&x(b))
+                    })
+                    .unwrap_or_else(|| panic!("missing {label:?}"))
+                    .0
+            };
+            let home = leftmost(&gettext(locale, "Home"));
+            let search = leftmost(&gettext(locale, "Search"));
             accessible_node(&tree, &gettext(locale, "Create a playlist"), Role::Button);
             accessible_node(&tree, &gettext(locale, "Albums"), Role::Button);
             accessible_node(&tree, &gettext(locale, "Artists"), Role::Button);
@@ -5832,7 +5847,7 @@ mod tests {
                 playlist as fn(&mut App, &mut egui::Ui),
             ),
             ("Fragments", "Bonobo", album),
-            ("Bonobo", "electronic, downtempo, ambient", artist),
+            ("Bonobo", "1,284,930 followers", artist),
             ("Rework", "37signals", show),
         ] {
             let painted = view_frame(&ctx, &mut app, vec![], view);
@@ -5936,7 +5951,7 @@ mod tests {
                 playlist as fn(&mut App, &mut egui::Ui),
             ),
             ("Fragments", "Bonobo", album),
-            ("Bonobo", "electronic, downtempo, ambient", artist),
+            ("Bonobo", "1,284,930 followers", artist),
             ("Rework", "37signals", show),
         ] {
             let painted = view_frame(&ctx, &mut app, vec![], view);
@@ -12522,7 +12537,9 @@ mod tests {
                 settle!();
                 continue;
             };
-            if bounds.y0 >= 60.0 && bounds.y1 <= 200.0 {
+            // Below the top bar and the artist's sticky header, which
+            // takes the pointer once the banner has scrolled away.
+            if bounds.y0 >= 140.0 && bounds.y1 <= 300.0 {
                 before = offset;
                 at = Some(egui::pos2(
                     ((bounds.x0 + bounds.x1) / 2.0) as f32,
@@ -12530,7 +12547,7 @@ mod tests {
                 ));
                 break;
             }
-            direction = if bounds.y0 < 60.0 { -1.0 } else { 1.0 };
+            direction = if bounds.y0 < 140.0 { -1.0 } else { 1.0 };
             draw(&mut app, wheel(direction));
             settle!();
         }
