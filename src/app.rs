@@ -3541,7 +3541,11 @@ impl App {
                     self.load_home(true);
                 }
             }
-            Page::Search => {}
+            Page::Search => {
+                if self.search.browse.needs_load() {
+                    self.load_browse();
+                }
+            }
             Page::LikedSongs => {
                 if !self.liked_songs.cache_checked {
                     self.ensure_liked_songs();
@@ -3653,6 +3657,7 @@ impl App {
                     self.ensure_loaded(Page::Radio(seed));
                 }
             }
+            Page::Category(id) => self.ensure_loaded(Page::Category(id)),
             Page::Queue => {
                 if self.queue.needs_load() {
                     self.refresh_queue(true);
@@ -3750,6 +3755,8 @@ impl App {
         self.search.catalogue_pending = false;
         self.search.playlists_pending = false;
         self.search.error = None;
+        self.search.browse = Loadable::NotLoaded;
+        self.search.categories.clear();
         self.table_rows.clear();
         self.page_used.clear();
         self.track_used.clear();
@@ -6017,7 +6024,7 @@ impl App {
                     self.load_home(self.home.refresh_failed);
                 }
             }
-            Page::Search => {}
+            Page::Search => self.load_browse(),
             Page::LikedSongs => self.ensure_liked_songs(),
             Page::Albums => {
                 if self.network_reachable && !self.library.albums.loaded_once {
@@ -6134,12 +6141,33 @@ impl App {
                     self.load_radio(&seed);
                 }
             }
+            Page::Category(id) => self.load_category(&id),
             Page::Queue => {
                 if self.network_reachable {
                     self.refresh_queue(true);
                 }
             }
             Page::Settings => self.refresh_autostart(),
+        }
+    }
+
+    /// Reads Spotify's Browse all grid for Search, once a session: a grid
+    /// already read or on its way is kept.
+    fn load_browse(&mut self) {
+        if self.network_reachable && self.search.browse.needs_load() {
+            self.search.browse = Loadable::Loading;
+            self.backend.api(ApiRequest::BrowseAll);
+        }
+    }
+
+    /// Reads the browse page behind a Browse all tile, once while the app
+    /// runs.
+    fn load_category(&mut self, id: &str) {
+        let page = self.search.categories.entry(id.to_owned()).or_default();
+        if self.network_reachable && page.needs_load() {
+            *page = Loadable::Loading;
+            self.backend
+                .api(ApiRequest::BrowsePage { id: id.to_owned() });
         }
     }
 
@@ -6880,6 +6908,30 @@ impl App {
                 self.radio_pages.remove(seed);
             }
             Page::Queue => self.queue = Loadable::NotLoaded,
+            // A browse page or grid on show stays until the new answer
+            // replaces it.
+            Page::Category(id)
+                if self.is_connected()
+                    && self.network_reachable
+                    && self
+                        .search
+                        .categories
+                        .get(id)
+                        .and_then(Loadable::get)
+                        .is_some() =>
+            {
+                self.backend.api(ApiRequest::BrowsePage { id: id.clone() });
+                return;
+            }
+            Page::Search
+                if self.search.committed.is_empty()
+                    && self.is_connected()
+                    && self.network_reachable
+                    && self.search.browse.get().is_some() =>
+            {
+                self.backend.api(ApiRequest::BrowseAll);
+                return;
+            }
             _ => {}
         }
         self.ensure_loaded(page);
@@ -8276,6 +8328,24 @@ impl App {
                     self.request_contains(uris);
                 }
                 self.home.new_release_tracks.refresh(result);
+            }
+            ApiResponse::BrowseAll(result) => {
+                self.search.browse = match result {
+                    Ok(sections) => Loadable::Loaded(sections),
+                    // A grid on show stays when a refresh fails.
+                    Err(_) if self.search.browse.get().is_some() => return,
+                    Err(error) => Loadable::Failed(friendly_api_error(self.locale, &error)),
+                };
+            }
+            ApiResponse::BrowsePage { id, result } => {
+                let page = self.search.categories.entry(id).or_default();
+                match result {
+                    Ok(loaded) => *page = Loadable::Loaded(loaded),
+                    Err(_) if page.get().is_some() => {}
+                    Err(error) => {
+                        *page = Loadable::Failed(friendly_api_error(self.locale, &error));
+                    }
+                }
             }
             ApiResponse::HiddenSongs { generation, result } => {
                 if generation != self.hidden_songs_generation {
@@ -33235,6 +33305,78 @@ mod tests {
                 .iter()
                 .any(|action| matches!(action, Action::Open(Page::WhatsNew)))
         );
+        app.backend.shutdown();
+    }
+
+    fn browse_tile(id: &str) -> crate::model::BrowseSection {
+        crate::model::BrowseSection {
+            title: "Browse all".into(),
+            items: vec![crate::model::BrowseItem::Category(
+                crate::model::BrowseCategory {
+                    id: id.into(),
+                    title: "Pop".into(),
+                    color: Some([0x14, 0x8a, 0x08]),
+                    image: None,
+                },
+            )],
+        }
+    }
+
+    /// Search reads Spotify's Browse all grid once, and a refresh that fails
+    /// leaves the grid on show.
+    #[test]
+    fn search_browse_all_is_read_once_and_kept_through_a_failed_refresh() {
+        let mut app = headless_app();
+        app.load_browse();
+        assert!(app.search.browse.is_loading());
+        app.handle_api(ApiResponse::BrowseAll(Ok(vec![browse_tile(
+            "0JQ5DAqbMKFdemo0000005",
+        )])));
+        assert_eq!(app.search.browse.get().map(Vec::len), Some(1));
+        app.load_browse();
+        assert!(app.search.browse.get().is_some());
+        app.handle_api(ApiResponse::BrowseAll(Err(
+            crate::api::ApiError::RateLimited,
+        )));
+        assert_eq!(app.search.browse.get().map(Vec::len), Some(1));
+
+        let mut app = headless_app();
+        app.load_browse();
+        app.handle_api(ApiResponse::BrowseAll(Err(
+            crate::api::ApiError::RateLimited,
+        )));
+        assert!(matches!(app.search.browse, Loadable::Failed(_)));
+        // Opening Search again asks again.
+        app.load_browse();
+        assert!(app.search.browse.is_loading());
+    }
+
+    /// A tile opens its browse page, which is read once and kept.
+    #[test]
+    fn search_browse_tile_opens_its_category_page() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        let id = "0JQ5DAqbMKFdemo0000005";
+        app.apply(Action::Open(Page::Category(id.into())), &ctx);
+        assert_eq!(app.page(), &Page::Category(id.into()));
+        app.load_category(id);
+        assert!(app.search.categories[id].is_loading());
+        let page = crate::model::CategoryPage {
+            title: "Pop".into(),
+            color: None,
+            sections: vec![browse_tile("0JQ5DAqbMKFdemo0000030")],
+        };
+        app.handle_api(ApiResponse::BrowsePage {
+            id: id.into(),
+            result: Ok(page.clone()),
+        });
+        assert_eq!(app.search.categories[id].get(), Some(&page));
+        app.load_category(id);
+        app.handle_api(ApiResponse::BrowsePage {
+            id: id.into(),
+            result: Err(crate::api::ApiError::RateLimited),
+        });
+        assert_eq!(app.search.categories[id].get(), Some(&page));
         app.backend.shutdown();
     }
 

@@ -201,6 +201,12 @@ pub enum ApiRequest {
     HiddenSongs {
         generation: u64,
     },
+    /// Spotify's Browse all grid for Search, over the playback session.
+    BrowseAll,
+    /// The browse page behind a Browse all tile, by its page ID.
+    BrowsePage {
+        id: String,
+    },
     /// Hide a song in one of Spotify's playlists, or show it again.
     SetHiddenInPlaylist {
         playlist_uri: String,
@@ -471,6 +477,11 @@ pub enum ApiResponse {
     HiddenSongs {
         generation: u64,
         result: ApiResult<Vec<(String, String)>>,
+    },
+    BrowseAll(ApiResult<Vec<crate::model::BrowseSection>>),
+    BrowsePage {
+        id: String,
+        result: ApiResult<crate::model::CategoryPage>,
     },
     HiddenInPlaylistSet {
         playlist_uri: String,
@@ -5237,6 +5248,7 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         ApiRequest::HiddenSongs { .. } | ApiRequest::SetHiddenInPlaylist { .. } => {
             Operation::UserData
         }
+        ApiRequest::BrowseAll | ApiRequest::BrowsePage { .. } => Operation::Catalog,
         ApiRequest::SearchCatalogue { .. } => Operation::CatalogSearch,
         ApiRequest::Search { .. } => Operation::PlaylistSearch,
         ApiRequest::PlaySearch { kind, .. } if kind == "playlist" => Operation::PlaylistSearch,
@@ -5515,6 +5527,38 @@ fn playback_session<'a>(
         })
 }
 
+/// Spotify's browse pages over the playback session's Pathfinder. The Web
+/// API's categories carry neither the tiles' colours nor, for apps made
+/// since November 2024, their playlists, so there is no stand-in.
+async fn read_browse(
+    api: &ApiGateway,
+    engine: Option<&Engine>,
+    request: ApiRequest,
+) -> ApiResponse {
+    let unavailable = || ApiError::Status {
+        status: 503,
+        message: "Browsing Spotify's categories needs the playback session.".into(),
+    };
+    let session = engine
+        .filter(|engine| same_account(&engine.session().username(), api.account().as_ref()))
+        .map(Engine::session);
+    let web = api.prerelease_http_client();
+    let reach = session.zip(web.as_deref());
+    match request {
+        ApiRequest::BrowsePage { id } => {
+            let result = match reach {
+                Some((session, web)) => session_reads::browse_page(session, web, &id).await,
+                None => Err(unavailable()),
+            };
+            ApiResponse::BrowsePage { id, result }
+        }
+        _ => ApiResponse::BrowseAll(match reach {
+            Some((session, web)) => session_reads::browse_all(session, web).await,
+            None => Err(unavailable()),
+        }),
+    }
+}
+
 async fn shared_made_for_you(api: &ApiGateway) -> ApiResult<Vec<Playlist>> {
     let client = api.client_for(Operation::PlaylistSearch).await?;
     let _background_permit = client.background_permit().await;
@@ -5679,6 +5723,12 @@ async fn handle(
         };
         return (ApiResponse::HiddenSongs { generation, result }, Vec::new());
     }
+    if matches!(
+        request,
+        ApiRequest::BrowseAll | ApiRequest::BrowsePage { .. }
+    ) {
+        return (read_browse(api, engine, request).await, Vec::new());
+    }
     if let ApiRequest::SetHiddenInPlaylist {
         playlist_uri,
         track_uri,
@@ -5817,6 +5867,8 @@ async fn handle(
         | ApiRequest::NewReleases { .. }
         | ApiRequest::NewReleaseTracks { .. }
         | ApiRequest::HiddenSongs { .. }
+        | ApiRequest::BrowseAll
+        | ApiRequest::BrowsePage { .. }
         | ApiRequest::SetHiddenInPlaylist { .. } => unreachable!("handled before Web API routing"),
         ApiRequest::MyPlaylists { offset, generation } => ApiResponse::MyPlaylists {
             offset,

@@ -755,6 +755,17 @@ pub fn populate(app: &mut App) {
         episodes: Some(page((0..4).map(|index| episode(index, 1)).collect())),
     });
     app.settings.search_history = vec!["Khruangbin".into(), "ambient".into(), "Rework".into()];
+    // Search's Browse all grid, and the Pop page behind one of its tiles,
+    // read from sample answers shaped as Spotify's web player reads them.
+    app.search.browse = Loadable::from_result(crate::session_reads::browse_all_from(
+        &serde_json::from_str(include_str!("demo/browse-all.json")).unwrap(),
+    ));
+    app.search.categories.insert(
+        DEMO_POP_PAGE.into(),
+        Loadable::from_result(crate::session_reads::browse_page_from(
+            &serde_json::from_str(include_str!("demo/browse-page.json")).unwrap(),
+        )),
+    );
 
     // Playback: a remote speaker is playing the second playlist.
     app.queue = Loadable::Loaded(Queue {
@@ -1045,6 +1056,9 @@ fn demo_friends() -> Vec<crate::session_reads::FriendActivity> {
     ]
 }
 
+/// The demo's Pop tile, whose page `demo/browse-page.json` holds.
+pub const DEMO_POP_PAGE: &str = "0JQ5DAqbMKFdemo0000005";
+
 /// Applies `--demo-page` and `--demo-show`.
 /// Makes the displayed song this computer's playback, with that song's own
 /// metadata, so the player bar draws the same as without it.
@@ -1220,6 +1234,17 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                     };
                     app.receive_recommendations(Err(error));
                 }
+            }
+            // Search with nothing searched: the recent searches over
+            // Spotify's Browse all grid, loaded or on its way.
+            "search-browse" | "search-browse-loading" => {
+                app.search.query.clear();
+                app.search.committed.clear();
+                app.search.results = Loadable::NotLoaded;
+                if surface == "search-browse-loading" {
+                    app.search.browse = Loadable::Loading;
+                }
+                app.open(Page::Search);
             }
             "artist-concerts" => {
                 app.artist_pages

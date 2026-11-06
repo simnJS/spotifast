@@ -127,6 +127,9 @@ pub enum Page {
     /// Spotify's radio seeded by a song, playlist, album, or artist, by the
     /// seed's URI.
     Radio(String),
+    /// A Spotify browse page, such as a genre or a mood from Search's
+    /// Browse all grid, by the ID of its `spotify:page:` URI.
+    Category(String),
     Queue,
     Settings,
 }
@@ -149,6 +152,7 @@ impl Page {
             Page::Artist(id) => format!("artist:{id}"),
             Page::Show(id) => format!("show:{id}"),
             Page::Radio(seed) => format!("radio:{seed}"),
+            Page::Category(id) => format!("category:{id}"),
             Page::Queue => "queue".into(),
             Page::Settings => "settings".into(),
         }
@@ -176,6 +180,7 @@ impl Page {
                     "artist" => Page::Artist(id.into()),
                     "show" => Page::Show(id.into()),
                     "radio" if crate::util::station_uri(id).is_some() => Page::Radio(id.into()),
+                    "category" if is_page_id(id) => Page::Category(id.into()),
                     _ => return None,
                 }
             }
@@ -193,9 +198,16 @@ impl Page {
             "album" => Page::Album(id),
             "artist" => Page::Artist(id),
             "show" => Page::Show(id),
+            "page" if is_page_id(&id) => Page::Category(id),
             _ => return None,
         })
     }
+}
+
+/// Whether `id` is shaped like the ID of a `spotify:page:` URI: 22 base62
+/// characters.
+pub fn is_page_id(id: &str) -> bool {
+    id.len() == 22 && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -842,6 +854,61 @@ pub struct SearchState {
     /// a prefix; the next query of the same run replaces it.
     pub typed_entry: Option<(u64, String)>,
     pub focus_requested: bool,
+    /// Spotify's Browse all grid, shown while nothing is searched. Read
+    /// once a session; a failed read is tried again when Search opens.
+    pub browse: Loadable<Vec<BrowseSection>>,
+    /// The browse pages opened from the grid, by page ID, kept while the
+    /// app runs.
+    pub categories: HashMap<String, Loadable<CategoryPage>>,
+}
+
+/// One tile of a browse grid: a Spotify browse page, with the colour and
+/// the artwork Spotify gives its card.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrowseCategory {
+    /// The ID of the page's `spotify:page:` URI.
+    pub id: String,
+    pub title: String,
+    /// The tile's background, as Spotify's answer names it.
+    pub color: Option<[u8; 3]>,
+    pub image: Option<String>,
+}
+
+/// What a browse section lists.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BrowseItem {
+    Category(BrowseCategory),
+    Playlist(Playlist),
+    Album(Album),
+    Artist(Artist),
+}
+
+/// A titled section of a browse page: a grid of tiles or a shelf of cards.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BrowseSection {
+    pub title: String,
+    pub items: Vec<BrowseItem>,
+}
+
+impl BrowseSection {
+    /// Whether the section is a grid of category tiles rather than a shelf
+    /// of cards.
+    pub fn is_grid(&self) -> bool {
+        !self.items.is_empty()
+            && self
+                .items
+                .iter()
+                .all(|item| matches!(item, BrowseItem::Category(_)))
+    }
+}
+
+/// A browse page opened from a tile: its header and its sections.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CategoryPage {
+    pub title: String,
+    /// The header's colour, as Spotify's answer names it.
+    pub color: Option<[u8; 3]>,
+    pub sections: Vec<BrowseSection>,
 }
 
 #[derive(Default)]

@@ -1,0 +1,552 @@
+{
+ "data": {
+  "browse": {
+   "__typename": "BrowseSectionContainer",
+   "header": {
+    "title": {
+     "transformedLabel": "Pop"
+    },
+    "color": {
+     "hex": "#148a08"
+    },
+    "backgroundImage": null
+   },
+   "sections": {
+    "items": [
+     {
+      "uri": "spotify:section:0JQ5DAqbMKFdemoSection2",
+      "data": {
+       "__typename": "BrowseGenericSectionData",
+       "title": {
+        "transformedLabel": "Popular Pop playlists"
+       }
+      },
+      "sectionItems": {
+       "items": [
+        {
+         "uri": "spotify:playlist:37i9dQZF1DXdemo0000000",
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "uri": "spotify:playlist:37i9dQZF1DXdemo0000000",
+           "name": "Pop Rising",
+           "description": "The best of pop, picked for you.",
+           "images": {
+            "items": [
+             {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-pop0/300/300",
+                "width": 300,
+                "height": 300
+               }
+              ]
+             }
+            ]
+           },
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify"
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:playlist:37i9dQZF1DXdemo0000001",
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "uri": "spotify:playlist:37i9dQZF1DXdemo0000001",
+           "name": "Today's Pop Picks",
+           "description": "The best of pop, picked for you.",
+           "images": {
+            "items": [
+             {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-pop1/300/300",
+                "width": 300,
+                "height": 300
+               }
+              ]
+             }
+            ]
+           },
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify"
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:playlist:37i9dQZF1DXdemo0000002",
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "uri": "spotify:playlist:37i9dQZF1DXdemo0000002",
+           "name": "Pop Right Now",
+           "description": "The best of pop, picked for you.",
+           "images": {
+            "items": [
+             {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-pop2/300/300",
+                "width": 300,
+                "height": 300
+               }
+              ]
+             }
+            ]
+           },
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify"
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:playlist:37i9dQZF1DXdemo0000003",
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "uri": "spotify:playlist:37i9dQZF1DXdemo0000003",
+           "name": "Feel-Good Pop",
+           "description": "The best of pop, picked for you.",
+           "images": {
+            "items": [
+             {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-pop3/300/300",
+                "width": 300,
+                "height": 300
+               }
+              ]
+             }
+            ]
+           },
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify"
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:playlist:37i9dQZF1DXdemo0000004",
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "uri": "spotify:playlist:37i9dQZF1DXdemo0000004",
+           "name": "Pop Throwbacks",
+           "description": "The best of pop, picked for you.",
+           "images": {
+            "items": [
+             {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-pop4/300/300",
+                "width": 300,
+                "height": 300
+               }
+              ]
+             }
+            ]
+           },
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify"
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:playlist:37i9dQZF1DXdemo0000005",
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "uri": "spotify:playlist:37i9dQZF1DXdemo0000005",
+           "name": "Acoustic Pop",
+           "description": "The best of pop, picked for you.",
+           "images": {
+            "items": [
+             {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-pop5/300/300",
+                "width": 300,
+                "height": 300
+               }
+              ]
+             }
+            ]
+           },
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify"
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:playlist:37i9dQZF1DXdemo0000006",
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "uri": "spotify:playlist:37i9dQZF1DXdemo0000006",
+           "name": "Indie Pop Mix",
+           "description": "The best of pop, picked for you.",
+           "images": {
+            "items": [
+             {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-pop6/300/300",
+                "width": 300,
+                "height": 300
+               }
+              ]
+             }
+            ]
+           },
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify"
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:playlist:37i9dQZF1DXdemo0000007",
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "uri": "spotify:playlist:37i9dQZF1DXdemo0000007",
+           "name": "Pop Sauce",
+           "description": "The best of pop, picked for you.",
+           "images": {
+            "items": [
+             {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-pop7/300/300",
+                "width": 300,
+                "height": 300
+               }
+              ]
+             }
+            ]
+           },
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify"
+            }
+           }
+          }
+         }
+        }
+       ]
+      }
+     },
+     {
+      "uri": "spotify:section:0JQ5DAqbMKFdemoSection3",
+      "data": {
+       "__typename": "BrowseGenericSectionData",
+       "title": {
+        "transformedLabel": "New pop albums"
+       }
+      },
+      "sectionItems": {
+       "items": [
+        {
+         "uri": "spotify:album:4demoAlbum000000000000",
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "uri": "spotify:album:4demoAlbum000000000000",
+           "name": "Glass Summer",
+           "coverArt": {
+            "sources": [
+             {
+              "url": "https://picsum.photos/seed/spotifast-popalbum0/300/300",
+              "width": 300,
+              "height": 300
+             }
+            ]
+           },
+           "artists": {
+            "items": [
+             {
+              "uri": "spotify:artist:6demoArtist00000000000",
+              "profile": {
+               "name": "Velvetroot Drift"
+              }
+             }
+            ]
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:album:4demoAlbum000000000001",
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "uri": "spotify:album:4demoAlbum000000000001",
+           "name": "Neon Postcards",
+           "coverArt": {
+            "sources": [
+             {
+              "url": "https://picsum.photos/seed/spotifast-popalbum1/300/300",
+              "width": 300,
+              "height": 300
+             }
+            ]
+           },
+           "artists": {
+            "items": [
+             {
+              "uri": "spotify:artist:6demoArtist00000000001",
+              "profile": {
+               "name": "Paper Moon Static"
+              }
+             }
+            ]
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:album:4demoAlbum000000000002",
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "uri": "spotify:album:4demoAlbum000000000002",
+           "name": "Soft Static",
+           "coverArt": {
+            "sources": [
+             {
+              "url": "https://picsum.photos/seed/spotifast-popalbum2/300/300",
+              "width": 300,
+              "height": 300
+             }
+            ]
+           },
+           "artists": {
+            "items": [
+             {
+              "uri": "spotify:artist:6demoArtist00000000002",
+              "profile": {
+               "name": "Lumen Harbor"
+              }
+             }
+            ]
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:album:4demoAlbum000000000003",
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "uri": "spotify:album:4demoAlbum000000000003",
+           "name": "Afterglow FM",
+           "coverArt": {
+            "sources": [
+             {
+              "url": "https://picsum.photos/seed/spotifast-popalbum3/300/300",
+              "width": 300,
+              "height": 300
+             }
+            ]
+           },
+           "artists": {
+            "items": [
+             {
+              "uri": "spotify:artist:6demoArtist00000000003",
+              "profile": {
+               "name": "Cassia Vale"
+              }
+             }
+            ]
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:episode:x",
+         "content": {
+          "__typename": "EpisodeOrChapterResponseWrapper",
+          "data": {
+           "__typename": "Episode"
+          }
+         }
+        }
+       ]
+      }
+     },
+     {
+      "uri": "spotify:section:0JQ5DAqbMKFdemoSection4",
+      "data": {
+       "__typename": "BrowseGridSectionData",
+       "title": {
+        "transformedLabel": "Explore Pop"
+       }
+      },
+      "sectionItems": {
+       "items": [
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000030",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "K-Pop"
+             },
+             "backgroundColor": {
+              "hex": "#e8115b"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse30/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000031",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Pop Latino"
+             },
+             "backgroundColor": {
+              "hex": "#e1118c"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse31/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000032",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Indie Pop"
+             },
+             "backgroundColor": {
+              "hex": "#608108"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse32/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000033",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Dance Pop"
+             },
+             "backgroundColor": {
+              "hex": "#d84000"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse33/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        }
+       ]
+      }
+     }
+    ],
+    "pagingInfo": {
+     "nextOffset": null
+    }
+   }
+  }
+ },
+ "extensions": {}
+}

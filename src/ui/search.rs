@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 
-use egui::{Align, CornerRadius, Layout, Rect, Sense, Vec2, pos2, vec2};
+use egui::{Align, CornerRadius, Layout, Pos2, Rect, Sense, Vec2, pos2, vec2};
 
 use crate::api::models::{Artist, ArtistRef, PlayableItem, SearchResults, pick_image};
 use crate::app::App;
 use crate::i18n::gettext;
-use crate::model::{Action, Loadable, Page, RowContext, SearchFilter};
+use crate::model::{
+    Action, BrowseCategory, BrowseItem, BrowseSection, Loadable, Page, RowContext, SearchFilter,
+};
 use crate::theme::{self, Icon};
 
 use super::widgets::{self, TrackRow};
@@ -96,34 +98,477 @@ fn recent(app: &mut App, ui: &mut egui::Ui) {
         );
         return;
     }
-    // Spotify fills this page with its Browse all grid of coloured category
-    // tiles. The app does not read Spotify's categories yet; when it does,
-    // the grid goes here, under the recent searches, and replaces the empty
-    // state below.
-    if app.settings.search_history.is_empty() {
-        widgets::empty_state(
-            ui,
-            &palette,
-            Icon::Search,
-            &gettext(app.locale, "Search Spotify"),
-            &gettext(
-                app.locale,
-                "Find songs, artists, albums, playlists, and podcasts.",
-            ),
-        );
+    if !app.settings.search_history.is_empty() {
+        theme::section_title(ui, &palette, &gettext(app.locale, "Recent searches"));
+        ui.add_space(6.0);
+        let history = app.settings.search_history.clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            for query in &history {
+                let (response, forget) =
+                    theme::soft_button_dismiss(ui, &palette, Icon::Clock, query);
+                if forget {
+                    app.actions.push(Action::ForgetSearch(query.clone()));
+                } else if response.clicked() {
+                    app.actions.push(Action::Search(query.clone()));
+                }
+            }
+        });
+        ui.add_space(16.0);
+    }
+    browse_all(app, ui);
+}
+
+/// Spotify's Browse all grid, under the recent searches, as Spotify's own
+/// Search page shows it while nothing is searched.
+fn browse_all(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    let locale = app.locale;
+    match &app.search.browse {
+        Loadable::Loaded(sections) => {
+            let sections: Vec<BrowseSection> = sections
+                .iter()
+                .filter(|section| section.is_grid())
+                .cloned()
+                .collect();
+            for section in &sections {
+                let title = if section.title.is_empty() {
+                    gettext(locale, "Browse all").into_owned()
+                } else {
+                    section.title.clone()
+                };
+                theme::section_title(ui, &palette, &title);
+                ui.add_space(4.0);
+                tile_grid(app, ui, &section.items);
+                ui.add_space(16.0);
+            }
+        }
+        Loadable::Failed(error) => {
+            let error = error.clone();
+            if app.settings.search_history.is_empty() {
+                search_spotify(app, ui);
+                ui.add_space(16.0);
+            }
+            widgets::error_row(ui, app, &error, Some(Page::Search));
+        }
+        Loadable::Loading | Loadable::NotLoaded if app.network_reachable => {
+            theme::section_title(ui, &palette, &gettext(locale, "Browse all"));
+            ui.add_space(4.0);
+            skeleton_tiles(ui, &palette, locale, SKELETON_TILES);
+        }
+        Loadable::Loading | Loadable::NotLoaded => {
+            if app.settings.search_history.is_empty() {
+                search_spotify(app, ui);
+            }
+        }
+    }
+}
+
+/// The page's empty state when it has no grid to show.
+fn search_spotify(app: &App, ui: &mut egui::Ui) {
+    widgets::empty_state(
+        ui,
+        &app.palette,
+        Icon::Search,
+        &gettext(app.locale, "Search Spotify"),
+        &gettext(
+            app.locale,
+            "Find songs, artists, albums, playlists, and podcasts.",
+        ),
+    );
+}
+
+/// The narrowest a tile gets before the grid drops a column, and the room
+/// between tiles: Spotify pads each tile by 12 points.
+const TILE_MIN_WIDTH: f32 = 180.0;
+const TILE_GAP: f32 = 24.0;
+/// Spotify's tiles are 16:9.
+const TILE_ASPECT: f32 = 0.5625;
+const TILE_RADIUS: f32 = 8.0;
+/// The tilted cover: 45% of the tile's width, turned 25 degrees and pushed
+/// 18% right and 2% up from the tile's bottom right corner.
+const TILE_ART_SHARE: f32 = 0.45;
+const TILE_ART_TURN: f32 = 25.0;
+const TILE_ART_SHIFT: Vec2 = vec2(0.18, -0.02);
+const TILE_ART_RADIUS: f32 = 4.0;
+/// Placeholder tiles while the grid loads.
+const SKELETON_TILES: usize = 12;
+
+/// How many tiles a row of `width` holds, and how wide each is.
+pub(crate) fn tile_layout(width: f32) -> (usize, f32) {
+    let columns = ((width + TILE_GAP) / (TILE_MIN_WIDTH + TILE_GAP))
+        .floor()
+        .max(2.0) as usize;
+    let tile = ((width - TILE_GAP * (columns - 1) as f32) / columns as f32).max(1.0);
+    (columns, tile)
+}
+
+/// Category tiles in rows that fill the page's width. Items that are not
+/// categories are left to the shelves.
+fn tile_grid(app: &mut App, ui: &mut egui::Ui, items: &[BrowseItem]) {
+    let tiles: Vec<&BrowseCategory> = items
+        .iter()
+        .filter_map(|item| match item {
+            BrowseItem::Category(category) => Some(category),
+            _ => None,
+        })
+        .collect();
+    // Spotify's titles shrink when the whole grid is 520 points or narrower.
+    let narrow = ui.available_width() <= 520.0;
+    let (columns, width) = tile_layout(ui.available_width());
+    let size = vec2(width, (width * TILE_ASPECT).round());
+    for row in tiles.chunks(columns) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = TILE_GAP;
+            for category in row {
+                if category_tile(app, ui, category, size, narrow).clicked() {
+                    app.actions
+                        .push(Action::Open(Page::Category(category.id.clone())));
+                }
+            }
+        });
+        ui.add_space(TILE_GAP - ui.spacing().item_spacing.y);
+    }
+}
+
+/// The colour Spotify gives a tile, or the theme's surface without one.
+fn tile_color(app: &App, color: Option<[u8; 3]>) -> egui::Color32 {
+    color.map_or(app.palette.surface_hover, |[r, g, b]| {
+        egui::Color32::from_rgb(r, g, b)
+    })
+}
+
+/// One coloured tile: its title at the top left and its cover tilted at the
+/// bottom right, cut to the tile's rounded corners.
+fn category_tile(
+    app: &App,
+    ui: &mut egui::Ui,
+    category: &BrowseCategory,
+    size: Vec2,
+    narrow: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let title = category.title.clone();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Link, true, &title));
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let painter = ui.painter();
+    let mut fill = tile_color(app, category.color);
+    if response.hovered() {
+        fill = fill.gamma_multiply(0.92);
+    }
+    painter.rect_filled(rect, CornerRadius::same(TILE_RADIUS as u8), fill);
+    if let Some(url) = &category.image {
+        paint_tilted_art(ui, url, rect);
+    }
+    // Spotify writes every tile's title in white over its own colour, which
+    // no theme chooses, so the title does not follow the theme either.
+    let font = theme::bold(if narrow { 16.0 } else { 24.0 });
+    let wrap = (size.x - 16.0 - size.x * 0.3).max(16.0);
+    let mut job =
+        egui::text::LayoutJob::simple(category.title.clone(), font, egui::Color32::WHITE, wrap);
+    job.wrap.max_rows = 3;
+    job.wrap.break_anywhere = false;
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    ui.painter_at(rect)
+        .galley(rect.min + vec2(16.0, 16.0), galley, egui::Color32::WHITE);
+    response
+}
+
+/// Paints `url`'s artwork turned as on Spotify's tiles, cut where it leaves
+/// the tile's rounded outline. egui clips only to rectangles, so the cover
+/// is a mesh of the outline both shapes share.
+fn paint_tilted_art(ui: &egui::Ui, url: &str, tile: Rect) {
+    let side = tile.width() * TILE_ART_SHARE;
+    let pixels = crate::images::cover_pixels(side * ui.ctx().pixels_per_point());
+    let uri = crate::images::scaled_uri(url, pixels);
+    let image = egui::Image::new(uri.as_str())
+        .texture_options(crate::images::COVER_TEXTURE)
+        .show_loading_spinner(false);
+    let Ok(egui::load::TexturePoll::Ready { texture }) =
+        image.load_for_size(ui.ctx(), Vec2::splat(side))
+    else {
+        return;
+    };
+    let shape = tilted_art_outline(tile);
+    if shape.len() < 3 {
         return;
     }
-    theme::section_title(ui, &palette, &gettext(app.locale, "Recent searches"));
-    ui.add_space(6.0);
-    let history = app.settings.search_history.clone();
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-        for query in &history {
-            let (response, forget) = theme::soft_button_dismiss(ui, &palette, Icon::Clock, query);
-            if forget {
-                app.actions.push(Action::ForgetSearch(query.clone()));
-            } else if response.clicked() {
-                app.actions.push(Action::Search(query.clone()));
+    let (center, turn) = tilted_art_frame(tile);
+    let back = egui::emath::Rot2::from_angle(-turn);
+    let mut mesh = egui::Mesh::with_texture(texture.id);
+    for point in &shape {
+        let local = back * (*point - center);
+        let uv = pos2(local.x / side + 0.5, local.y / side + 0.5);
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: *point,
+            uv,
+            color: egui::Color32::WHITE,
+        });
+    }
+    for index in 1..shape.len() as u32 - 1 {
+        mesh.add_triangle(0, index, index + 1);
+    }
+    ui.painter_at(tile).add(mesh);
+}
+
+/// Where the tilted cover's centre is, and how far it is turned.
+fn tilted_art_frame(tile: Rect) -> (Pos2, f32) {
+    let side = tile.width() * TILE_ART_SHARE;
+    let turn = TILE_ART_TURN.to_radians();
+    let resting = pos2(tile.right() - side / 2.0, tile.bottom() - side / 2.0);
+    let shift = egui::emath::Rot2::from_angle(turn) * (TILE_ART_SHIFT * side);
+    (resting + shift, turn)
+}
+
+/// The outline of the tilted cover inside the tile's rounded outline.
+pub(crate) fn tilted_art_outline(tile: Rect) -> Vec<Pos2> {
+    let side = tile.width() * TILE_ART_SHARE;
+    let (center, turn) = tilted_art_frame(tile);
+    let rotate = egui::emath::Rot2::from_angle(turn);
+    let art: Vec<Pos2> = rounded_outline(
+        Rect::from_center_size(Pos2::ZERO, Vec2::splat(side)),
+        TILE_ART_RADIUS,
+    )
+    .into_iter()
+    .map(|point| center + rotate * point.to_vec2())
+    .collect();
+    clip_convex(&art, &rounded_outline(tile, TILE_RADIUS))
+}
+
+/// A rounded rectangle's outline, clockwise on screen, as a polygon.
+fn rounded_outline(rect: Rect, radius: f32) -> Vec<Pos2> {
+    const STEPS: usize = 6;
+    let radius = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
+    let corners = [
+        (pos2(rect.right() - radius, rect.top() + radius), -90.0_f32),
+        (pos2(rect.right() - radius, rect.bottom() - radius), 0.0),
+        (pos2(rect.left() + radius, rect.bottom() - radius), 90.0),
+        (pos2(rect.left() + radius, rect.top() + radius), 180.0),
+    ];
+    let mut points = Vec::with_capacity(4 * (STEPS + 1));
+    for (center, start) in corners {
+        for step in 0..=STEPS {
+            let angle = (start + 90.0 * step as f32 / STEPS as f32).to_radians();
+            points.push(center + radius * vec2(angle.cos(), angle.sin()));
+        }
+    }
+    points
+}
+
+/// The part of convex polygon `subject` inside convex polygon `clip`, both
+/// wound the same way (Sutherland and Hodgman).
+fn clip_convex(subject: &[Pos2], clip: &[Pos2]) -> Vec<Pos2> {
+    let mut output = subject.to_vec();
+    for (index, &from) in clip.iter().enumerate() {
+        let to = clip[(index + 1) % clip.len()];
+        let edge = to - from;
+        let inside = |point: Pos2| edge.x * (point.y - from.y) - edge.y * (point.x - from.x) >= 0.0;
+        let input = std::mem::take(&mut output);
+        for (at, &current) in input.iter().enumerate() {
+            let previous = input[(at + input.len() - 1) % input.len()];
+            let crossing = || {
+                let direction = current - previous;
+                let denominator = edge.x * direction.y - edge.y * direction.x;
+                if denominator.abs() < f32::EPSILON {
+                    return current;
+                }
+                let t =
+                    (edge.y * (previous.x - from.x) - edge.x * (previous.y - from.y)) / denominator;
+                previous + direction * t
+            };
+            match (inside(previous), inside(current)) {
+                (true, true) => output.push(current),
+                (true, false) => output.push(crossing()),
+                (false, true) => {
+                    output.push(crossing());
+                    output.push(current);
+                }
+                (false, false) => {}
+            }
+        }
+        if output.is_empty() {
+            break;
+        }
+    }
+    output
+}
+
+/// Placeholder tiles the shape of the grid that is loading. Like the other
+/// skeletons, they do not move.
+fn skeleton_tiles(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    locale: crate::i18n::Locale,
+    count: usize,
+) {
+    let (columns, width) = tile_layout(ui.available_width());
+    let size = vec2(width, (width * TILE_ASPECT).round());
+    let fill = palette.surface_hover;
+    let mut shown = 0;
+    while shown < count {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = TILE_GAP;
+            for _ in 0..columns.min(count - shown) {
+                let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+                if shown == 0 {
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Label,
+                            true,
+                            gettext(locale, "Loading…"),
+                        )
+                    });
+                }
+                ui.painter()
+                    .rect_filled(rect, CornerRadius::same(TILE_RADIUS as u8), fill);
+                shown += 1;
+            }
+        });
+        ui.add_space(TILE_GAP - ui.spacing().item_spacing.y);
+    }
+}
+
+/// A browse page opened from a Browse all tile: its title over its colour,
+/// then its grids of tiles and shelves of playlists, albums and artists.
+pub fn category(app: &mut App, ui: &mut egui::Ui, id: &str) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let tile = app
+        .search
+        .browse
+        .get()
+        .into_iter()
+        .flatten()
+        .flat_map(|section| &section.items)
+        .chain(
+            app.search
+                .categories
+                .values()
+                .filter_map(Loadable::get)
+                .flat_map(|page| &page.sections)
+                .flat_map(|section| &section.items),
+        )
+        .find_map(|item| match item {
+            BrowseItem::Category(category) if category.id == id => Some(category.clone()),
+            _ => None,
+        });
+    let page = app.search.categories.get(id).cloned().unwrap_or_default();
+    let title = page
+        .get()
+        .map(|page| page.title.clone())
+        .filter(|title| !title.is_empty())
+        .or_else(|| tile.as_ref().map(|tile| tile.title.clone()));
+    let color = page
+        .get()
+        .and_then(|page| page.color)
+        .or_else(|| tile.as_ref().and_then(|tile| tile.color));
+    category_header(app, ui, title.as_deref(), color);
+    match page {
+        Loadable::Loaded(page) => {
+            if page.sections.is_empty() {
+                widgets::empty_state(
+                    ui,
+                    &palette,
+                    Icon::Music,
+                    &gettext(locale, "Nothing to browse here"),
+                    &gettext(locale, "Spotify lists nothing on this page yet."),
+                );
+            }
+            for (index, section) in page.sections.iter().enumerate() {
+                browse_section(app, ui, id, index, section);
+            }
+        }
+        Loadable::Failed(error) => {
+            widgets::error_row(ui, app, &error, Some(Page::Category(id.to_owned())));
+        }
+        Loadable::Loading | Loadable::NotLoaded => {
+            if app.network_reachable {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = widgets::CARD_GAP / 2.0;
+                    widgets::skeleton_cards(ui, &palette, locale, 6, false);
+                });
+            } else {
+                widgets::empty_state(
+                    ui,
+                    &palette,
+                    Icon::WifiOff,
+                    &gettext(locale, "You're offline"),
+                    &gettext(locale, "Connect to the internet to browse Spotify."),
+                );
+            }
+        }
+    }
+}
+
+/// The page's title over a band of its colour, as Spotify heads a browse
+/// page.
+fn category_header(app: &App, ui: &mut egui::Ui, title: Option<&str>, color: Option<[u8; 3]>) {
+    let palette = app.palette;
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 160.0), Sense::hover());
+    let fill = tile_color(app, color);
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(TILE_RADIUS as u8), fill);
+    if let Some(title) = title {
+        let size = if width < 520.0 { 40.0 } else { 64.0 };
+        let galley = ui.fonts_mut(|fonts| {
+            fonts.layout(
+                title.to_owned(),
+                theme::bold(size),
+                // White over Spotify's own colour, as on the tiles.
+                egui::Color32::WHITE,
+                (width - 48.0).max(16.0),
+            )
+        });
+        let at = pos2(rect.left() + 24.0, rect.bottom() - 20.0 - galley.size().y);
+        ui.painter_at(rect).galley(at, galley, egui::Color32::WHITE);
+    } else {
+        let bar = Rect::from_min_size(
+            pos2(rect.left() + 24.0, rect.bottom() - 76.0),
+            vec2(width * 0.35, 48.0),
+        );
+        ui.painter()
+            .rect_filled(bar, CornerRadius::same(6), palette.surface_active);
+    }
+    ui.add_space(20.0);
+}
+
+/// One section of a browse page: a grid of tiles, or a shelf of cards.
+fn browse_section(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    page: &str,
+    index: usize,
+    section: &BrowseSection,
+) {
+    let palette = app.palette;
+    if section.is_grid() {
+        if !section.title.is_empty() {
+            theme::section_title(ui, &palette, &section.title);
+            ui.add_space(4.0);
+        }
+        tile_grid(app, ui, &section.items);
+        ui.add_space(8.0);
+        return;
+    }
+    let id = format!("browse-{page}-{index}");
+    widgets::shelf(ui, &palette, &id, &section.title, |ui| {
+        for item in &section.items {
+            match item {
+                BrowseItem::Playlist(playlist) => playlist_card(app, ui, playlist),
+                BrowseItem::Album(album) => album_card(app, ui, album),
+                BrowseItem::Artist(artist) => artist_card(app, ui, artist),
+                BrowseItem::Category(category) => {
+                    let width = widgets::CARD_WIDTH;
+                    let size = vec2(width, (width * TILE_ASPECT).round());
+                    if category_tile(app, ui, category, size, true).clicked() {
+                        app.actions
+                            .push(Action::Open(Page::Category(category.id.clone())));
+                    }
+                }
             }
         }
     });
@@ -762,4 +1207,59 @@ fn episodes(app: &mut App, ui: &mut egui::Ui, results: &SearchResults, limit: us
 #[allow(dead_code)]
 fn align_right(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     ui.with_layout(Layout::right_to_left(Align::Center), add);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_browse_tiles_fill_the_row() {
+        for width in [300.0, 520.0, 700.0, 942.0, 1600.0] {
+            let (columns, tile) = tile_layout(width);
+            assert!(columns >= 2, "{width}");
+            assert!(tile >= TILE_MIN_WIDTH || columns == 2, "{width}: {tile}");
+            let used = tile * columns as f32 + TILE_GAP * (columns - 1) as f32;
+            assert!((used - width).abs() < 0.5, "{width}: {used}");
+        }
+        assert_eq!(tile_layout(942.0).0, 4);
+    }
+
+    #[test]
+    fn search_browse_tilted_cover_stays_inside_the_tile() {
+        let tile = Rect::from_min_size(pos2(10.0, 20.0), vec2(217.0, 122.0));
+        let outline = tilted_art_outline(tile);
+        assert!(outline.len() >= 3);
+        for point in &outline {
+            assert!(tile.expand(0.01).contains(*point), "{point:?}");
+        }
+        // The cover sits at the bottom right and leaves the title's corner.
+        let bounds = Rect::from_points(&outline);
+        assert!(bounds.left() > tile.center().x);
+        assert!((bounds.right() - tile.right()).abs() < 0.5);
+        assert!((bounds.bottom() - tile.bottom()).abs() < 0.5);
+        // The tile's rounded bottom right corner cuts the cover.
+        let corner = tile.right_bottom();
+        assert!(outline.iter().all(|point| point.distance(corner) > 1.0));
+    }
+
+    #[test]
+    fn search_browse_clipping_keeps_a_square_inside_and_drops_one_outside() {
+        let square = |rect: Rect| {
+            vec![
+                rect.left_top(),
+                rect.right_top(),
+                rect.right_bottom(),
+                rect.left_bottom(),
+            ]
+        };
+        let clip = square(Rect::from_min_size(Pos2::ZERO, Vec2::splat(10.0)));
+        let inside = square(Rect::from_min_size(pos2(2.0, 2.0), Vec2::splat(3.0)));
+        assert_eq!(clip_convex(&inside, &clip), inside);
+        let outside = square(Rect::from_min_size(pos2(20.0, 20.0), Vec2::splat(3.0)));
+        assert!(clip_convex(&outside, &clip).is_empty());
+        let half = square(Rect::from_min_size(pos2(5.0, 2.0), Vec2::splat(10.0)));
+        let cut = Rect::from_points(&clip_convex(&half, &clip));
+        assert_eq!(cut, Rect::from_min_max(pos2(5.0, 2.0), pos2(10.0, 10.0)));
+    }
 }

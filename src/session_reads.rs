@@ -111,6 +111,266 @@ fn related_artist_headers(body: &serde_json::Value) -> Result<Vec<Artist>, Failu
     Ok(found)
 }
 
+/// Spotify's own Search page reads its Browse all grid with this persisted
+/// query, and each tile's page with [`BROWSE_PAGE_HASH`] (the web player's
+/// `browseAll` and `browsePage`).
+const BROWSE_ALL_HASH: &str = "dbd8b55e09a58afc52eab438bc228ba28fd72ac2f2148c6c26354980e4579001";
+const BROWSE_PAGE_HASH: &str = "f5c4e6d668f5716464a231c1cc8b22c1cbf6ad68b09929fd7de813a30581298b";
+/// The client the browse queries are shaped for. The web player names
+/// itself; its answer holds the same tiles as the desktop app's.
+const BROWSE_INTEGRATION: &str = "INTEGRATION_WEB_PLAYER";
+/// The sections of a browse page read at once, and the items of each.
+const BROWSE_SECTIONS: u32 = 20;
+const BROWSE_SECTION_ITEMS: u32 = 20;
+
+/// Search's Browse all grid, as Spotify's own Search page reads it.
+pub async fn browse_all(
+    session: &Session,
+    web: &crate::api::ApiClient,
+) -> Result<Vec<crate::model::BrowseSection>, ApiError> {
+    let query = serde_json::json!({
+        "operationName": "browseAll",
+        "variables": {
+            "pagePagination": {"offset": 0, "limit": 10},
+            "sectionPagination": {"offset": 0, "limit": 99},
+            "browseEndUserIntegration": BROWSE_INTEGRATION
+        },
+        "extensions": {"persistedQuery": {"version": 1, "sha256Hash": BROWSE_ALL_HASH}}
+    });
+    browse_all_from(&pathfinder(session, web, &query).await?)
+}
+
+/// The browse page behind a tile: its header and its playlist shelves.
+pub async fn browse_page(
+    session: &Session,
+    web: &crate::api::ApiClient,
+    id: &str,
+) -> Result<crate::model::CategoryPage, ApiError> {
+    let query = serde_json::json!({
+        "operationName": "browsePage",
+        "variables": {
+            "pagePagination": {"offset": 0, "limit": BROWSE_SECTIONS},
+            "sectionPagination": {"offset": 0, "limit": BROWSE_SECTION_ITEMS},
+            "uri": format!("spotify:page:{id}"),
+            "browseEndUserIntegration": BROWSE_INTEGRATION,
+            "includeEpisodeContentRatingsV2": false
+        },
+        "extensions": {"persistedQuery": {"version": 1, "sha256Hash": BROWSE_PAGE_HASH}}
+    });
+    browse_page_from(&pathfinder(session, web, &query).await?)
+}
+
+/// A Pathfinder query with the playback session's tokens.
+async fn pathfinder(
+    session: &Session,
+    web: &crate::api::ApiClient,
+    query: &serde_json::Value,
+) -> Result<serde_json::Value, ApiError> {
+    let authorize =
+        |_| ApiError::Network("Couldn't authorize the playback session. Try again.".into());
+    let login = session.login5().auth_token().await.map_err(authorize)?;
+    let client_token = session.spclient().client_token().await.map_err(authorize)?;
+    web.partner_request(&login.access_token, &client_token, query)
+        .await
+}
+
+fn browse_error() -> ApiError {
+    ApiError::Decode("Spotify's browse categories are unavailable. Try again later.".into())
+}
+
+/// Whether a Pathfinder answer reports errors.
+fn pathfinder_errors(body: &serde_json::Value) -> bool {
+    body.get("errors").is_some_and(|errors| {
+        !errors.is_null() && errors.as_array().is_none_or(|errors| !errors.is_empty())
+    })
+}
+
+/// The grid sections of a `browseAll` answer, each with its tiles. A tile
+/// that opens no browse page, such as a link to an app feature, is left
+/// out; an answer without any tile is an error rather than an empty page.
+pub(crate) fn browse_all_from(
+    body: &serde_json::Value,
+) -> Result<Vec<crate::model::BrowseSection>, ApiError> {
+    if pathfinder_errors(body) {
+        return Err(browse_error());
+    }
+    let start = body.pointer("/data/browseStart").ok_or_else(browse_error)?;
+    if json_text(start, "/__typename").as_deref() != Some("BrowseSectionContainer") {
+        return Err(browse_error());
+    }
+    let sections = browse_sections(start);
+    if !sections.iter().any(crate::model::BrowseSection::is_grid) {
+        return Err(browse_error());
+    }
+    Ok(sections)
+}
+
+/// A `browsePage` answer: the page's header and its sections.
+pub(crate) fn browse_page_from(
+    body: &serde_json::Value,
+) -> Result<crate::model::CategoryPage, ApiError> {
+    if pathfinder_errors(body) {
+        return Err(browse_error());
+    }
+    let page = body.pointer("/data/browse").ok_or_else(browse_error)?;
+    if json_text(page, "/__typename").as_deref() != Some("BrowseSectionContainer") {
+        return Err(browse_error());
+    }
+    Ok(crate::model::CategoryPage {
+        title: json_text(page, "/header/title/transformedLabel").unwrap_or_default(),
+        color: page.pointer("/header/color/hex").and_then(hex_color),
+        sections: browse_sections(page),
+    })
+}
+
+/// The sections of a browse container that list something this app opens.
+fn browse_sections(container: &serde_json::Value) -> Vec<crate::model::BrowseSection> {
+    container
+        .pointer("/sections/items")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|section| {
+            let items: Vec<_> = section
+                .pointer("/sectionItems/items")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(browse_item)
+                .collect();
+            (!items.is_empty()).then(|| crate::model::BrowseSection {
+                title: json_text(section, "/data/title/transformedLabel").unwrap_or_default(),
+                items,
+            })
+        })
+        .collect()
+}
+
+/// One item of a browse section: a tile to another browse page, or a
+/// playlist, album or artist card. Anything else is passed over.
+fn browse_item(item: &serde_json::Value) -> Option<crate::model::BrowseItem> {
+    use crate::model::BrowseItem;
+    let data = item.pointer("/content/data")?;
+    let uri = json_text(data, "/uri");
+    match json_text(data, "/__typename")?.as_str() {
+        "BrowseSectionContainer" => browse_tile(item, data).map(BrowseItem::Category),
+        "Playlist" => {
+            let uri = uri?;
+            let id = uri.strip_prefix("spotify:playlist:")?.to_owned();
+            let owner = json_text(data, "/ownerV2/data/name");
+            Some(BrowseItem::Playlist(Playlist {
+                id,
+                name: json_text(data, "/name")?,
+                description: json_text(data, "/description"),
+                images: json_images(data.pointer("/images/items/0/sources")),
+                owner: Owner {
+                    display_name: owner,
+                    ..Default::default()
+                },
+                uri,
+                ..Default::default()
+            }))
+        }
+        "Album" => {
+            let uri = uri?;
+            let id = uri.strip_prefix("spotify:album:")?.to_owned();
+            let artists = data
+                .pointer("/artists/items")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|artist| {
+                    let uri = json_text(artist, "/uri");
+                    Some(ArtistRef {
+                        id: uri
+                            .as_deref()
+                            .and_then(|uri| uri.strip_prefix("spotify:artist:"))
+                            .map(str::to_owned),
+                        name: json_text(artist, "/profile/name")?,
+                        uri,
+                    })
+                })
+                .collect();
+            Some(BrowseItem::Album(Album {
+                id,
+                name: json_text(data, "/name")?,
+                images: json_images(data.pointer("/coverArt/sources")),
+                artists,
+                uri,
+                ..Default::default()
+            }))
+        }
+        "Artist" => {
+            let uri = uri?;
+            let id = uri.strip_prefix("spotify:artist:")?.to_owned();
+            Some(BrowseItem::Artist(Artist {
+                id,
+                name: json_text(data, "/profile/name")?,
+                images: json_images(data.pointer("/visuals/avatarImage/sources")),
+                uri,
+                ..Default::default()
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// A tile to the browse page `item` points at, with its card's title,
+/// colour and artwork.
+fn browse_tile(
+    item: &serde_json::Value,
+    data: &serde_json::Value,
+) -> Option<crate::model::BrowseCategory> {
+    let uri = json_text(item, "/uri")?;
+    let id = uri
+        .strip_prefix("spotify:page:")
+        .filter(|id| crate::model::is_page_id(id))?;
+    let card = data.pointer("/data/cardRepresentation")?;
+    Some(crate::model::BrowseCategory {
+        id: id.to_owned(),
+        title: json_text(card, "/title/transformedLabel")?,
+        color: card.pointer("/backgroundColor/hex").and_then(hex_color),
+        // Spotify's tile shows the first source.
+        image: json_images(card.pointer("/artwork/sources"))
+            .into_iter()
+            .next()
+            .map(|image| image.url),
+    })
+}
+
+/// `#RRGGBB`, as Pathfinder writes colours.
+fn hex_color(value: &serde_json::Value) -> Option<[u8; 3]> {
+    let hex = value.as_str()?.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.is_ascii() {
+        return None;
+    }
+    let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).ok();
+    Some([channel(0)?, channel(2)?, channel(4)?])
+}
+
+/// The images of a Pathfinder `sources` list, over HTTPS only.
+fn json_images(sources: Option<&serde_json::Value>) -> Vec<Image> {
+    sources
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|source| {
+            let url = source.get("url")?.as_str()?;
+            url.starts_with("https://").then(|| Image {
+                url: url.to_owned(),
+                width: source
+                    .get("width")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|size| u32::try_from(size).ok()),
+                height: source
+                    .get("height")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|size| u32::try_from(size).ok()),
+            })
+        })
+        .collect()
+}
+
 /// Popular tracks in the playback account's market, retaining Spotify's ranking.
 pub async fn artist_top_tracks(session: &Session, id: &str) -> Result<Vec<Track>, Failure> {
     use librespot_metadata::Metadata as _;
@@ -4087,5 +4347,116 @@ mod tests {
         assert_eq!(friends[0].album_uri, None);
         assert_eq!(friends[1].context_name.as_deref(), Some("Mix"));
         assert!(friends_from_json(&serde_json::json!({})).is_empty());
+    }
+
+    fn search_browse_sample(name: &str) -> serde_json::Value {
+        serde_json::from_str(match name {
+            "all" => include_str!("demo/browse-all.json"),
+            _ => include_str!("demo/browse-page.json"),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn search_browse_all_reads_the_tiles_with_their_colours_and_covers() {
+        use crate::model::BrowseItem;
+        let sections = super::browse_all_from(&search_browse_sample("all")).unwrap();
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].title, "Browse all");
+        assert!(sections[0].is_grid());
+        // The Concerts feature opens no browse page, and the tile with a
+        // malformed page ID opens none either.
+        assert_eq!(sections[0].items.len(), 18);
+        let BrowseItem::Category(music) = &sections[0].items[0] else {
+            panic!("a tile");
+        };
+        assert_eq!(music.id, "0JQ5DAqbMKFdemo0000000");
+        assert_eq!(music.title, "Music");
+        assert_eq!(music.color, Some([0xdc, 0x14, 0x8c]));
+        assert_eq!(
+            music.image.as_deref(),
+            Some("https://picsum.photos/seed/spotifast-browse0/274/274")
+        );
+        assert!(sections[0].items.iter().all(|item| !matches!(
+            item,
+            BrowseItem::Category(tile) if tile.title == "Concerts" || tile.title == "Bad id"
+        )));
+    }
+
+    #[test]
+    fn search_browse_all_refuses_an_answer_without_tiles() {
+        for body in [
+            serde_json::json!({"errors": [{"message": "PersistedQueryNotFound"}]}),
+            serde_json::json!({"data": {"browseStart": {"__typename": "GenericError"}}}),
+            serde_json::json!({"data": {"browseStart": {
+                "__typename": "BrowseSectionContainer",
+                "sections": {"items": []}
+            }}}),
+        ] {
+            assert!(matches!(
+                super::browse_all_from(&body),
+                Err(ApiError::Decode(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn search_browse_page_reads_its_header_shelves_and_tiles() {
+        use crate::model::BrowseItem;
+        let page = super::browse_page_from(&search_browse_sample("page")).unwrap();
+        assert_eq!(page.title, "Pop");
+        assert_eq!(page.color, Some([0x14, 0x8a, 0x08]));
+        let titles: Vec<&str> = page.sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["Popular Pop playlists", "New pop albums", "Explore Pop"]
+        );
+        let BrowseItem::Playlist(playlist) = &page.sections[0].items[0] else {
+            panic!("a playlist");
+        };
+        assert_eq!(playlist.id, "37i9dQZF1DXdemo0000000");
+        assert_eq!(playlist.uri, "spotify:playlist:37i9dQZF1DXdemo0000000");
+        assert_eq!(playlist.name, "Pop Rising");
+        assert_eq!(playlist.owner_name(), "Spotify");
+        assert_eq!(playlist.images.len(), 1);
+        assert_eq!(page.sections[0].items.len(), 8);
+        assert!(!page.sections[0].is_grid());
+        // The episode card is passed over; the albums keep their artists.
+        assert_eq!(page.sections[1].items.len(), 4);
+        let BrowseItem::Album(album) = &page.sections[1].items[0] else {
+            panic!("an album");
+        };
+        assert_eq!(album.name, "Glass Summer");
+        assert_eq!(album.artists[0].name, "Velvetroot Drift");
+        assert_eq!(
+            album.artists[0].id.as_deref(),
+            Some("6demoArtist00000000000")
+        );
+        assert!(page.sections[2].is_grid());
+        assert!(super::browse_page_from(&serde_json::json!({"data": {}})).is_err());
+    }
+
+    #[test]
+    fn search_browse_colours_are_read_as_pathfinder_writes_them() {
+        let hex = |text: &str| super::hex_color(&serde_json::json!(text));
+        assert_eq!(hex("#1E3264"), Some([0x1e, 0x32, 0x64]));
+        assert_eq!(hex("1E3264"), None);
+        assert_eq!(hex("#1E32"), None);
+        assert_eq!(hex("#1E32GG"), None);
+        assert_eq!(hex("#ééé"), None);
+        assert_eq!(super::hex_color(&serde_json::json!(null)), None);
+    }
+
+    #[test]
+    fn search_browse_pages_open_from_their_links() {
+        use crate::model::Page;
+        let page = Page::Category("0JQ5DAqbMKFdemo0000005".into());
+        assert_eq!(Page::decode(&page.encode()), Some(page.clone()));
+        assert_eq!(
+            Page::from_uri("spotify:page:0JQ5DAqbMKFdemo0000005"),
+            Some(page)
+        );
+        assert_eq!(Page::decode("category:short"), None);
+        assert_eq!(Page::from_uri("spotify:page:short"), None);
     }
 }

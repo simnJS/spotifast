@@ -370,6 +370,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                             Page::Artist(id) => artist::show(app, ui, &id),
                             Page::Show(id) => show::show(app, ui, &id),
                             Page::Radio(seed) => radio::radio(app, ui, &seed),
+                            Page::Category(id) => search::category(app, ui, &id),
                             Page::Queue => queue::page(app, ui),
                             Page::Settings => settings::show(app, ui),
                         }

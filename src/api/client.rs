@@ -500,7 +500,7 @@ impl ApiClient {
         if !status.is_success() {
             return Err(ApiError::Status {
                 status: status.as_u16(),
-                message: "Spotify upcoming-album request failed".into(),
+                message: "Spotify couldn't answer through the playback session".into(),
             });
         }
         response.json().await.map_err(ApiError::from)

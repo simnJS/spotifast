@@ -148,6 +148,15 @@ clients. Spotifast uses its session for:
   request. Spotify may change this response without notice; when the feed
   does not answer, the older buddy list stands in, which reports a song only
   after it ends.
+- **Browse all** on the Search page, and the category page each tile
+  opens, from the Pathfinder queries Spotify's own Search page makes
+  (`browseAll` and `browsePage`). They give each tile its title, colour and
+  cover, and each category page its playlist shelves. The grid is read once
+  per session and each category page once while the app runs. The Web
+  API's categories have no tile colours, and apps created since November
+  2024 cannot read a category's playlists there, so there is no fallback:
+  without local playback signed in, Search says so under its recent
+  searches.
 - **Google Cast speakers and groups.** librespot has no Cast sender, so
   Spotifast starts Spotify's receiver on the device itself. The session then
   obtains a token for that receiver, as Spotify's own apps do. See

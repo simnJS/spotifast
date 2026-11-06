@@ -1,0 +1,564 @@
+{
+ "data": {
+  "browseStart": {
+   "__typename": "BrowseSectionContainer",
+   "sections": {
+    "items": [
+     {
+      "uri": "spotify:section:0JQ5DAqbMKFdemoSection1",
+      "data": {
+       "__typename": "BrowseGridSectionData",
+       "title": {
+        "transformedLabel": "Browse all"
+       }
+      },
+      "sectionItems": {
+       "items": [
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000000",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Music"
+             },
+             "backgroundColor": {
+              "hex": "#dc148c"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse0/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000001",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Podcasts"
+             },
+             "backgroundColor": {
+              "hex": "#006450"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse1/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000002",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Live Events"
+             },
+             "backgroundColor": {
+              "hex": "#8400e7"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse2/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:app:concerts",
+         "content": {
+          "__typename": "BrowseXlinkResponseWrapper",
+          "data": {
+           "__typename": "BrowseClientFeature",
+           "featureUri": "spotify:app:concerts",
+           "title": {
+            "transformedLabel": "Concerts"
+           },
+           "backgroundColor": {
+            "hex": "#8400e7"
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000003",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Made For You"
+             },
+             "backgroundColor": {
+              "hex": "#1e3264"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse3/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000004",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "New Releases"
+             },
+             "backgroundColor": {
+              "hex": "#608108"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse4/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000005",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Pop"
+             },
+             "backgroundColor": {
+              "hex": "#148a08"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse5/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000006",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Hip-Hop"
+             },
+             "backgroundColor": {
+              "hex": "#bc5900"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse6/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000007",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Rock"
+             },
+             "backgroundColor": {
+              "hex": "#e91429"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse7/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000008",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Dance/Electronic"
+             },
+             "backgroundColor": {
+              "hex": "#d84000"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse8/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000009",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Mood"
+             },
+             "backgroundColor": {
+              "hex": "#e1118b"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse9/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000010",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Indie"
+             },
+             "backgroundColor": {
+              "hex": "#608108"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse10/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000011",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Chill"
+             },
+             "backgroundColor": {
+              "hex": "#477d95"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse11/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000012",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Workout"
+             },
+             "backgroundColor": {
+              "hex": "#777777"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse12/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000013",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Jazz"
+             },
+             "backgroundColor": {
+              "hex": "#8d67ab"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse13/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000014",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Classical"
+             },
+             "backgroundColor": {
+              "hex": "#7d4b32"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse14/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000015",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Sleep"
+             },
+             "backgroundColor": {
+              "hex": "#1e3264"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse15/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000016",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Focus"
+             },
+             "backgroundColor": {
+              "hex": "#503750"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse16/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:0JQ5DAqbMKFdemo0000017",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Party"
+             },
+             "backgroundColor": {
+              "hex": "#af2896"
+             },
+             "artwork": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast-browse17/274/274",
+                "width": 274,
+                "height": 274
+               }
+              ]
+             }
+            }
+           }
+          }
+         }
+        },
+        {
+         "uri": "spotify:page:short",
+         "content": {
+          "__typename": "BrowseSectionContainerWrapper",
+          "data": {
+           "__typename": "BrowseSectionContainer",
+           "data": {
+            "cardRepresentation": {
+             "title": {
+              "transformedLabel": "Bad id"
+             }
+            }
+           }
+          }
+         }
+        }
+       ]
+      }
+     }
+    ],
+    "pagingInfo": {
+     "nextOffset": null
+    }
+   }
+  }
+ },
+ "extensions": {}
+}
