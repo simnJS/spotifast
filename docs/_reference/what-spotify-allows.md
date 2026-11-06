@@ -97,6 +97,12 @@ clients. Spotifast uses its session for:
   Spotify's own clients, with the session's Login5 bearer and client token.
   It uses the configured HTTP transport and falls back to the Web API, which
   answers only a shared grant from before 0.14.2, if that read is unavailable. A different account's session is never used.
+- **Canvas**, the short silent loop some tracks show in place of their
+  cover, through the private `canvas` Pathfinder query. A Canvas video is a
+  plain H.264 MP4 without DRM on Spotify's CDN; Spotifast decodes it with
+  [OpenH264](https://github.com/cisco/openh264), built into the app, so no
+  system video library is needed. Still-image canvases are drawn like a cover.
+  GIF canvases, and any Canvas that fails to load, keep the cover.
 - **Upcoming album pages.** Artist overviews supply countdown cards without a
   prior pre-save. Prerelease metadata supplies the real album mapping,
   cover and release time. Pathfinder supplies ordered preview rows and explicit
@@ -261,4 +267,7 @@ The Web API and librespot do not provide these features:
   [contribution guide](https://github.com/crmne/spotifast/blob/main/CONTRIBUTING.md).
 - **Private-session status and similar social features.** Spotify has no
   public API for them.
-- **Canvas videos and video podcasts.** librespot does not provide them.
+- **Music videos.** Spotify protects them with DRM, and Spotifast does not
+  bypass DRM. Canvas loops are a different, unprotected format; see the
+  librespot session section above.
+- **Video podcasts.** librespot does not provide them.

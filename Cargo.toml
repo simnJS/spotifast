@@ -185,6 +185,15 @@ hmac = "0.12"
 pbkdf2 = "0.12"
 aes = "0.8"
 ctr = "0.9"
+# Spotify Canvas videos (src/canvas/): the short silent H.264 loops some
+# tracks show instead of the cover. openh264 compiles Cisco's decoder from
+# the source bundled in the crate with the platform's C++ compiler (through
+# cc), so no system library is linked on any platform; NASM speeds it up
+# when installed and is skipped otherwise. BSD-2-Clause.
+openh264 = "0.9"
+# Reads the Canvas MP4 container (sample table, avcC parameter sets) that
+# openh264 does not. Pure Rust, MIT.
+mp4 = "0.14"
 
 [target.'cfg(unix)'.dependencies]
 # Tells a Soloist that has fully exited from one still dying (`soloist/mod.rs`).
