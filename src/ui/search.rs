@@ -96,6 +96,10 @@ fn recent(app: &mut App, ui: &mut egui::Ui) {
         );
         return;
     }
+    // Spotify fills this page with its Browse all grid of coloured category
+    // tiles. The app does not read Spotify's categories yet; when it does,
+    // the grid goes here, under the recent searches, and replaces the empty
+    // state below.
     if app.settings.search_history.is_empty() {
         widgets::empty_state(
             ui,
@@ -142,7 +146,7 @@ fn all(app: &mut App, ui: &mut egui::Ui, results: &SearchResults) {
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 24.0;
         let top_width = if wide {
-            (ui.available_width() * 0.36).clamp(240.0, 380.0)
+            (ui.available_width() * 0.4).clamp(260.0, 460.0)
         } else {
             ui.available_width()
         };
@@ -294,8 +298,14 @@ enum TopResultSubtitle<'a> {
     SongArtists(&'a [ArtistRef]),
 }
 
-/// The top result's cover size.
-const TOP_RESULT_ART: f32 = 96.0;
+/// The top result card, as Spotify draws it: a 92 px cover 20 px in, the
+/// name in 32 px bold under it, on an 8 px rounded card.
+const TOP_RESULT_ART: f32 = 92.0;
+const TOP_RESULT_PADDING: f32 = 20.0;
+const TOP_RESULT_HEIGHT: f32 = 228.0;
+const TOP_RESULT_RADIUS: u8 = 8;
+/// The green play button the card shows under the pointer.
+const TOP_RESULT_PLAY: f32 = 48.0;
 
 #[allow(clippy::too_many_arguments)]
 fn top_result(
@@ -311,8 +321,10 @@ fn top_result(
 ) {
     let palette = app.palette;
     let mut subtitle_clicked = false;
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), 232.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(ui.available_width(), TOP_RESULT_HEIGHT),
+        Sense::click(),
+    );
     if ui.is_rect_visible(rect) {
         let hovered = ui.rect_contains_pointer(rect);
         let fill = if hovered {
@@ -321,38 +333,41 @@ fn top_result(
             palette.surface
         };
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
-        let image_rect =
-            Rect::from_min_size(rect.min + vec2(20.0, 20.0), Vec2::splat(TOP_RESULT_ART));
-        widgets::paint_shadow(ui, &palette, image_rect, if round { 48.0 } else { 6.0 });
+            .rect_filled(rect, CornerRadius::same(TOP_RESULT_RADIUS), fill);
+        let image_rect = Rect::from_min_size(
+            rect.min + Vec2::splat(TOP_RESULT_PADDING),
+            Vec2::splat(TOP_RESULT_ART),
+        );
+        let art_radius = if round { TOP_RESULT_ART / 2.0 } else { 4.0 };
+        widgets::paint_shadow(ui, &palette, image_rect, art_radius);
         widgets::paint_cover(
             ui,
             &palette,
             image,
             image_rect,
-            if round { 48.0 } else { 6.0 },
+            art_radius,
             if round { Icon::User } else { Icon::Music },
             Some(app.backend.art()),
         );
         let text_clip = Rect::from_min_max(
-            pos2(rect.left() + 20.0, image_rect.bottom() + 12.0),
-            pos2(rect.right() - 20.0, rect.bottom()),
+            pos2(rect.left() + TOP_RESULT_PADDING, image_rect.bottom() + 16.0),
+            pos2(rect.right() - TOP_RESULT_PADDING, rect.bottom()),
         );
         let painter = ui.painter().with_clip_rect(text_clip);
         crate::bidi::paint_line(
             &painter,
             text_clip.left(),
             text_clip.right(),
-            text_clip.top() + 16.0,
+            text_clip.top() + 20.0,
             title,
-            theme::bold(26.0),
+            theme::bold(32.0),
             palette.text,
         );
         match subtitle {
             TopResultSubtitle::SongArtists(artists) => {
                 let subtitle_rect = Rect::from_min_max(
-                    pos2(text_clip.left(), text_clip.top() + 36.0),
-                    pos2(text_clip.right(), text_clip.top() + 56.0),
+                    pos2(text_clip.left(), text_clip.top() + 46.0),
+                    pos2(text_clip.right(), text_clip.top() + 66.0),
                 );
                 let mut child = ui.new_child(
                     egui::UiBuilder::new()
@@ -365,14 +380,14 @@ fn top_result(
                     &mut child,
                     // Translators: Precedes the song's artist names, which follow as links.
                     gettext(app.locale, "Song • ").as_ref(),
-                    theme::regular(13.5),
+                    theme::regular(14.0),
                     palette.secondary,
                 );
                 subtitle_clicked = widgets::artist_links(
                     &mut child,
                     app,
                     artists,
-                    theme::regular(13.5),
+                    theme::regular(14.0),
                     palette.secondary,
                 );
             }
@@ -381,17 +396,18 @@ fn top_result(
                     &painter,
                     text_clip.left(),
                     text_clip.right(),
-                    text_clip.top() + 46.0,
+                    text_clip.top() + 56.0,
                     subtitle,
-                    theme::regular(13.5),
+                    theme::regular(14.0),
                     palette.secondary,
                 );
             }
         }
         if hovered && let Some(uri) = &play_uri {
+            let inset = TOP_RESULT_PADDING + TOP_RESULT_PLAY / 2.0;
             let button = Rect::from_center_size(
-                pos2(rect.right() - 44.0, rect.bottom() - 44.0),
-                Vec2::splat(48.0),
+                pos2(rect.right() - inset, rect.bottom() - inset),
+                Vec2::splat(TOP_RESULT_PLAY),
             );
             let mut child = ui.new_child(
                 egui::UiBuilder::new()
@@ -401,7 +417,7 @@ fn top_result(
             if theme::circle_button(
                 &mut child,
                 Icon::PlayFilled,
-                48.0,
+                TOP_RESULT_PLAY,
                 palette.accent,
                 palette.accent_hover,
                 palette.on_accent,
