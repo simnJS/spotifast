@@ -125,11 +125,7 @@ impl Video {
         let frame = span / u64::from(samples).max(1);
         let span = span.max(last + frame.max(1));
 
-        let decoder = Decoder::with_api_config(
-            OpenH264API::from_source(),
-            DecoderConfig::new().flush_after_decode(Flush::NoFlush),
-        )
-        .map_err(|error| anyhow!("H.264 decoder: {error}"))?;
+        let decoder = new_decoder()?;
 
         Ok(Self {
             reader,
@@ -176,6 +172,10 @@ impl Video {
                         bail!("Canvas decoded no pictures");
                     }
                 }
+                // OpenH264 refuses the clip's first picture again once it
+                // has decoded past it (error 16384 a few frames into the
+                // second loop), so each loop gets a fresh decoder.
+                self.decoder = new_decoder()?;
                 self.next = 1;
                 self.loops += 1;
                 self.shown = 0;
@@ -217,6 +217,14 @@ impl Video {
         let nanos = u128::from(ticks) * 1_000_000_000 / u128::from(self.timescale);
         Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
     }
+}
+
+fn new_decoder() -> anyhow::Result<Decoder> {
+    Decoder::with_api_config(
+        OpenH264API::from_source(),
+        DecoderConfig::new().flush_after_decode(Flush::NoFlush),
+    )
+    .map_err(|error| anyhow!("H.264 decoder: {error}"))
 }
 
 fn to_image(picture: &openh264::decoder::DecodedYUV<'_>) -> anyhow::Result<egui::ColorImage> {
@@ -289,6 +297,27 @@ pub(crate) mod tests {
             .collect();
         assert!(first == second, "the second pass repeats the first");
         assert!(first[0] != first[1], "consecutive frames differ");
+    }
+
+    /// Two seconds at 12 fps in one group of pictures, as real Canvases
+    /// are made: `ffmpeg -f lavfi -i testsrc2=size=72x128:rate=12
+    /// -frames:v 24 -an -c:v libx264 -profile:v high -pix_fmt yuv420p
+    /// -movflags +faststart`. Reusing one decoder across loops failed a few
+    /// frames into the second pass and froze the Canvas.
+    const LONG: &[u8] = include_bytes!("fixture-long.mp4");
+
+    #[test]
+    fn a_long_clip_keeps_looping() {
+        let mut video = Video::open(Arc::from(LONG)).expect("fixture opens");
+        assert_eq!(video.loop_duration(), Duration::from_secs(2));
+        let mut last = Duration::ZERO;
+        for _ in 0..24 * 4 {
+            last = video.next_frame().expect("every loop decodes").at;
+        }
+        assert!(
+            last > Duration::from_secs(7),
+            "four passes, reached {last:?}"
+        );
     }
 
     #[test]
