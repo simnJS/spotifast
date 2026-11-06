@@ -388,6 +388,8 @@ pub struct PageMetadata {
     /// under the artist's own URI.
     pub play_counts: HashMap<String, u64>,
     pub upcoming: Option<crate::prerelease::UpcomingRelease>,
+    /// An artist's upcoming concerts, soonest first.
+    pub concerts: Vec<crate::model::Concert>,
 }
 
 /// Read song play counts and, for artists, monthly listeners and the
@@ -402,6 +404,7 @@ pub async fn page_metadata(
     let client_token = session.spclient().client_token().await?;
     let mut counts = HashMap::new();
     let mut upcoming = None;
+    let mut concerts = Vec::new();
     match crate::util::uri_kind(uri) {
         Some("album") => {
             let mut offset = 0;
@@ -457,6 +460,7 @@ pub async fn page_metadata(
                 .pointer("/data/artistUnion/discography/topTracks")
                 .ok_or_else(|| anyhow::anyhow!("Spotify answered without the popular songs"))?;
             play_counts_from(top, &mut counts);
+            concerts = concerts_from(&body);
             if let Some(listeners) = monthly_listeners(&body) {
                 counts.insert(uri.to_string(), listeners);
             }
@@ -466,6 +470,7 @@ pub async fn page_metadata(
     Ok(PageMetadata {
         play_counts: counts,
         upcoming,
+        concerts,
     })
 }
 
@@ -506,6 +511,72 @@ fn play_counts_from(list: &serde_json::Value, counts: &mut HashMap<String, u64>)
 fn monthly_listeners(body: &serde_json::Value) -> Option<u64> {
     body.pointer("/data/artistUnion/stats/monthlyListeners")
         .and_then(pathfinder_count)
+}
+
+/// An artist's upcoming concerts in its `queryArtistOverview` answer, soonest
+/// first. The shape is not documented, so a few plausible field names are
+/// accepted; an item without an id, a date or a place is skipped, and an
+/// answer without concerts gives none.
+fn concerts_from(body: &serde_json::Value) -> Vec<crate::model::Concert> {
+    let Some(items) = body
+        .pointer("/data/artistUnion/goods/events/concerts/items")
+        .and_then(|items| items.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut concerts: Vec<_> = items.iter().filter_map(concert_from).collect();
+    concerts.sort_by(|a, b| a.date.cmp(&b.date));
+    concerts
+}
+
+fn concert_from(item: &serde_json::Value) -> Option<crate::model::Concert> {
+    let data = item.get("data").unwrap_or(item);
+    let text = |paths: &[&str]| {
+        paths.iter().find_map(|path| {
+            data.pointer(path)
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+    };
+    let id = text(&["/id"]).or_else(|| {
+        text(&["/uri"]).and_then(|uri| {
+            uri.strip_prefix("spotify:concert:")
+                .or_else(|| uri.rsplit('/').next())
+                .map(str::to_string)
+        })
+    })?;
+    let date = text(&[
+        "/date/isoString",
+        "/startDateIsoString",
+        "/startDate/isoString",
+        "/date",
+    ])?;
+    // A date must start as one, so that it sorts and shows as one.
+    let day = date.get(..10)?;
+    let mut parts = day.split('-');
+    let well_formed = parts.next().is_some_and(|y| y.len() == 4)
+        && parts.next().is_some_and(|m| m.len() == 2)
+        && parts.next().is_some_and(|d| d.len() == 2);
+    if !well_formed || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let city = text(&["/location/name", "/location/city", "/city"]).unwrap_or_default();
+    let venue = text(&["/venue/name", "/venue"]).unwrap_or_default();
+    if city.is_empty() && venue.is_empty() {
+        return None;
+    }
+    Some(crate::model::Concert {
+        id,
+        date,
+        city,
+        venue,
+        festival: data
+            .get("festival")
+            .and_then(|festival| festival.as_bool())
+            .unwrap_or(false),
+    })
 }
 
 /// A Pathfinder count, a string of digits or a number.
@@ -2040,6 +2111,35 @@ mod tests {
         }}});
         assert_eq!(super::monthly_listeners(&body), Some(8_123_456));
         assert_eq!(super::monthly_listeners(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn an_artist_overview_carries_its_concerts() {
+        let body = serde_json::json!({"data": {"artistUnion": {"goods": {"events": {"concerts": {
+            "items": [
+                {"data": {"id": "b2", "title": "Later", "date": {"isoString": "2027-03-02T19:00:00Z"},
+                    "location": {"name": "Lyon"}, "venue": {"name": "Halle"}, "festival": true}},
+                {"data": {"uri": "spotify:concert:a1", "startDateIsoString": "2027-01-05T20:00:00Z",
+                    "location": {"name": "Paris"}, "venue": {"name": "Olympia"}}},
+                {"data": {"title": "No id", "date": {"isoString": "2027-01-06"}, "venue": {"name": "X"}}},
+                {"data": {"id": "c3", "date": {"isoString": "soon"}, "venue": {"name": "X"}}},
+                {"data": {"id": "d4", "date": {"isoString": "2027-01-07"}}},
+                "odd"
+            ]
+        }}}}}});
+        let concerts = super::concerts_from(&body);
+        assert_eq!(concerts.len(), 2);
+        assert_eq!(concerts[0].id, "a1");
+        assert_eq!(concerts[0].date, "2027-01-05T20:00:00Z");
+        assert_eq!(concerts[0].city, "Paris");
+        assert_eq!(concerts[0].venue, "Olympia");
+        assert!(!concerts[0].festival);
+        assert_eq!(concerts[1].id, "b2");
+        assert!(concerts[1].festival);
+        assert_eq!(concerts[0].url(), "https://open.spotify.com/concert/a1");
+        let none = serde_json::json!({"data": {"artistUnion": {"stats": {}}}});
+        assert!(super::concerts_from(&none).is_empty());
+        assert!(super::concerts_from(&serde_json::json!({})).is_empty());
     }
 
     /// A lost reply is uncertain, including when the server accepted the write.

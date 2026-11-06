@@ -138,6 +138,29 @@ fn artist_ref(index: usize) -> ArtistRef {
     }
 }
 
+/// Seven upcoming concerts, so that the artist page shows five and "Show all".
+fn sample_concerts() -> Vec<crate::model::Concert> {
+    [
+        ("Paris", "Olympia"),
+        ("Lyon", "Halle Tony Garnier"),
+        ("Berlin", "Columbiahalle"),
+        ("London", "O2 Academy"),
+        ("Madrid", "WiZink Center"),
+        ("Rome", "Palazzo dello Sport"),
+        ("Oslo", "Sentrum Scene"),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, (city, venue))| crate::model::Concert {
+        id: format!("demo{index}"),
+        date: format!("2027-{:02}-{:02}T20:00:00Z", index + 2, index + 5),
+        city: (*city).into(),
+        venue: (*venue).into(),
+        festival: false,
+    })
+    .collect()
+}
+
 fn artist(index: usize) -> Artist {
     Artist {
         id: format!("art{index}"),
@@ -1098,6 +1121,12 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                     app.receive_recommendations(Err(error));
                 }
             }
+            "artist-concerts" => {
+                app.artist_pages
+                    .entry("art0".to_string())
+                    .or_default()
+                    .concerts = sample_concerts();
+            }
             "artist-upcoming" => {
                 app.artist_prereleases.insert(
                     artist(0).uri,
@@ -1999,6 +2028,51 @@ mod tests {
             .platform_output
             .accesskit_update
             .expect("screen-reader tree")
+    }
+
+    #[test]
+    fn artist_concerts_show_five_then_all() {
+        let (ctx, mut app) = accessible_app("artist-concerts");
+        app.open(Page::Artist("art0".into()));
+        app.artist_pages.get_mut("art0").unwrap().concerts = sample_concerts();
+        let _ = accessible_frame_height(&ctx, &mut app, vec![], 1600.0);
+        let buttons = |tree: &egui::accesskit::TreeUpdate, label: &str| {
+            tree.nodes
+                .iter()
+                .filter(|(_, node)| {
+                    node.role() == egui::accesskit::Role::Button && node.label() == Some(label)
+                })
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>()
+        };
+        let tree = accessible_frame_height(&ctx, &mut app, vec![], 1600.0);
+        assert_eq!(buttons(&tree, "Tickets").len(), 5);
+        let show_all = buttons(&tree, "Show all");
+        assert_eq!(show_all.len(), 1);
+        let _ = accessible_frame_height(
+            &ctx,
+            &mut app,
+            vec![accessible_action(
+                show_all[0],
+                egui::accesskit::Action::Click,
+                None,
+            )],
+            1600.0,
+        );
+        let tree = accessible_frame_height(&ctx, &mut app, vec![], 1600.0);
+        // Opening a concert launches the browser, which a test must not do.
+        assert_eq!(buttons(&tree, "Tickets").len(), 7);
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn artist_without_concerts_has_no_on_tour_section() {
+        let (ctx, mut app) = accessible_app("artist-upcoming");
+        app.open(Page::Artist("art0".into()));
+        let _ = accessible_frame_height(&ctx, &mut app, vec![], 1600.0);
+        let tree = accessible_frame_height(&ctx, &mut app, vec![], 1600.0);
+        assert!(!tree.nodes.iter().any(|(_, n)| n.label() == Some("On tour")));
+        app.backend.shutdown();
     }
 
     #[test]

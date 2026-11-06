@@ -967,6 +967,26 @@ pub struct ArtistPage {
     pub related: Loadable<Vec<Artist>>,
     pub filter: DiscographyFilter,
     pub show_all_top: bool,
+    /// The artist's upcoming concerts, from Spotify's artist overview.
+    pub concerts: Vec<Concert>,
+}
+
+/// One upcoming concert in an artist's overview.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Concert {
+    /// The id in `https://open.spotify.com/concert/<id>`.
+    pub id: String,
+    /// The concert's ISO-8601 date or timestamp.
+    pub date: String,
+    pub city: String,
+    pub venue: String,
+    pub festival: bool,
+}
+
+impl Concert {
+    pub fn url(&self) -> String {
+        format!("https://open.spotify.com/concert/{}", self.id)
+    }
 }
 
 /// A radio page: the songs Spotify mixed for its seed, which are the songs

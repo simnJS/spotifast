@@ -7196,6 +7196,14 @@ impl App {
             } else {
                 self.artist_prereleases.remove(&uri);
             }
+            // The page's own list, so that an answer without concerts clears
+            // one shown before.
+            if let Some(page) = uri
+                .strip_prefix("spotify:artist:")
+                .and_then(|id| self.artist_pages.get_mut(id))
+            {
+                page.concerts = data.concerts.clone();
+            }
         }
         let read = match result {
             Ok(data) => {
@@ -27137,6 +27145,26 @@ mod tests {
         };
         app.receive_play_counts(uri.into(), 0, Ok(data()));
         assert_eq!(app.artist_prereleases[uri].name, "Hollowbody");
+        let id = uri.strip_prefix("spotify:artist:").unwrap();
+        app.artist_pages
+            .insert(id.into(), crate::model::ArtistPage::default());
+        let concert = crate::model::Concert {
+            id: "c1".into(),
+            date: "2027-01-05T20:00:00Z".into(),
+            city: "Paris".into(),
+            venue: "Olympia".into(),
+            festival: false,
+        };
+        let with_concert = crate::session_reads::PageMetadata {
+            concerts: vec![concert.clone()],
+            ..Default::default()
+        };
+        app.receive_play_counts(uri.into(), 0, Ok(with_concert));
+        assert_eq!(app.artist_pages[id].concerts, vec![concert]);
+        app.receive_play_counts(uri.into(), 0, Ok(Default::default()));
+        assert!(app.artist_pages[id].concerts.is_empty());
+        app.artist_pages.remove(id);
+        app.receive_play_counts(uri.into(), 0, Ok(data()));
         assert!(
             !app.has_play_counts(uri),
             "a prerelease does not invent play counts"

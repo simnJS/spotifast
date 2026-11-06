@@ -120,6 +120,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
                 ui.add_space(32.0);
             }
 
+            if !page.concerts.is_empty() {
+                concerts_section(app, ui, id, &page.concerts);
+                ui.add_space(32.0);
+            }
+
             // Discography.
             theme::section_title(ui, &palette, &gettext(locale, "Discography"));
             ui.add_space(6.0);
@@ -365,6 +370,84 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
         }
     }
     app.artist_pages.insert(id.to_string(), page);
+}
+
+/// How many concerts show before "Show all".
+const CONCERTS_SHOWN: usize = 5;
+
+/// The "On tour" section: one row per concert, the first few unless the
+/// viewer expands the list. Draws nothing for an empty list.
+fn concerts_section(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    artist_id: &str,
+    concerts: &[crate::model::Concert],
+) {
+    if concerts.is_empty() {
+        return;
+    }
+    let palette = app.palette;
+    let locale = app.locale;
+    theme::section_title(ui, &palette, &gettext(locale, "On tour"));
+    ui.add_space(6.0);
+    let expanded_id = egui::Id::new(("artist-concerts-expanded", artist_id));
+    let expanded = ui
+        .data(|data| data.get_temp::<bool>(expanded_id))
+        .unwrap_or(false);
+    let shown = if expanded {
+        concerts.len()
+    } else {
+        CONCERTS_SHOWN
+    };
+    for concert in concerts.iter().take(shown) {
+        ui.horizontal(|ui| {
+            let date = ui.add_sized(
+                [96.0, 28.0],
+                egui::Label::new(
+                    egui::RichText::new(util::format_date(locale, &concert.date))
+                        .font(theme::semibold(14.0))
+                        .color(palette.text),
+                )
+                .truncate(),
+            );
+            let _ = date;
+            let place = [concert.city.as_str(), concert.venue.as_str()]
+                .iter()
+                .filter(|part| !part.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" \u{b7} ");
+            let button = gettext(locale, "Tickets");
+            let button_width = theme::soft_button_width(ui, &button);
+            let room = (ui.available_width() - button_width - 12.0).max(40.0);
+            ui.add_sized(
+                [room, 28.0],
+                egui::Label::new(
+                    egui::RichText::new(place)
+                        .font(theme::regular(14.0))
+                        .color(palette.secondary),
+                )
+                .truncate(),
+            );
+            if theme::soft_button(ui, &palette, None, &button, false)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                app.actions.push(Action::OpenUrl(concert.url()));
+            }
+        });
+    }
+    if concerts.len() > CONCERTS_SHOWN {
+        ui.add_space(6.0);
+        let label = if expanded {
+            gettext(locale, "Show less")
+        } else {
+            gettext(locale, "Show all")
+        };
+        if theme::soft_button(ui, &palette, None, &label, false).clicked() {
+            ui.data_mut(|data| data.insert_temp(expanded_id, !expanded));
+        }
+    }
 }
 
 fn upcoming_release(
