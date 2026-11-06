@@ -385,24 +385,22 @@ fn new_releases(app: &mut App, ui: &mut egui::Ui) {
     if albums.is_empty() && !loading && failure.is_none() {
         return;
     }
-    let open = widgets::linked_shelf(
-        ui,
-        &palette,
-        "new-releases",
-        &gettext(app.locale, "New releases"),
-        |ui| {
-            if albums.is_empty() && loading {
-                widgets::loading_row(ui, &palette, app.locale);
-            } else if albums.is_empty()
-                && let Some(message) = &failure
-            {
-                widgets::error_row(ui, app, message, Some(Page::Home));
-            }
-            for album in &albums {
-                release_card(app, ui, album);
-            }
-        },
-    );
+    let title = gettext(app.locale, "New releases");
+    // The shelf leaves 8 points above its title.
+    let title_at = ui.cursor().min + egui::vec2(0.0, 8.0);
+    let open = widgets::linked_shelf(ui, &palette, "new-releases", &title, |ui| {
+        if albums.is_empty() && loading {
+            widgets::loading_row(ui, &palette, app.locale);
+        } else if albums.is_empty()
+            && let Some(message) = &failure
+        {
+            widgets::error_row(ui, app, message, Some(Page::Home));
+        }
+        for album in &albums {
+            release_card(app, ui, album);
+        }
+    });
+    super::new_releases::shelf_badge(app, ui, title_at, &title);
     if open {
         app.actions.push(Action::Open(Page::NewReleases));
     }

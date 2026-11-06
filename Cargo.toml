@@ -94,6 +94,10 @@ fastframe-dirs = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 # Windows, Now Playing on macOS. The media keys and those panels send
 # commands back, and closing the window keeps the music playing.
 fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
+# Desktop notifications when a followed artist releases something
+# (src/notifications.rs): the native service on Linux and Windows, reached
+# from its own worker so the UI thread never waits for the desktop.
+fastframe-notifications = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 # webp is for cover URLs: Spotify's CDN sometimes serves the same cover as WebP, and without
 # this every size of it fails to decode and the placeholder is drawn.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }

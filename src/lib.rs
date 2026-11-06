@@ -38,6 +38,7 @@ pub mod model;
 pub mod motion;
 pub mod new_releases;
 pub mod notch;
+pub mod notifications;
 pub mod opener;
 pub mod paths;
 pub mod player;

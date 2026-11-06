@@ -457,6 +457,9 @@ pub enum ApiResponse {
     NewReleases {
         generation: u64,
         result: ApiResult<Vec<Album>>,
+        /// Whether the releases are Spotify's own What's New feed rather
+        /// than the Web API's stand-in, which alone may be announced.
+        from_feed: bool,
     },
     NewReleaseTracks {
         generation: u64,
@@ -5213,25 +5216,37 @@ const UNSUPPORTED_DJ_URI: &str = "spotify:playlist:37i9dQZF1EYkqdzj48dyYq";
 /// Search is an approximation, used only when Spotify's personalized Home
 /// section cannot be read.
 /// Releases from Spotify's own new-releases feed over the playback session,
-/// or, when that cannot answer, from the Web API's followed artists.
+/// or, when that cannot answer, from the Web API's followed artists. The
+/// flag tells the feed's answer apart.
 async fn read_new_releases(
     api: &ApiGateway,
     new_releases: &crate::new_releases::NewReleases,
     engine: Option<&Engine>,
     background_session: &tokio::sync::Semaphore,
-) -> ApiResult<Vec<Album>> {
+) -> (ApiResult<Vec<Album>>, bool) {
     if let Some(engine) = engine {
         let _permit = background_session.acquire().await.ok();
         match new_releases.feed(engine.session()).await {
             Ok(albums) => {
                 log::debug!("Spotify route operation=NewReleases source=session");
-                return Ok(albums);
+                return (Ok(albums), true);
             }
             Err(error) => {
                 log::warn!("New releases session read failed; asking the Web API: {error}");
             }
         }
     }
+    (
+        read_followed_artist_releases(api, new_releases).await,
+        false,
+    )
+}
+
+/// The Web API's stand-in for the feed, kept for a while per account.
+async fn read_followed_artist_releases(
+    api: &ApiGateway,
+    new_releases: &crate::new_releases::NewReleases,
+) -> ApiResult<Vec<Album>> {
     let account = api.account().map(|account| account.as_str().to_owned());
     if let Some(account) = &account
         && let Some(albums) = new_releases.cached_fallback(account).await
@@ -5493,15 +5508,23 @@ async fn handle(
         engine.filter(|engine| same_account(&engine.session().username(), api.account().as_ref()));
     if let ApiRequest::NewReleases { generation } = request {
         let mut expired = Vec::new();
-        let result =
-            match read_new_releases(api, new_releases, session_engine, background_session).await {
-                Err(ApiError::SignInExpired { api_source }) => {
-                    expired.push(api_source);
-                    Err(ApiError::SignInExpired { api_source })
-                }
-                result => result,
-            };
-        return (ApiResponse::NewReleases { generation, result }, expired);
+        let (result, from_feed) =
+            read_new_releases(api, new_releases, session_engine, background_session).await;
+        let result = match result {
+            Err(ApiError::SignInExpired { api_source }) => {
+                expired.push(api_source);
+                Err(ApiError::SignInExpired { api_source })
+            }
+            result => result,
+        };
+        return (
+            ApiResponse::NewReleases {
+                generation,
+                result,
+                from_feed,
+            },
+            expired,
+        );
     }
     if let ApiRequest::NewReleaseTracks { albums, generation } = request {
         let mut expired = Vec::new();

@@ -150,6 +150,12 @@ impl AppDirs {
         self.state.join("history.json")
     }
 
+    /// The new releases already seen in each account's feed, so each is
+    /// announced on the desktop once. See [`crate::notifications`].
+    pub fn seen_releases_file(&self) -> PathBuf {
+        self.state.join("seen-releases.json")
+    }
+
     pub fn shared_web_token_file(&self) -> PathBuf {
         self.state.join("shared_web_api_token.json")
     }

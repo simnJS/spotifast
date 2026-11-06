@@ -371,6 +371,12 @@ pub struct App {
     /// every frame, so the answer is kept until the artwork changes.
     media_art: Option<(String, PathBuf)>,
     tray: Option<fastframe_tray::Tray>,
+    /// The releases already seen in the What's New feed, per account, and
+    /// the desktop notifications that announce the others.
+    seen_releases: crate::notifications::ReleaseState,
+    release_notifier: crate::notifications::Notifier,
+    /// When the feed was last asked for on the notifications' schedule.
+    releases_checked_at: Option<Instant>,
     /// A hidden start's deadline for a panel to show the tray item: a start
     /// at login can beat the desktop's tray host, and without one by then
     /// the window opens, since nothing else could bring it back.
@@ -1144,6 +1150,9 @@ impl App {
         if let Some(tray) = &mut tray {
             tray.set_icon_colour(tray_icon_colour(settings.tray_icon));
         }
+        let seen_releases = crate::notifications::ReleaseState::load(&dirs.seen_releases_file());
+        let release_notifier =
+            crate::notifications::Notifier::new(options.media_controls.then(|| waker.clone()));
         let power = if options.media_controls {
             let wake = waker.clone();
             crate::power::Power::spawn(move || wake.wake())
@@ -1179,6 +1188,9 @@ impl App {
             system_appearance,
             media_art: None,
             tray,
+            seen_releases,
+            release_notifier,
+            releases_checked_at: None,
             tray_wait: None,
             autostart: None,
             autostart_wanted: None,
@@ -4842,6 +4854,86 @@ impl App {
         }
     }
 
+    /// Reads the What's New feed at start and then every
+    /// [`crate::notifications::REFRESH`] once the playback session can,
+    /// opens what a clicked notification names, and clears the New releases
+    /// badge while that page is on screen.
+    fn sync_release_notifications(&mut self) {
+        for click in self.release_notifier.clicks() {
+            let page = match click {
+                crate::notifications::Click::Album(id) => Page::Album(id),
+                crate::notifications::Click::NewReleases => Page::NewReleases,
+            };
+            self.actions.push(Action::ShowWindow);
+            self.actions.push(Action::Open(page));
+        }
+        if self.release_notifier.is_enabled()
+            && self.local_ready
+            && self.network_reachable
+            && self.user_id().is_some()
+            && self
+                .releases_checked_at
+                .is_none_or(|at| at.elapsed() >= crate::notifications::REFRESH)
+        {
+            self.releases_checked_at = Some(Instant::now());
+            self.load_new_releases();
+        }
+        if !self.window_hidden
+            && *self.page() == Page::NewReleases
+            && let Some(account) = self.user_id().map(str::to_owned)
+            && self.seen_releases.mark_read(&account)
+        {
+            self.save_seen_releases();
+        }
+    }
+
+    /// Releases on the New releases entry's badge: announced, and not seen
+    /// on its page since.
+    pub fn unread_new_releases(&self) -> usize {
+        self.user_id()
+            .map_or(0, |account| self.seen_releases.unread(account))
+    }
+
+    /// Announces the releases the feed did not hold before. The account's
+    /// first answer only remembers what is there.
+    fn announce_new_releases(&mut self, albums: &[Album]) {
+        let Some(account) = self.user_id().map(str::to_owned) else {
+            return;
+        };
+        let (plan, changed) = self.seen_releases.observe(&account, albums);
+        if changed {
+            self.save_seen_releases();
+        }
+        for album in &plan.shown {
+            // A cover already on the disk; none is downloaded for this.
+            let cover =
+                pick_image(&album.images, 300).and_then(|url| self.backend.art().cached_file(url));
+            self.release_notifier.show(
+                crate::notifications::release_notification(album, self.locale, cover),
+                crate::notifications::Click::Album(album.id.clone()),
+            );
+        }
+        if plan.more > 0 {
+            self.release_notifier.show(
+                crate::notifications::more_notification(plan.more, self.locale),
+                crate::notifications::Click::NewReleases,
+            );
+        }
+    }
+
+    fn save_seen_releases(&self) {
+        if self.offline {
+            return;
+        }
+        if let Some(text) = self.seen_releases.encode() {
+            self.files.write(
+                &self.dirs.seen_releases_file(),
+                text,
+                fastframe_file::Access::Default,
+            );
+        }
+    }
+
     fn handle_tray(&mut self) {
         use fastframe_tray::Event;
         let Some(events) = self.tray.as_ref().map(fastframe_tray::Tray::events) else {
@@ -7806,9 +7898,16 @@ impl App {
                     self.home_answered(changed);
                 }
             }
-            ApiResponse::NewReleases { generation, result } => {
+            ApiResponse::NewReleases {
+                generation,
+                result,
+                from_feed,
+            } => {
                 if generation != self.home.new_releases_generation {
                     return;
+                }
+                if from_feed && let Ok(albums) = &result {
+                    self.announce_new_releases(albums);
                 }
                 let changed = result.is_ok();
                 self.home.refresh_failed |= !changed;
@@ -13359,6 +13458,7 @@ impl App {
         self.sync_power(ctx);
         self.sync_motion(ctx);
         self.handle_tray();
+        self.sync_release_notifications();
         #[cfg(target_os = "macos")]
         self.handle_dock_menu();
         #[cfg(target_os = "macos")]
@@ -16913,6 +17013,7 @@ mod tests {
         app.handle_api(ApiResponse::NewReleases {
             generation: app.home.new_releases_generation,
             result: Err(crate::api::ApiError::RateLimited),
+            from_feed: false,
         });
 
         // The failed shelf refresh keeps its cached cards. Successful
@@ -32309,6 +32410,7 @@ mod tests {
         app.handle_api(ApiResponse::NewReleases {
             generation: first,
             result: Ok(vec![release("newest"), release("older")]),
+            from_feed: false,
         });
         assert_eq!(app.home.new_releases.get().map(Vec::len), Some(2));
         assert!(!app.home.new_releases_loading);
@@ -32318,10 +32420,12 @@ mod tests {
         app.handle_api(ApiResponse::NewReleases {
             generation: first,
             result: Ok(Vec::new()),
+            from_feed: false,
         });
         app.handle_api(ApiResponse::NewReleases {
             generation: app.home.new_releases_generation,
             result: Err(crate::api::ApiError::RateLimited),
+            from_feed: false,
         });
         assert_eq!(app.home.new_releases.get().map(Vec::len), Some(2));
         assert!(app.home.refresh_failed);
@@ -32329,6 +32433,51 @@ mod tests {
             app.known_album("newest").map(|album| album.name.as_str()),
             Some("newest")
         );
+    }
+
+    /// The What's New feed's first answer seeds silently; a release it adds
+    /// later is counted on the New releases badge until that page is seen,
+    /// survives a restart, and the Web API's stand-in announces nothing.
+    #[test]
+    fn new_releases_from_the_feed_are_announced_once_and_counted_until_seen() {
+        let mut app = test_app("release-notifications");
+        app.backend.set_offline(true);
+        app.user = Some(User {
+            id: "alice".into(),
+            ..Default::default()
+        });
+        let answer = |app: &mut App, albums: Vec<Album>, from_feed: bool| {
+            app.load_new_releases();
+            app.handle_api(ApiResponse::NewReleases {
+                generation: app.home.new_releases_generation,
+                result: Ok(albums),
+                from_feed,
+            });
+        };
+        answer(&mut app, vec![release("older")], true);
+        assert_eq!(app.unread_new_releases(), 0, "the first answer only seeds");
+        answer(&mut app, vec![release("guest"), release("older")], false);
+        assert_eq!(app.unread_new_releases(), 0, "the stand-in is not the feed");
+        answer(&mut app, vec![release("newest"), release("older")], true);
+        assert_eq!(app.unread_new_releases(), 1);
+        answer(&mut app, vec![release("newest"), release("older")], true);
+        assert_eq!(app.unread_new_releases(), 1, "announced once");
+        assert!(app.flush_files());
+        let saved = crate::notifications::ReleaseState::load(&app.dirs.seen_releases_file());
+        assert_eq!(saved.unread("alice"), 1);
+        assert_eq!(
+            saved.accounts["alice"].seen,
+            ["spotify:album:older", "spotify:album:newest"]
+        );
+
+        app.window_hidden = false;
+        app.open(Page::NewReleases);
+        app.sync_release_notifications();
+        assert_eq!(app.unread_new_releases(), 0, "opening the page clears it");
+        assert!(app.flush_files());
+        let saved = crate::notifications::ReleaseState::load(&app.dirs.seen_releases_file());
+        assert_eq!(saved.unread("alice"), 0);
+        app.backend.shutdown();
     }
 
     /// #907: the page reads the songs of the releases on the shelf, once,
