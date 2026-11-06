@@ -50,8 +50,10 @@ pub(super) struct HeroImages<'a> {
     pub align_thumbnail: bool,
 }
 
-/// The larger of the hero's two cover sizes.
-const HERO_ART: f32 = 212.0;
+/// The hero's cover at its largest, as Spotify's entity header draws it.
+const HERO_ART: f32 = 232.0;
+/// The hero's cover at its smallest, in a narrow window.
+const HERO_ART_MIN: f32 = 128.0;
 
 /// The artwork widths a page header asks for on this display: its own
 /// cover, and the card's, which the page was likely opened from and so is
@@ -95,6 +97,25 @@ pub(super) fn hero_images<'a>(
     }
 }
 
+/// The hero's cover size for the width the page has: Spotify grows it from
+/// 128 points at a 600-point page to 232 points at 1024.
+fn hero_cover_size(width: f32) -> f32 {
+    (HERO_ART_MIN + (width - 600.0) / 424.0 * (HERO_ART - HERO_ART_MIN))
+        .clamp(HERO_ART_MIN, HERO_ART)
+}
+
+/// The largest title size Spotify's header starts from for a cover size:
+/// 6rem beside the full cover, less beside a smaller one.
+fn hero_title_size(cover_size: f32) -> f32 {
+    if cover_size >= 200.0 {
+        96.0
+    } else if cover_size >= 160.0 {
+        72.0
+    } else {
+        48.0
+    }
+}
+
 pub(super) fn hero(app: &mut App, ui: &mut egui::Ui, hero: Hero<'_>) {
     let palette = app.palette;
     let art = app.backend.art().clone();
@@ -102,12 +123,8 @@ pub(super) fn hero(app: &mut App, ui: &mut egui::Ui, hero: Hero<'_>) {
         .images
         .thumbnail
         .and_then(|uri| app.softened_covers.texture(ui.ctx(), &art, uri));
-    ui.add_space(12.0);
-    let cover_size = if ui.available_width() > 720.0 {
-        HERO_ART
-    } else {
-        160.0
-    };
+    ui.add_space(16.0);
+    let cover_size = hero_cover_size(ui.available_width());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 24.0;
         // Clicking the cover shows it enlarged (#586).
@@ -137,7 +154,7 @@ pub(super) fn hero(app: &mut App, ui: &mut egui::Ui, hero: Hero<'_>) {
                 }));
             }
         }
-        let radius = if hero.round { cover_size / 2.0 } else { 6.0 };
+        let radius = if hero.round { cover_size / 2.0 } else { 4.0 };
         widgets::paint_shadow(ui, &palette, rect, radius);
         if hero.liked {
             super::sidebar::liked_cover(ui, rect, radius);
@@ -161,22 +178,28 @@ pub(super) fn hero(app: &mut App, ui: &mut egui::Ui, hero: Hero<'_>) {
         ui.vertical(|ui| {
             let width = ui.available_width();
             ui.set_width(width);
-            ui.spacing_mut().item_spacing.y = 6.0;
-            ui.add_space(cover_size * 0.08);
-            theme::text(ui, hero.kind.as_ref(), theme::medium(12.5), palette.text);
-            let mut size = if cover_size > 200.0 { 56.0 } else { 40.0 };
+            ui.spacing_mut().item_spacing.y = 8.0;
+            let mut size = hero_title_size(cover_size);
             loop {
                 let galley = ui.painter().layout_no_wrap(
                     hero.title.to_string(),
                     theme::bold(size),
                     palette.text,
                 );
-                if galley.size().x <= width || size <= 22.0 {
+                if galley.size().x <= width || size <= 24.0 {
                     break;
                 }
-                size -= 6.0;
+                size -= 4.0;
             }
+            // Spotify sets the type, title and byline at the cover's foot.
+            let text_height = hero_text_height(ui, &hero, size, width);
+            ui.add_space((cover_size - text_height).max(0.0));
+            theme::text(ui, hero.kind.as_ref(), theme::medium(14.0), palette.text);
+            // The tall title's line box would push the byline down; Spotify
+            // draws it with a tight line height.
+            ui.spacing_mut().item_spacing.y = 4.0;
             theme::text(ui, hero.title, theme::bold(size), palette.text);
+            ui.spacing_mut().item_spacing.y = 8.0;
             if let Some(description) = &hero.description
                 && !description.is_empty()
             {
@@ -185,7 +208,7 @@ pub(super) fn hero(app: &mut App, ui: &mut egui::Ui, hero: Hero<'_>) {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 if let Some(avatar) = &hero.avatar {
-                    let size = 18.0;
+                    let size = 24.0;
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
                     let url = match avatar {
                         Avatar::Placeholder => None,
@@ -200,21 +223,25 @@ pub(super) fn hero(app: &mut App, ui: &mut egui::Ui, hero: Hero<'_>) {
                         Icon::User,
                         Some(&art),
                     );
+                    ui.add_space(2.0);
                 }
                 for (index, (text, page)) in hero.byline.iter().enumerate() {
                     if index > 0 {
-                        theme::text(ui, "•", theme::regular(13.5), palette.secondary);
+                        theme::text(ui, "•", theme::regular(14.0), palette.secondary);
                     }
                     let response = match page {
                         Some(page) => {
-                            let response =
-                                theme::link(ui, text, theme::semibold(13.5), palette.text);
+                            let response = theme::link(ui, text, theme::bold(14.0), palette.text);
                             if response.clicked() {
                                 app.actions.push(Action::Open(page.clone()));
                             }
                             response
                         }
-                        None => theme::text(ui, text, theme::regular(13.5), palette.secondary),
+                        // The owner leads in bold white, as Spotify writes it.
+                        None if index == 0 && hero.avatar.is_some() => {
+                            theme::text(ui, text, theme::bold(14.0), palette.text)
+                        }
+                        None => theme::text(ui, text, theme::regular(14.0), palette.secondary),
                     };
                     if let Some((at, tooltip)) = &hero.byline_tooltip
                         && *at == index
@@ -225,7 +252,57 @@ pub(super) fn hero(app: &mut App, ui: &mut egui::Ui, hero: Hero<'_>) {
             });
         });
     });
-    ui.add_space(20.0);
+    ui.add_space(24.0);
+}
+
+/// The height of the hero's text, its type over its title, description and
+/// byline, laid out as `hero` draws them `width` wide, so it can sit at the
+/// cover's foot in the frame it is drawn.
+fn hero_text_height(ui: &egui::Ui, hero: &Hero<'_>, title_size: f32, width: f32) -> f32 {
+    let row = |font: &egui::FontId| ui.fonts_mut(|fonts| fonts.row_height(font));
+    let gap = 8.0;
+    let mut height = row(&theme::medium(14.0)) + 4.0 + row(&theme::bold(title_size)) + gap;
+    if hero
+        .description
+        .as_deref()
+        .is_some_and(|text| !text.is_empty())
+    {
+        height += row(&theme::regular(13.5)) + gap;
+    }
+    // The byline wraps item by item, as `horizontal_wrapped` does.
+    let item_gap = 4.0;
+    let line = row(&theme::bold(14.0)).max(row(&theme::regular(14.0)));
+    let avatar = 24.0;
+    let mut widths = Vec::new();
+    if hero.avatar.is_some() {
+        widths.push((avatar + 2.0, avatar));
+    }
+    for (index, (text, _)) in hero.byline.iter().enumerate() {
+        if index > 0 {
+            widths.push((text_width(ui, "•", theme::regular(14.0)), line));
+        }
+        widths.push((text_width(ui, text, theme::bold(14.0)), line));
+    }
+    let mut lines: Vec<f32> = Vec::new();
+    let mut x = 0.0;
+    for (item, item_height) in widths {
+        match lines.last_mut() {
+            Some(last) if x + item <= width => *last = last.max(item_height),
+            _ => {
+                lines.push(item_height);
+                x = 0.0;
+            }
+        }
+        x += item + item_gap;
+    }
+    height + lines.iter().sum::<f32>() + gap * lines.len().saturating_sub(1) as f32
+}
+
+fn text_width(ui: &egui::Ui, text: &str, font: egui::FontId) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_string(), font, egui::Color32::PLACEHOLDER)
+        .size()
+        .x
 }
 
 /// A description on one line, its links clickable as in Spotify: a Spotify
@@ -321,94 +398,135 @@ pub struct Actions<'a> {
     pub plays_shown_rows: bool,
 }
 
-/// The big play button and its neighbours; returns the filter text if a
-/// filter field was shown.
+/// What a page's play button plays: the actions row's, which the sticky
+/// bar repeats once the row has scrolled away.
+#[derive(Clone)]
+pub(super) struct PlayTarget {
+    uri: String,
+    view: Option<Arc<[String]>>,
+    radio: bool,
+    plays_shown_rows: bool,
+    filtered: bool,
+}
+
+/// The green play button of a page, `diameter` across: it pauses and
+/// resumes the page's own context, or starts it from the songs on screen.
+fn play_button(app: &mut App, ui: &mut egui::Ui, target: &PlayTarget, diameter: f32) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let uri = &target.uri;
+    let context_here = app.playing_context_uri().as_deref() == Some(uri.as_str());
+    let now_playing_here = context_here && app.believed_playing();
+    // A radio is mixed afresh each time Spotify is asked, so it always
+    // plays the songs on screen.
+    let play_view = target.view.is_some()
+        && (!app.playing_context_shuffle()
+            || target.filtered
+            || target.radio
+            || target.plays_shown_rows);
+    let can_start = target.view.as_ref().is_none_or(|uris| !uris.is_empty());
+    let icon = if now_playing_here {
+        Icon::PauseFilled
+    } else {
+        Icon::PlayFilled
+    };
+    if app.play_pending(uri) {
+        theme::circle_spinner(
+            ui,
+            diameter,
+            palette.accent,
+            palette.on_accent,
+            &gettext(locale, "Starting…"),
+        );
+    } else if ui
+        .add_enabled_ui(context_here || can_start, |ui| {
+            theme::circle_button(
+                ui,
+                icon,
+                diameter,
+                palette.accent,
+                palette.accent_hover,
+                palette.on_accent,
+                &if now_playing_here {
+                    gettext(locale, "Pause")
+                } else {
+                    gettext(locale, "Play")
+                },
+            )
+        })
+        .inner
+        .on_disabled_hover_text(gettext(locale, "No playable songs in this view").as_ref())
+        .clicked()
+    {
+        // The context this page belongs to resumes where it was, paused or
+        // playing; only another context starts over.
+        if context_here {
+            app.actions.push(Action::TogglePlay);
+        } else if let Some(uris) = target.view.clone()
+            && play_view
+        {
+            app.actions.push(Action::PlayFromRow {
+                context: RowContext::View {
+                    uris: Arc::clone(&uris),
+                    context_uri: uri.clone(),
+                    // Header playback needs no edit rights; row menus
+                    // carry theirs via the table conversion.
+                    editable_playlist: None,
+                },
+                uri: String::new(),
+                index: 0,
+            });
+        } else {
+            app.actions.push(Action::PlayContext {
+                uri: uri.clone(),
+                offset_uri: None,
+                offset_index: None,
+            });
+        }
+    }
+}
+
+/// The big play button and its neighbours, with a filter field when given
+/// its text.
 pub fn actions_row(
     app: &mut App,
     ui: &mut egui::Ui,
     actions: Actions<'_>,
     filter: Option<&mut String>,
 ) {
+    actions_bar(app, ui, actions, filter, false);
+}
+
+/// Spotify's action bar: the play button, shuffle, save, the More menu,
+/// and at the far end the filter and, over a song list, the List or
+/// Compact view. Returns what the play button plays.
+pub(super) fn actions_bar(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    actions: Actions<'_>,
+    filter: Option<&mut String>,
+    view_toggle: bool,
+) -> Option<PlayTarget> {
     let palette = app.palette;
     let locale = app.locale;
+    let mut target = None;
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 18.0;
+        ui.spacing_mut().item_spacing.x = 20.0;
         if let Some(uri) = &actions.play_uri {
-            let context_here = app.playing_context_uri().as_deref() == Some(uri.as_str());
-            let now_playing_here = context_here && app.believed_playing();
-            let is_filtered = filter.as_ref().is_some_and(|f| !f.trim().is_empty());
-            // A radio is mixed afresh each time Spotify is asked, so it
-            // always plays the songs on screen.
-            let play_view = actions.view.is_some()
-                && (!app.playing_context_shuffle()
-                    || is_filtered
-                    || actions.save_radio.is_some()
-                    || actions.plays_shown_rows);
-            let can_start = actions.view.as_ref().is_none_or(|uris| !uris.is_empty());
-            let icon = if now_playing_here {
-                Icon::PauseFilled
-            } else {
-                Icon::PlayFilled
+            let play = PlayTarget {
+                uri: uri.clone(),
+                view: actions.view.clone(),
+                radio: actions.save_radio.is_some(),
+                plays_shown_rows: actions.plays_shown_rows,
+                filtered: filter.as_ref().is_some_and(|f| !f.trim().is_empty()),
             };
-            if app.play_pending(uri) {
-                theme::circle_spinner(
-                    ui,
-                    56.0,
-                    palette.accent,
-                    palette.on_accent,
-                    &gettext(locale, "Starting…"),
-                );
-            } else if ui
-                .add_enabled_ui(context_here || can_start, |ui| {
-                    theme::circle_button(
-                        ui,
-                        icon,
-                        56.0,
-                        palette.accent,
-                        palette.accent_hover,
-                        palette.on_accent,
-                        &if now_playing_here {
-                            gettext(locale, "Pause")
-                        } else {
-                            gettext(locale, "Play")
-                        },
-                    )
-                })
-                .inner
-                .on_disabled_hover_text(gettext(locale, "No playable songs in this view").as_ref())
-                .clicked()
-            {
-                // The context this page belongs to resumes where it was,
-                // paused or playing; only another context starts over.
-                if context_here {
-                    app.actions.push(Action::TogglePlay);
-                } else if let Some(uris) = actions.view.clone()
-                    && play_view
-                {
-                    app.actions.push(Action::PlayFromRow {
-                        context: RowContext::View {
-                            uris: Arc::clone(&uris),
-                            context_uri: uri.clone(),
-                            // Header playback needs no edit rights; row
-                            // menus carry theirs via the table conversion.
-                            editable_playlist: None,
-                        },
-                        uri: String::new(),
-                        index: 0,
-                    });
-                } else {
-                    app.actions.push(Action::PlayContext {
-                        uri: uri.clone(),
-                        offset_uri: None,
-                        offset_index: None,
-                    });
-                }
-            }
+            play_button(app, ui, &play, 56.0);
+            target = Some(play);
             let shuffle = app.playing_context_shuffle();
             if theme::icon_button(
                 ui,
                 Icon::Shuffle,
-                26.0,
+                30.0,
                 if shuffle {
                     palette.accent
                 } else {
@@ -449,7 +567,7 @@ pub fn actions_row(
                     palette.text,
                 )
             };
-            if theme::icon_button(ui, icon, 26.0, color, hover, tooltip).clicked() {
+            if theme::icon_button(ui, icon, 30.0, color, hover, tooltip).clicked() {
                 app.actions.push(Action::ToggleSaved(uri.clone()));
             }
         }
@@ -457,7 +575,7 @@ pub fn actions_row(
             && theme::icon_button(
                 ui,
                 Icon::CirclePlus,
-                26.0,
+                30.0,
                 palette.secondary,
                 palette.text,
                 &gettext(locale, "Save as playlist"),
@@ -470,7 +588,7 @@ pub fn actions_row(
             let more = theme::icon_button(
                 ui,
                 Icon::Ellipsis,
-                26.0,
+                30.0,
                 palette.secondary,
                 palette.text,
                 &gettext(locale, "More"),
@@ -505,21 +623,170 @@ pub fn actions_row(
                     }
                 });
         }
-        if let Some(filter) = filter {
+        if filter.is_some() || view_toggle {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                widgets::search_field(
-                    ui,
-                    &palette,
-                    locale,
-                    egui::Id::new(("collection-filter", actions.name)),
-                    filter,
-                    &gettext(locale, "Filter"),
-                    220.0,
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let (labelled, filter_width) = end_of_bar_fit(
+                    ui.available_width(),
+                    view_toggle.then(|| view_menu_width(app, ui, true)),
+                    filter.is_some(),
                 );
+                if view_toggle {
+                    view_menu(app, ui, labelled);
+                }
+                if let Some(filter) = filter {
+                    widgets::search_field(
+                        ui,
+                        &palette,
+                        locale,
+                        egui::Id::new(("collection-filter", actions.name)),
+                        filter,
+                        &gettext(locale, "Filter"),
+                        filter_width,
+                    );
+                }
             });
         }
     });
-    ui.add_space(14.0);
+    ui.add_space(16.0);
+    target
+}
+
+/// The widest the action bar's filter field grows.
+const FILTER_WIDTH: f32 = 220.0;
+/// The narrowest it shrinks before the view button drops its label.
+const FILTER_MIN_WIDTH: f32 = 120.0;
+/// The view button without its label: the icon and its padding.
+const VIEW_ICON_WIDTH: f32 = 32.0;
+
+/// How the end of the action bar fits the room the buttons before it
+/// leave: whether the view button keeps its label, and the filter's width.
+fn end_of_bar_fit(room: f32, view_width: Option<f32>, filter: bool) -> (bool, f32) {
+    let gap = 8.0;
+    let Some(view_width) = view_width else {
+        return (true, room.clamp(FILTER_MIN_WIDTH, FILTER_WIDTH));
+    };
+    if !filter {
+        return (room >= view_width, 0.0);
+    }
+    let beside_label = room - view_width - gap;
+    if beside_label >= FILTER_MIN_WIDTH {
+        return (true, beside_label.min(FILTER_WIDTH));
+    }
+    let beside_icon = room - VIEW_ICON_WIDTH - gap;
+    (
+        false,
+        beside_icon.clamp(FILTER_MIN_WIDTH * 0.75, FILTER_WIDTH),
+    )
+}
+
+fn view_menu_label(app: &App) -> Cow<'static, str> {
+    if app.settings.tracklist_compact {
+        gettext(app.locale, "Compact")
+    } else {
+        gettext(app.locale, "List")
+    }
+}
+
+/// The view button's width, with or without its label.
+fn view_menu_width(app: &App, ui: &egui::Ui, labelled: bool) -> f32 {
+    if !labelled {
+        return VIEW_ICON_WIDTH;
+    }
+    let galley = ui.painter().layout_no_wrap(
+        view_menu_label(app).into_owned(),
+        theme::regular(14.0),
+        egui::Color32::PLACEHOLDER,
+    );
+    galley.size().x + 8.0 + VIEW_ICON_WIDTH
+}
+
+/// Spotify's "View as" button: the current view's name and icon, opening
+/// a menu of List and Compact, which is the Compact track list setting.
+/// Without room, it shows the icon alone.
+fn view_menu(app: &mut App, ui: &mut egui::Ui, labelled: bool) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let compact = app.settings.tracklist_compact;
+    let label = view_menu_label(app);
+    let font = theme::regular(14.0);
+    let galley = ui.painter().layout_no_wrap(
+        if labelled {
+            label.to_string()
+        } else {
+            String::new()
+        },
+        font,
+        egui::Color32::PLACEHOLDER,
+    );
+    let icon_size = 16.0;
+    let size = vec2(view_menu_width(app, ui, labelled), 32.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let response = response.on_hover_text(gettext(locale, "View as"));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label.as_ref())
+    });
+    theme::focus_ring(ui, &response);
+    if ui.is_rect_visible(rect) {
+        let color = if response.hovered() || response.has_focus() {
+            palette.text
+        } else {
+            palette.secondary
+        };
+        let text_pos = pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0);
+        let text_right = if labelled {
+            text_pos.x + galley.size().x
+        } else {
+            rect.left()
+        };
+        ui.painter().galley(text_pos, galley, color);
+        let icon_rect = Rect::from_center_size(
+            pos2(text_right + 8.0 + icon_size / 2.0, rect.center().y),
+            Vec2::splat(icon_size),
+        );
+        if compact {
+            paint_compact_icon(ui, icon_rect, color);
+        } else {
+            Icon::LayoutList
+                .image(color, icon_size)
+                .paint_at(ui, icon_rect);
+        }
+    }
+    egui::Popup::menu(&response)
+        .frame(widgets::menu_frame(&palette))
+        .show(|ui| {
+            ui.set_min_width(160.0);
+            theme::text(
+                ui,
+                gettext(locale, "View as"),
+                theme::semibold(11.5),
+                palette.secondary,
+            );
+            for (choice, text) in [
+                (true, gettext(locale, "Compact")),
+                (false, gettext(locale, "List")),
+            ] {
+                let icon = (choice == compact).then_some(Icon::Check);
+                if widgets::menu_item(ui, &palette, icon, &text) && choice != compact {
+                    app.settings.tracklist_compact = choice;
+                    app.actions.push(Action::SettingsChanged);
+                }
+            }
+        });
+}
+
+/// Spotify's compact-view glyph: four even bars, the list without its
+/// covers.
+fn paint_compact_icon(ui: &egui::Ui, rect: Rect, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.6, color);
+    for line in 0..4 {
+        let y = rect.top() + rect.height() * (0.2 + 0.2 * line as f32);
+        ui.painter().hline(
+            rect.left() + rect.width() * 0.12..=rect.right() - rect.width() * 0.12,
+            y,
+            stroke,
+        );
+    }
 }
 
 /// A page's **Refresh** menu item, which reloads it from Spotify. It reads
@@ -828,11 +1095,13 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
         .pagination
         .filter(|page| page.total > 0 && sort.is_none() && needle.is_empty());
     let rows = finite.map_or(entry.visible.len(), |page| page.total as usize);
-    if rows > 0
-        && let Some(column) = widgets::table_header(
+    let header_rect =
+        Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), TABLE_HEADER));
+    let header = |ui: &mut egui::Ui| {
+        widgets::table_header(
             ui,
             &palette,
-            app.locale,
+            locale,
             table.show_album,
             table.show_added,
             table.show_added_by,
@@ -840,20 +1109,11 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
             show_cover,
             sort,
         )
+    };
+    if rows > 0
+        && let Some(column) = header(ui)
     {
-        let next = next_sort(sort, column);
-        match next {
-            Some(sort) => {
-                app.table_sorts.insert(table.page.clone(), sort);
-                app.note_session_change();
-                // A sort covers the whole list, so the rest must load.
-                app.actions.push(Action::LoadMore(table.page.clone()));
-            }
-            None => {
-                app.table_sorts.remove(&table.page);
-                app.note_session_change();
-            }
-        }
+        apply_sort(app, &table.page, sort, column);
     }
     // What is displayed is what plays: a sorted view plays in its own
     // order, as a plain list of tracks, and its rows cannot edit server
@@ -1061,6 +1321,11 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
             pick = Some((row, asked));
         }
     });
+    if rows > 0
+        && let Some(column) = sticky_table_header(ui, &palette, &table.page, header_rect, header)
+    {
+        apply_sort(app, &table.page, sort, column);
+    }
     if app.dialog.is_none()
         && let Some((current, next, extend)) = navigate_song_rows(ui, &row_responses)
     {
@@ -1166,6 +1431,68 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
             table.can_load_more && !table.loading,
         );
     }
+}
+
+/// Sorts the page's table by a clicked heading, or back to its own order.
+fn apply_sort(app: &mut App, page: &Page, sort: Option<TableSort>, column: SortColumn) {
+    match next_sort(sort, column) {
+        Some(sort) => {
+            app.table_sorts.insert(page.clone(), sort);
+            app.note_session_change();
+            // A sort covers the whole list, so the rest must load.
+            app.actions.push(Action::LoadMore(page.clone()));
+        }
+        None => {
+            app.table_sorts.remove(page);
+            app.note_session_change();
+        }
+    }
+}
+
+/// Where the column header sticks: the top of the page, or under the
+/// sticky bar once that shows. `None` while the header is in its place,
+/// or once the list it heads has scrolled away.
+fn sticky_header_top(clip: Rect, offset: f32, header: Rect, list_bottom: f32) -> Option<f32> {
+    let stick = clip.top() + offset;
+    (header.top() < stick && list_bottom > stick + header.height()).then_some(stick)
+}
+
+/// Draws the column header again at the top of the page once the list's own
+/// has scrolled under it, as Spotify's sticks, on the raised surface with a
+/// hairline under it. Returns a heading clicked there.
+fn sticky_table_header(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    page: &Page,
+    header: Rect,
+    draw: impl FnOnce(&mut egui::Ui) -> Option<SortColumn>,
+) -> Option<SortColumn> {
+    let offset = ui
+        .ctx()
+        .data(|data| data.get_temp::<f32>(sticky_offset_id(page)))
+        .unwrap_or(0.0);
+    let clip = ui.clip_rect();
+    let top = sticky_header_top(clip, offset, header, ui.cursor().top())?;
+    let band = Rect::from_x_y_ranges(clip.x_range(), top..=top + header.height());
+    ui.painter().rect_filled(band, 0.0, palette.surface);
+    ui.painter().hline(
+        band.x_range(),
+        band.bottom() - 0.5,
+        egui::Stroke::new(1.0, palette.outline),
+    );
+    // The rows under the band take no pointer.
+    ui.interact(
+        band,
+        ui.id().with("sticky-table-header-band"),
+        Sense::hover(),
+    );
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_size(pos2(header.left(), top), header.size()))
+            .id_salt("sticky-table-header")
+            .layout(Layout::top_down(Align::Min)),
+    );
+    draw(&mut child)
 }
 
 /// Select all, Cut, Copy, Paste, Delete, and the queue keys on a song list. Cut
@@ -1944,7 +2271,9 @@ pub fn playlist(app: &mut App, ui: &mut egui::Ui, id: &str) {
             // is no collaborative playlist anyone could add to.
             let collaborative =
                 playlist.collaborative || (made_together && !spotify_owned(owner_id));
+            let mut chrome = PageChrome::begin(ui, Page::Playlist(id.to_string()));
             playlist_hero(app, ui, playlist, images, byline, collaborative);
+            chrome.header_done(ui);
             let owned = playlist.owned_by(&user_id);
             let saved = app.is_saved(&playlist.uri).unwrap_or(false);
             let needle = page.filter.trim().to_lowercase();
@@ -1973,11 +2302,14 @@ pub fn playlist(app: &mut App, ui: &mut egui::Ui, id: &str) {
             let mut actions =
                 playlist_actions(app.locale, playlist, owned, saved, view_play, reload_action);
             actions.plays_shown_rows = hides;
-            if !app.network_reachable {
+            let play = if !app.network_reachable {
                 disabled_actions_row(app, ui, actions, Some(&mut page.filter));
+                None
             } else {
-                actions_row(app, ui, actions, Some(&mut page.filter));
-            }
+                actions_bar(app, ui, actions, Some(&mut page.filter), true)
+            };
+            let colour = cover_colour(app, &playlist.images);
+            chrome.actions_done(ui, &app.palette, colour);
             if page.items.base_offset > 0 && !page.filter.trim().is_empty() {
                 app.actions
                     .push(Action::LoadMore(Page::Playlist(id.to_string())));
@@ -2020,6 +2352,7 @@ pub fn playlist(app: &mut App, ui: &mut egui::Ui, id: &str) {
                     plays_shown_rows: hides,
                 },
             );
+            chrome.finish(app, ui, &playlist.name, colour, play.as_ref());
         }
         Loadable::Loading | Loadable::NotLoaded => {
             if let Some(playlist) = &preview {
@@ -2134,7 +2467,9 @@ pub fn album(app: &mut App, ui: &mut egui::Ui, id: &str) {
             app.actions
                 .push(Action::RequestPlayCounts(album.uri.clone()));
             let show_plays = app.has_play_counts(&album.uri);
+            let mut chrome = PageChrome::begin(ui, Page::Album(id.to_string()));
             album_hero(app, ui, album, &page.tracks, preview.as_deref());
+            chrome.header_done(ui);
             let saved = app.is_saved(&album.uri).unwrap_or(false);
             let sort = app.table_sorts.get(&Page::Album(id.to_string())).copied();
             let table_view = prepare_table_view(
@@ -2151,11 +2486,14 @@ pub fn album(app: &mut App, ui: &mut egui::Ui, id: &str) {
             );
             let album_view = table_view.view_uris.as_ref().map(Arc::clone);
             let actions = album_actions(app.locale, album, saved, album_view);
-            if !app.network_reachable {
+            let play = if !app.network_reachable {
                 disabled_actions_row(app, ui, actions, None);
+                None
             } else {
-                actions_row(app, ui, actions, None);
-            }
+                actions_bar(app, ui, actions, None, true)
+            };
+            let colour = cover_colour(app, &album.images);
+            chrome.actions_done(ui, &palette, colour);
             table(
                 app,
                 ui,
@@ -2189,44 +2527,8 @@ pub fn album(app: &mut App, ui: &mut egui::Ui, id: &str) {
                     plays_shown_rows: false,
                 },
             );
-            ui.add_space(24.0);
-            if let Some(date) = &album.release_date {
-                theme::text(
-                    ui,
-                    util::format_date(app.locale, date),
-                    theme::regular(12.5),
-                    palette.secondary,
-                );
-            }
-            // Labels file the same line under both kinds of copyright;
-            // one line wearing both marks reads better than the line twice.
-            let mut credits: Vec<(String, Vec<&str>)> = Vec::new();
-            for copyright in &album.copyrights {
-                let core = copyright
-                    .text
-                    .trim_start_matches(['©', '℗'])
-                    .trim_start_matches("(C)")
-                    .trim_start_matches("(P)")
-                    .trim()
-                    .to_string();
-                let mark = if copyright.kind == "P" { "℗" } else { "©" };
-                match credits.iter_mut().find(|(held, _)| *held == core) {
-                    Some((_, marks)) => {
-                        if !marks.contains(&mark) {
-                            marks.push(mark);
-                        }
-                    }
-                    None => credits.push((core, vec![mark])),
-                }
-            }
-            for (core, marks) in credits {
-                theme::text(
-                    ui,
-                    format!("{} {core}", marks.join(" ")),
-                    theme::regular(11.5),
-                    palette.dim,
-                );
-            }
+            album_footer(app, ui, album);
+            chrome.finish(app, ui, &album.name, colour, play.as_ref());
         }
         Loadable::Loading | Loadable::NotLoaded => {
             if let Some(album) = &preview {
@@ -2278,6 +2580,149 @@ pub fn album(app: &mut App, ui: &mut egui::Ui, id: &str) {
         }
     }
     app.album_pages.insert(id.to_string(), page);
+}
+
+/// What Spotify sets under an album's songs: its release date, its
+/// copyrights, and more of its artist's releases.
+fn album_footer(app: &mut App, ui: &mut egui::Ui, album: &Album) {
+    let palette = app.palette;
+    ui.add_space(24.0);
+    ui.spacing_mut().item_spacing.y = 2.0;
+    if let Some(date) = &album.release_date {
+        theme::text(
+            ui,
+            util::format_date(app.locale, date),
+            theme::regular(14.0),
+            palette.secondary,
+        );
+        ui.add_space(4.0);
+    }
+    for line in copyright_lines(album) {
+        theme::text(ui, line, theme::regular(11.0), palette.secondary);
+    }
+    ui.spacing_mut().item_spacing.y = 6.0;
+    more_by_artist(app, ui, album);
+}
+
+/// The album's copyright lines. Labels file the same line under both kinds
+/// of copyright; one line wearing both marks reads better than the line
+/// twice.
+fn copyright_lines(album: &Album) -> Vec<String> {
+    let mut credits: Vec<(String, Vec<&str>)> = Vec::new();
+    for copyright in &album.copyrights {
+        let core = copyright
+            .text
+            .trim_start_matches(['©', '℗'])
+            .trim_start_matches("(C)")
+            .trim_start_matches("(P)")
+            .trim()
+            .to_string();
+        let mark = if copyright.kind == "P" { "℗" } else { "©" };
+        match credits.iter_mut().find(|(held, _)| *held == core) {
+            Some((_, marks)) => {
+                if !marks.contains(&mark) {
+                    marks.push(mark);
+                }
+            }
+            None => credits.push((core, vec![mark])),
+        }
+    }
+    credits
+        .into_iter()
+        .map(|(core, marks)| format!("{} {core}", marks.join(" ")))
+        .collect()
+}
+
+/// The most releases a "More by" shelf shows, as Spotify's row.
+const MORE_BY_LIMIT: usize = 10;
+
+/// The artist's other releases, without this album and without a second
+/// edition of one already shown.
+fn other_releases<'a>(album: &Album, releases: &'a [Album]) -> Vec<&'a Album> {
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(album.name.to_lowercase());
+    releases
+        .iter()
+        .filter(|release| release.id != album.id)
+        .filter(|release| seen.insert(release.name.to_lowercase()))
+        .take(MORE_BY_LIMIT)
+        .collect()
+}
+
+/// Spotify's "More by" shelf under an album: its first artist's other
+/// releases, read from the artist's discography once the shelf comes into
+/// view. Its title opens the artist.
+fn more_by_artist(app: &mut App, ui: &mut egui::Ui, album: &Album) {
+    let Some((artist_id, artist_name)) = album
+        .artists
+        .iter()
+        .find_map(|artist| Some((artist.id.clone()?, artist.name.clone())))
+    else {
+        return;
+    };
+    let Some(page) = app.artist_pages.get(&artist_id) else {
+        // The discography is read only once the shelf could be seen.
+        if ui.is_rect_visible(Rect::from_min_size(ui.cursor().min, vec2(1.0, 200.0))) {
+            app.ensure_loaded(Page::Artist(artist_id));
+        }
+        return;
+    };
+    let Some(list) = page.albums.get(page.filter.groups()) else {
+        return;
+    };
+    let releases: Vec<Album> = other_releases(album, &list.items)
+        .into_iter()
+        .cloned()
+        .collect();
+    if releases.is_empty() {
+        return;
+    }
+    let palette = app.palette;
+    ui.add_space(32.0);
+    // Translators: {artist} is an artist's name, over a shelf of their other
+    // releases under one of their albums.
+    let title = gettext(app.locale, "More by {artist}").replace("{artist}", &artist_name);
+    let card_art = app.art_px(widgets::CARD_ART);
+    let clicked = widgets::linked_shelf(ui, &palette, "album-more-by", &title, |ui| {
+        for release in &releases {
+            let subtitle = format!(
+                "{} • {}",
+                release.year().unwrap_or(""),
+                app.album_kind_label(release)
+            );
+            let context_here = app.playing_context_uri().as_deref() == Some(release.uri.as_str());
+            let card = widgets::card(
+                ui,
+                app,
+                pick_image(&release.images, card_art),
+                &release.name,
+                subtitle.trim_start_matches(" • "),
+                widgets::CardCover::square(context_here && app.believed_playing()),
+            );
+            if card.play {
+                if context_here {
+                    app.actions.push(Action::TogglePlay);
+                } else {
+                    app.actions.push(Action::PlayContext {
+                        uri: release.uri.clone(),
+                        offset_uri: None,
+                        offset_index: None,
+                    });
+                }
+            }
+            if card.clicked {
+                app.actions
+                    .push(Action::Open(Page::Album(release.id.clone())));
+            }
+            egui::Popup::context_menu(&card.response)
+                .id(ui.make_persistent_id(("more-by-menu", &release.uri)))
+                .frame(widgets::menu_frame(&palette))
+                .show(|ui| widgets::context_menu_items(ui, app, &release.uri, &release.name, None));
+        }
+    });
+    if clicked {
+        app.actions.push(Action::Open(Page::Artist(artist_id)));
+    }
 }
 
 fn playlist_loading_hero(app: &mut App, ui: &mut egui::Ui, playlist: &Playlist) {
@@ -2412,7 +2857,7 @@ fn disabled_actions_row(
     actions: Actions<'_>,
     filter: Option<&mut String>,
 ) {
-    ui.add_enabled_ui(false, |ui| actions_row(app, ui, actions, filter));
+    ui.add_enabled_ui(false, |ui| actions_bar(app, ui, actions, filter, true));
 }
 
 fn album_hero(
@@ -2458,6 +2903,15 @@ fn album_hero(
         true,
         HeroArt::of(app),
     );
+    // Spotify leads the byline with the first artist's picture, when this
+    // app has seen it.
+    let avatar = album
+        .artists
+        .first()
+        .and_then(|artist| artist.id.as_deref())
+        .and_then(|id| app.known_artist(id))
+        .and_then(|artist| pick_image(&artist.images, 64))
+        .map(|url| Avatar::Url(url.to_string()));
     hero(
         app,
         ui,
@@ -2469,7 +2923,7 @@ fn album_hero(
             description: None,
             byline,
             byline_tooltip,
-            avatar: None,
+            avatar,
             round: false,
         },
     );
@@ -2546,6 +3000,18 @@ pub fn liked(app: &mut App, ui: &mut egui::Ui) {
         song_count(locale, total)
     };
     let liked_title = gettext(locale, "Liked Songs");
+    // The account's picture leads the byline, as an owner's does.
+    let avatar = app.user.as_ref().map(|user| {
+        match app
+            .user_images
+            .get(&user.id)
+            .and_then(|image| image.as_deref())
+        {
+            Some(url) => Avatar::Url(url.to_string()),
+            None => Avatar::Placeholder,
+        }
+    });
+    let mut chrome = PageChrome::begin(ui, Page::LikedSongs);
     hero(
         app,
         ui,
@@ -2557,10 +3023,11 @@ pub fn liked(app: &mut App, ui: &mut egui::Ui) {
             description: None,
             byline: vec![(user, None), (count_text, None)],
             byline_tooltip: None,
-            avatar: None,
+            avatar,
             round: false,
         },
     );
+    chrome.header_done(ui);
     let collection_uri = app
         .user
         .as_ref()
@@ -2596,11 +3063,14 @@ pub fn liked(app: &mut App, ui: &mut egui::Ui) {
         save_radio: None,
         plays_shown_rows: false,
     };
-    if !app.network_reachable {
+    let play = if !app.network_reachable {
         disabled_actions_row(app, ui, actions, Some(&mut filter));
+        None
     } else {
-        actions_row(app, ui, actions, Some(&mut filter));
-    }
+        actions_bar(app, ui, actions, Some(&mut filter), true)
+    };
+    let colour = liked_colour(app);
+    chrome.actions_done(ui, &palette, colour);
     ui.data_mut(|data| data.insert_temp(filter_id, filter.clone()));
     let uris: Arc<[String]> = items
         .iter()
@@ -2640,6 +3110,7 @@ pub fn liked(app: &mut App, ui: &mut egui::Ui) {
             plays_shown_rows: false,
         },
     );
+    chrome.finish(app, ui, &liked_title, colour, play.as_ref());
 }
 
 /// `1,234 songs` in a playlist, album or Liked Songs byline.
@@ -2781,6 +3252,180 @@ fn rect_after(ui: &egui::Ui, height: f32) -> Rect {
     )
 }
 
+/// How strongly a page's own cover colours its header, as the window's wash
+/// starts out.
+const WASH_STRENGTH: f32 = 0.85;
+/// Spotify darkens the header to half its colour at its foot, and starts
+/// the action bar's fade at 40%.
+const HEADER_FOOT: f32 = 0.5;
+const ACTIONS_TOP: f32 = 0.4;
+/// The action bar's fade to the page, 232 points as in Spotify.
+const ACTIONS_FADE: f32 = 232.0;
+/// The sticky bar's height, Spotify's top bar.
+const STICKY_BAR: f32 = 64.0;
+/// The column header's height, as `widgets::table_header` draws it.
+const TABLE_HEADER: f32 = 34.0;
+
+/// The cover's colour, by the rule the window's header wash takes it, so the
+/// two paint the same colour.
+pub(super) fn cover_colour(app: &mut App, images: &[Image]) -> Option<egui::Color32> {
+    let image = pick_image(images, 64).map(str::to_string);
+    if !app.settings.accent_from_art && image.is_some() {
+        return None;
+    }
+    match image {
+        Some(url) => app.tint_for(Some(&url)).or_else(|| app.now_playing_tint()),
+        None => app.now_playing_tint(),
+    }
+}
+
+/// Liked Songs' own colour, the purple of its cover.
+fn liked_colour(app: &App) -> Option<egui::Color32> {
+    app.settings
+        .accent_from_art
+        .then_some(egui::Color32::from_rgb(0x50, 0x38, 0xc8))
+}
+
+fn sticky_offset_id(page: &Page) -> egui::Id {
+    egui::Id::new(("sticky-table-top", page))
+}
+
+/// The parts of a Spotify page around its hero: the cover's colour behind
+/// the header and the action bar, and the bar that sticks to the top with
+/// the title and play button once the action bar has scrolled away.
+pub(super) struct PageChrome {
+    page: Page,
+    wash: egui::layers::ShapeIdx,
+    top: f32,
+    header_bottom: f32,
+    sticky: bool,
+}
+
+impl PageChrome {
+    /// Call before the hero, whose wash is painted under it.
+    pub fn begin(ui: &egui::Ui, page: Page) -> Self {
+        let top = ui.cursor().top();
+        Self {
+            page,
+            wash: ui.painter().add(egui::Shape::Noop),
+            top,
+            header_bottom: top,
+            sticky: false,
+        }
+    }
+
+    /// Call after the hero, before the action bar.
+    pub fn header_done(&mut self, ui: &egui::Ui) {
+        self.header_bottom = ui.cursor().top();
+    }
+
+    /// Call after the action bar: paints the colour behind both, and
+    /// decides whether the sticky bar shows, which the song table's column
+    /// header sticks under.
+    pub fn actions_done(
+        &mut self,
+        ui: &egui::Ui,
+        palette: &Palette,
+        colour: Option<egui::Color32>,
+    ) {
+        if let Some(colour) = colour {
+            let x = ui.clip_rect().x_range();
+            let foot = super::blend(palette.window, colour, WASH_STRENGTH * HEADER_FOOT);
+            let start = super::blend(palette.window, colour, WASH_STRENGTH * ACTIONS_TOP);
+            // The window's wash shows at the top and gives way to the
+            // header's darker foot, so the two meet without a seam.
+            let header = Rect::from_x_y_ranges(x, self.top..=self.header_bottom);
+            let actions =
+                Rect::from_x_y_ranges(x, self.header_bottom..=self.header_bottom + ACTIONS_FADE);
+            ui.painter().set(
+                self.wash,
+                egui::Shape::Vec(vec![
+                    widgets::vertical_gradient(header, egui::Color32::TRANSPARENT, foot),
+                    widgets::vertical_gradient(actions, start, palette.window),
+                ]),
+            );
+        }
+        // The bar takes over once the play button is under it.
+        self.sticky = self.header_bottom + 56.0 < ui.clip_rect().top() + STICKY_BAR;
+        let offset = if self.sticky { STICKY_BAR } else { 0.0 };
+        let id = sticky_offset_id(&self.page);
+        ui.ctx().data_mut(|data| data.insert_temp(id, offset));
+    }
+
+    /// Call last, after the song table: draws the sticky bar over it.
+    pub fn finish(
+        self,
+        app: &mut App,
+        ui: &mut egui::Ui,
+        title: &str,
+        colour: Option<egui::Color32>,
+        play: Option<&PlayTarget>,
+    ) {
+        let palette = app.palette;
+        let shown = ui.ctx().animate_bool_with_time(
+            egui::Id::new(("sticky-bar", &self.page)),
+            self.sticky,
+            crate::motion::seconds(ui.ctx(), 0.2),
+        );
+        if shown <= 0.0 {
+            return;
+        }
+        let clip = ui.clip_rect();
+        let rect = Rect::from_min_size(clip.min, vec2(clip.width(), STICKY_BAR));
+        let fill = colour.map_or(palette.surface, |colour| {
+            super::blend(palette.window, colour, WASH_STRENGTH * HEADER_FOOT)
+        });
+        ui.painter()
+            .rect_filled(rect, 0.0, fill.gamma_multiply(shown));
+        // Rows under the bar take no pointer while it shows.
+        if self.sticky {
+            ui.interact(rect, ui.id().with("sticky-bar"), Sense::hover());
+        }
+        let inner = Rect::from_x_y_ranges(
+            rect.left() + widgets::PAGE_PADDING..=rect.right() - widgets::PAGE_PADDING,
+            rect.y_range(),
+        );
+        let mut bar = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .id_salt("sticky-bar-contents")
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        bar.multiply_opacity(shown);
+        bar.spacing_mut().item_spacing.x = 12.0;
+        if let Some(play) = play {
+            play_button(app, &mut bar, play, 48.0);
+        }
+        let width = bar.available_width().max(0.0);
+        let font = theme::bold(24.0);
+        let galley = crate::bidi::layout(
+            bar.painter(),
+            title,
+            font,
+            palette.text,
+            width,
+            1,
+            Some(crate::bidi::ELLIPSIS),
+        );
+        let (title_rect, response) = bar.allocate_exact_size(galley.size(), Sense::click());
+        bar.painter().galley(
+            crate::bidi::galley_pos(title_rect, &galley),
+            galley,
+            palette.text,
+        );
+        // As in Spotify, the title takes the page back to its top.
+        if response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            ui.scroll_to_rect(
+                Rect::from_min_size(pos2(rect.left(), self.top), vec2(1.0, 1.0)),
+                Some(Align::TOP),
+            );
+        }
+    }
+}
+
 #[allow(dead_code)]
 fn palette_of(app: &App) -> Palette {
     app.palette
@@ -2797,6 +3442,109 @@ mod tests {
         hero: 640,
         card: 300,
     };
+
+    /// The cover grows with the page, as Spotify's header does, between
+    /// its narrow and full sizes.
+    #[test]
+    fn the_hero_cover_grows_with_the_page_between_its_two_sizes() {
+        assert_eq!(hero_cover_size(400.0), HERO_ART_MIN);
+        assert_eq!(hero_cover_size(600.0), HERO_ART_MIN);
+        assert_eq!(hero_cover_size(812.0), 180.0);
+        assert_eq!(hero_cover_size(1024.0), HERO_ART);
+        assert_eq!(hero_cover_size(1600.0), HERO_ART);
+        assert_eq!(hero_title_size(HERO_ART), 96.0);
+        assert_eq!(hero_title_size(180.0), 72.0);
+        assert_eq!(hero_title_size(HERO_ART_MIN), 48.0);
+    }
+
+    /// The filter shrinks before the view button loses its label, and the
+    /// label goes before the filter would be too narrow to type in.
+    #[test]
+    fn the_end_of_the_action_bar_gives_way_in_order() {
+        let view = 70.0;
+        assert_eq!(
+            end_of_bar_fit(600.0, Some(view), true),
+            (true, FILTER_WIDTH)
+        );
+        assert_eq!(end_of_bar_fit(240.0, Some(view), true), (true, 162.0));
+        let (labelled, width) = end_of_bar_fit(180.0, Some(view), true);
+        assert!(!labelled);
+        assert_eq!(width, 140.0);
+        assert_eq!(end_of_bar_fit(600.0, None, true), (true, FILTER_WIDTH));
+        assert_eq!(end_of_bar_fit(600.0, Some(view), false), (true, 0.0));
+        assert_eq!(end_of_bar_fit(20.0, Some(view), false), (false, 0.0));
+    }
+
+    /// The column header sticks once its own has gone under the top, under
+    /// the sticky bar when that shows, and leaves with the end of its list.
+    #[test]
+    fn the_column_header_sticks_while_its_list_is_on_screen() {
+        let clip = Rect::from_min_size(pos2(0.0, 100.0), vec2(800.0, 600.0));
+        let at = |top: f32| Rect::from_min_size(pos2(0.0, top), vec2(800.0, TABLE_HEADER));
+        assert_eq!(sticky_header_top(clip, 0.0, at(300.0), 900.0), None);
+        assert_eq!(sticky_header_top(clip, 0.0, at(80.0), 900.0), Some(100.0));
+        assert_eq!(
+            sticky_header_top(clip, STICKY_BAR, at(150.0), 900.0),
+            Some(100.0 + STICKY_BAR)
+        );
+        // The list has scrolled up to the band: the header goes with it.
+        assert_eq!(sticky_header_top(clip, 0.0, at(-500.0), 120.0), None);
+    }
+
+    /// "More by" leaves out the album on screen, another edition of a
+    /// release it shows, and anything past Spotify's one row.
+    #[test]
+    fn more_by_shows_the_artists_other_releases_once_each() {
+        let release = |id: &str, name: &str| Album {
+            id: id.into(),
+            name: name.into(),
+            ..Album::default()
+        };
+        let album = release("a", "Fragments");
+        let mut releases = vec![
+            release("a", "Fragments"),
+            release("b", "fragments"),
+            release("c", "Migration"),
+            release("d", "Migration"),
+        ];
+        releases.extend((0..20).map(|n| release(&format!("x{n}"), &format!("Single {n}"))));
+        let shown: Vec<&str> = other_releases(&album, &releases)
+            .iter()
+            .map(|release| release.id.as_str())
+            .collect();
+        assert_eq!(shown.len(), MORE_BY_LIMIT);
+        assert_eq!(&shown[..2], ["c", "x0"]);
+    }
+
+    /// One line carries both marks when a label files it under both kinds.
+    #[test]
+    fn a_copyright_filed_twice_reads_once_with_both_marks() {
+        use crate::api::models::Copyright;
+        let album = Album {
+            copyrights: vec![
+                Copyright {
+                    text: "© 2022 Ninja Tune".into(),
+                    kind: "C".into(),
+                },
+                Copyright {
+                    text: "(P) 2022 Ninja Tune".into(),
+                    kind: "P".into(),
+                },
+                Copyright {
+                    text: "2021 Other".into(),
+                    kind: "P".into(),
+                },
+            ],
+            ..Album::default()
+        };
+        assert_eq!(
+            copyright_lines(&album),
+            vec![
+                "© ℗ 2022 Ninja Tune".to_string(),
+                "℗ 2021 Other".to_string()
+            ]
+        );
+    }
 
     fn adders(ids: &[&str]) -> std::collections::BTreeSet<String> {
         ids.iter().map(|id| (*id).to_string()).collect()

@@ -11,7 +11,9 @@ use crate::model::{Action, Loadable, Page, RowContext};
 use crate::theme::{self, Icon};
 use crate::util;
 
-use super::collection::{Hero, HeroArt, hero, hero_images, refresh_menu_item};
+use super::collection::{
+    Hero, HeroArt, PageChrome, cover_colour, hero, hero_images, refresh_menu_item,
+};
 use super::widgets;
 
 pub const EPISODE_ROW_HEIGHT: f32 = 128.0;
@@ -30,7 +32,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
     let locale = app.locale;
     match &page.show {
         Loadable::Loaded(show) => {
+            let mut chrome = PageChrome::begin(ui, Page::Show(id.to_string()));
             show_hero(app, ui, show, preview.as_deref());
+            chrome.header_done(ui);
             show_actions(
                 app,
                 ui,
@@ -38,6 +42,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
                 page.episodes.items.first(),
                 page.episodes.loading,
             );
+            let colour = cover_colour(app, &show.images);
+            chrome.actions_done(ui, &palette, colour);
             if !show.description.is_empty() {
                 theme::section_title(ui, &palette, &gettext(locale, "About"));
                 ui.add_space(4.0);
@@ -97,6 +103,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
                     page.episodes.can_load_more(),
                 );
             }
+            chrome.finish(app, ui, &show.name, colour, None);
         }
         Loadable::Loading | Loadable::NotLoaded => {
             if let Some(show) = &preview {

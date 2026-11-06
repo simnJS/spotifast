@@ -12,8 +12,8 @@ use crate::theme::Icon;
 use crate::util;
 
 use super::collection::{
-    Actions, Hero, HeroArt, Table, actions_row, hero, hero_images, remember_table_items,
-    songs_and_duration, table, table_items_hit,
+    Actions, Hero, HeroArt, PageChrome, Table, actions_bar, actions_row, cover_colour, hero,
+    hero_images, remember_table_items, songs_and_duration, table, table_items_hit,
 };
 use super::widgets;
 
@@ -68,6 +68,7 @@ pub fn radio(app: &mut App, ui: &mut egui::Ui, seed: &str) {
         ));
         description.clone_from(artists);
     }
+    let mut chrome = PageChrome::begin(ui, key.clone());
     hero(
         app,
         ui,
@@ -83,6 +84,8 @@ pub fn radio(app: &mut App, ui: &mut egui::Ui, seed: &str) {
             round: false,
         },
     );
+    chrome.header_done(ui);
+    let colour = cover_colour(app, &images);
 
     match state {
         Ok(Some(_)) => {}
@@ -146,12 +149,14 @@ pub fn radio(app: &mut App, ui: &mut egui::Ui, seed: &str) {
         .map(|(item, _, _)| item.uri().to_string())
         .collect::<Vec<_>>()
         .into();
-    actions_row(
+    let play = actions_bar(
         app,
         ui,
         radio_actions(seed, &station, &name, Some(Arc::clone(&uris)), !refreshing),
         None,
+        true,
     );
+    chrome.actions_done(ui, &app.palette, colour);
     table(
         app,
         ui,
@@ -169,7 +174,7 @@ pub fn radio(app: &mut App, ui: &mut egui::Ui, seed: &str) {
             show_added: false,
             show_added_by: false,
             show_plays: false,
-            page: key,
+            page: key.clone(),
             loading: false,
             error: None,
             can_load_more: false,
@@ -178,6 +183,7 @@ pub fn radio(app: &mut App, ui: &mut egui::Ui, seed: &str) {
             plays_shown_rows: false,
         },
     );
+    chrome.finish(app, ui, &name, colour, play.as_ref());
 }
 
 fn radio_actions<'a>(
