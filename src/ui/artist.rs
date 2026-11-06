@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use egui::{Align, Color32, Layout, Rect, Sense, UiBuilder, Vec2, pos2, vec2};
 
-use crate::api::models::{Album, Artist, PlayableItem, pick_image};
+use crate::api::models::{Album, Artist, PlayableItem, Track, pick_image};
 use crate::app::App;
 use crate::i18n::{Locale, gettext, ngettext, pgettext};
 use crate::model::{
@@ -34,6 +34,8 @@ const ACTION_WASH: f32 = 232.0;
 const ABOUT_WIDTH: f32 = 752.0;
 const ABOUT_HEIGHT: f32 = 516.0;
 const ABOUT_PADDING: f32 = 40.0;
+/// The blue of Spotify's verified badge, which no theme recolours.
+const VERIFIED_BLUE: Color32 = Color32::from_rgb(0x4c, 0xb3, 0xff);
 /// How many popular songs show before "See more".
 const POPULAR_SHOWN: usize = 5;
 
@@ -83,13 +85,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
                 ui.add_space(28.0);
             }
 
+            request_appears_on(app, ui, id, &page);
             if let Some(list) = page.albums.get(DiscographyFilter::AppearsOn.groups())
                 && !list.items.is_empty()
             {
                 let title = gettext(locale, "Appears On");
                 shelf(ui, &palette, "appears-on", &title, |ui| {
                     for album in &list.items {
-                        album_card(app, ui, album, "appears-on-menu");
+                        album_card(app, ui, album, "appears-on-menu", false);
                     }
                 });
                 ui.add_space(28.0);
@@ -333,7 +336,11 @@ fn artist_banner(
         let row = galley.size().y.max(24.0);
         bottom -= row;
         let badge = Rect::from_min_size(pos2(left, bottom), Vec2::splat(row));
-        theme::paint_icon(ui, Icon::BadgeCheck, badge, 24.0, palette.accent);
+        // Spotify's verified badge: a blue disc with a white check, the
+        // same in every theme, as the real app draws it.
+        ui.painter()
+            .circle_filled(badge.center(), row * 0.42, VERIFIED_BLUE);
+        theme::paint_icon(ui, Icon::Check, badge, row * 0.5, Color32::WHITE);
         painter.galley(
             pos2(badge.right() + 8.0, bottom + (row - galley.size().y) / 2.0),
             galley,
@@ -578,13 +585,14 @@ fn popular(
 
 /// An album's card, playing or pausing it from its button and opening it
 /// otherwise, with the album's menu on a right click.
-fn album_card(app: &mut App, ui: &mut egui::Ui, album: &Album, menu: &str) {
+fn album_card(app: &mut App, ui: &mut egui::Ui, album: &Album, menu: &str, latest: bool) {
     let palette = app.palette;
-    let subtitle = format!(
-        "{} • {}",
-        album.year().unwrap_or(""),
-        app.album_kind_label(album)
-    );
+    let when = if latest {
+        gettext(app.locale, "Latest release").into_owned()
+    } else {
+        album.year().unwrap_or("").to_string()
+    };
+    let subtitle = format!("{when} • {}", app.album_kind_label(album));
     let context_here = app.playing_context_uri().as_deref() == Some(album.uri.as_str());
     let playing_here = context_here && app.believed_playing();
     let card_art = app.art_px(widgets::CARD_ART);
@@ -623,19 +631,31 @@ fn discography(app: &mut App, ui: &mut egui::Ui, id: &str, page: &crate::model::
     let locale = app.locale;
     heading(ui, &palette, &gettext(locale, "Discography"));
     ui.add_space(12.0);
-    let labels: Vec<_> = DiscographyFilter::ALL
+    let chosen = Chip::of(page.filter);
+    let compilations = page.filter == DiscographyFilter::Compilations
+        || page
+            .albums
+            .get(DiscographyFilter::All.groups())
+            .is_some_and(|list| list.items.iter().any(is_compilation));
+    let labels: Vec<_> = Chip::ALL
         .iter()
-        .map(|f| (*f, f.label(locale)))
+        .filter(|chip| compilations || **chip != Chip::Compilations)
+        .map(|chip| (*chip, chip.label(locale)))
         .collect();
-    let options: Vec<(DiscographyFilter, &str)> = labels
+    let options: Vec<(Chip, &str)> = labels
         .iter()
-        .map(|(filter, label)| (*filter, label.as_ref()))
+        .map(|(chip, label)| (*chip, label.as_ref()))
         .collect();
-    if let Some(filter) = widgets::chips(ui, &palette, &options, page.filter) {
+    if let Some(chip) = widgets::chips(ui, &palette, &options, chosen) {
         app.actions.push(Action::SetDiscographyFilter {
             artist_id: id.to_string(),
-            filter,
+            filter: chip.filter(),
         });
+    }
+    if chosen == Chip::Popular {
+        ui.add_space(12.0);
+        popular_releases_grid(app, ui, page);
+        return;
     }
     ui.add_space(12.0);
     // Reserve the previous list's height while a new category loads.
@@ -660,7 +680,7 @@ fn discography(app: &mut App, ui: &mut egui::Ui, id: &str, page: &crate::model::
                     .collect();
                 widgets::grid(ui, |ui| {
                     for album in &albums {
-                        album_card(app, ui, album, "discography-menu");
+                        album_card(app, ui, album, "discography-menu", false);
                     }
                 });
                 if list.loading {
@@ -700,6 +720,140 @@ fn discography(app: &mut App, ui: &mut egui::Ui, id: &str, page: &crate::model::
     if !loading {
         ui.ctx().data_mut(|data| {
             data.insert_temp(height_id, (shown.response.rect.height(), shown.inner));
+        });
+    }
+}
+
+/// The Discography chips, as Spotify shows them: the popular releases
+/// first, then each kind of release. Appears On has its own shelf.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Chip {
+    Popular,
+    Albums,
+    Singles,
+    Compilations,
+}
+
+impl Chip {
+    const ALL: [Chip; 4] = [
+        Chip::Popular,
+        Chip::Albums,
+        Chip::Singles,
+        Chip::Compilations,
+    ];
+
+    /// The chip showing a filter. Popular releases are drawn from every
+    /// release, so they show the `All` filter, and Appears On, now a shelf
+    /// of its own, falls back to them.
+    fn of(filter: DiscographyFilter) -> Self {
+        match filter {
+            DiscographyFilter::Albums => Chip::Albums,
+            DiscographyFilter::Singles => Chip::Singles,
+            DiscographyFilter::Compilations => Chip::Compilations,
+            DiscographyFilter::All | DiscographyFilter::AppearsOn => Chip::Popular,
+        }
+    }
+
+    fn filter(self) -> DiscographyFilter {
+        match self {
+            Chip::Popular => DiscographyFilter::All,
+            Chip::Albums => DiscographyFilter::Albums,
+            Chip::Singles => DiscographyFilter::Singles,
+            Chip::Compilations => DiscographyFilter::Compilations,
+        }
+    }
+
+    fn label(self, locale: Locale) -> std::borrow::Cow<'static, str> {
+        match self {
+            Chip::Popular => gettext(locale, "Popular releases"),
+            other => other.filter().label(locale),
+        }
+    }
+}
+
+fn is_compilation(album: &Album) -> bool {
+    album.album_group.as_deref().or(album.album_type.as_deref()) == Some("compilation")
+}
+
+/// Spotify's popular releases: the newest release, then the releases that
+/// hold the artist's popular songs, in the order of those songs. Each
+/// release shows once. The flag marks the newest.
+fn popular_releases<'a>(top: &'a [Track], all: &'a [Album]) -> Vec<(&'a Album, bool)> {
+    let latest = all
+        .iter()
+        .filter(|album| album.release_date.is_some())
+        .max_by(|a, b| a.release_date.cmp(&b.release_date));
+    let mut seen = std::collections::HashSet::new();
+    let mut releases = Vec::new();
+    if let Some(latest) = latest {
+        seen.insert(latest.name.to_lowercase());
+        releases.push((latest, true));
+    }
+    for album in top.iter().filter_map(|track| track.album.as_ref()) {
+        if !album.id.is_empty() && seen.insert(album.name.to_lowercase()) {
+            releases.push((album, false));
+        }
+    }
+    releases
+}
+
+/// The Popular releases chip's cards, or placeholders until the popular
+/// songs they come from are in.
+fn popular_releases_grid(app: &mut App, ui: &mut egui::Ui, page: &crate::model::ArtistPage) {
+    let palette = app.palette;
+    let all = page
+        .albums
+        .get(DiscographyFilter::All.groups())
+        .map(|list| list.items.as_slice())
+        .unwrap_or_default();
+    match &page.top_tracks {
+        Loadable::Loaded(top) => {
+            let releases = popular_releases(top, all);
+            if releases.is_empty() {
+                theme::subtle(
+                    ui,
+                    &palette,
+                    &gettext(app.locale, "Nothing in this category."),
+                );
+                return;
+            }
+            widgets::grid(ui, |ui| {
+                for (album, latest) in releases {
+                    album_card(app, ui, album, "discography-menu", latest);
+                }
+            });
+        }
+        Loadable::Failed(error) => {
+            let error = error.clone();
+            widgets::error_row(ui, app, &error, None);
+        }
+        Loadable::Loading | Loadable::NotLoaded => {
+            widgets::grid(ui, |ui| {
+                widgets::skeleton_cards(ui, &palette, app.locale, 6, false)
+            });
+        }
+    }
+}
+
+/// Asks once for the releases the artist appears on, for their shelf.
+/// Loading a release kind goes through choosing its filter, so the page
+/// chooses Appears On and, right after, the filter it shows, which loads
+/// nothing new.
+fn request_appears_on(app: &mut App, ui: &egui::Ui, id: &str, page: &crate::model::ArtistPage) {
+    let asked = egui::Id::new(("artist-appears-on-asked", id));
+    if !app.network_reachable
+        || page
+            .albums
+            .contains_key(DiscographyFilter::AppearsOn.groups())
+        || ui.data(|data| data.get_temp::<bool>(asked).unwrap_or(false))
+    {
+        return;
+    }
+    ui.data_mut(|data| data.insert_temp(asked, true));
+    for filter in [DiscographyFilter::AppearsOn, page.filter] {
+        app.actions.push(Action::SetDiscographyFilter {
+            artist_id: id.to_string(),
+            filter,
         });
     }
 }
@@ -1321,5 +1475,48 @@ mod tests {
             Some(("NOV".to_string(), "24".to_string()))
         );
         assert_eq!(concert_day(Locale::English, "soon"), None);
+    }
+
+    fn release(id: &str, date: &str) -> Album {
+        Album {
+            id: id.into(),
+            name: id.into(),
+            release_date: Some(date.into()),
+            ..Album::default()
+        }
+    }
+
+    #[test]
+    fn popular_releases_lead_with_the_newest_then_the_popular_songs_releases() {
+        let all = [release("old", "2015-01-01"), release("new", "2026-03-01")];
+        let top: Vec<Track> = ["hit", "new", "hit", "deep"]
+            .iter()
+            .map(|id| Track {
+                album: Some(release(id, "2018-01-01")),
+                ..Track::default()
+            })
+            .collect();
+        let shown: Vec<_> = popular_releases(&top, &all)
+            .into_iter()
+            .map(|(album, latest)| (album.id.as_str(), latest))
+            .collect();
+        assert_eq!(
+            shown,
+            [("new", true), ("hit", false), ("deep", false)],
+            "the newest first, then each popular song's release once"
+        );
+        assert!(popular_releases(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn the_artist_discography_chips_follow_spotify() {
+        assert_eq!(Chip::of(DiscographyFilter::All), Chip::Popular);
+        // Appears On has its own shelf; its old filter shows Popular releases.
+        assert_eq!(Chip::of(DiscographyFilter::AppearsOn), Chip::Popular);
+        for chip in Chip::ALL {
+            assert_eq!(Chip::of(chip.filter()), chip);
+        }
+        assert_eq!(Chip::Popular.label(Locale::English), "Popular releases");
+        assert_eq!(Chip::Singles.label(Locale::English), "Singles & EPs");
     }
 }
