@@ -1,18 +1,51 @@
-//! The Home page.
+//! The Home page, laid out as Spotify's desktop Home: All / Music /
+//! Podcasts chips, the grid of shortcuts to what was played, a wash tinted
+//! by the hovered shortcut, the newest release from a followed artist, and
+//! shelves of cards with Show all.
 
 use std::sync::Arc;
 
-use egui::{CornerRadius, Rect, Sense, Vec2, pos2, vec2};
+use egui::{Color32, CornerRadius, Id, Rect, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
 
 use crate::api::models::{Album, Episode, PlayableItem, Playlist, Show, pick_image};
 use crate::app::App;
-use crate::i18n::gettext;
+use crate::i18n::{Locale, gettext};
 use crate::model::{Action, Loadable, Page, RowContext, TopPeriod};
-use crate::theme::{self, Icon};
+use crate::theme::{self, Icon, Palette};
 
-use super::widgets::{self, TrackRow};
+use super::widgets::{self, CardResponse, TrackRow};
 
-pub fn show(app: &mut App, ui: &mut egui::Ui) {
+/// Which shelves Home shows, as Spotify's chips above the shortcuts pick
+/// them. The choice lasts while the app runs, as Spotify's does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Filter {
+    #[default]
+    All,
+    Music,
+    Podcasts,
+}
+
+impl Filter {
+    /// Whether a shortcut or shelf for a podcast belongs under this chip.
+    fn admits(self, podcast: bool) -> bool {
+        match self {
+            Self::All => true,
+            Self::Music => !podcast,
+            Self::Podcasts => podcast,
+        }
+    }
+}
+
+fn filter_id() -> Id {
+    Id::new("home-filter")
+}
+
+/// The space above each section, as Spotify's Home leaves between shelves.
+const SECTION_GAP: f32 = 24.0;
+/// The size of a section's title, Spotify's 24 point bold.
+const SECTION_TITLE: f32 = 24.0;
+
+pub fn show(app: &mut App, ui: &mut Ui) {
     let palette = app.palette;
     if !app.network_reachable {
         let space = ((ui.available_height() - 160.0) / 2.0).max(48.0);
@@ -39,25 +72,152 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
         return;
     }
-    ui.add_space(6.0);
-    let greeting = crate::util::greeting(app.locale);
-    theme::text(ui, greeting.as_ref(), theme::bold(30.0), palette.text);
-    ui.add_space(12.0);
-    quick_access(app, ui);
+    // The wash lies under everything; its colour is known once the
+    // shortcuts know which one is hovered.
+    let wash = ui.painter().add(egui::Shape::Noop);
+    let top = ui.max_rect().top();
+    ui.add_space(8.0);
+    let filter = filter_chips(app, ui);
     ui.add_space(16.0);
+    let hovered = quick_access(app, ui, filter);
+    paint_wash(app, ui, wash, top, hovered);
 
+    if filter == Filter::Podcasts {
+        if !podcasts(app, ui) {
+            widgets::empty_state(
+                ui,
+                &palette,
+                Icon::Mic,
+                &gettext(app.locale, "No podcasts yet"),
+                &gettext(
+                    app.locale,
+                    "Episodes of the podcasts you follow will appear here.",
+                ),
+            );
+        }
+        return;
+    }
     if app.settings.home.made_for_you.visible {
         made_for_you(app, ui);
         top_mixes(app, ui);
     }
     new_releases(app, ui);
     recently_played(app, ui);
-    podcasts(app, ui);
+    if filter.admits(true) {
+        podcasts(app, ui);
+    }
     top_artists(app, ui);
     top_tracks(app, ui);
     if app.settings.home.recommendations.visible {
         recommendations(app, ui);
     }
+}
+
+/// The All / Music / Podcasts chips; returns the chosen one.
+fn filter_chips(app: &App, ui: &mut Ui) -> Filter {
+    let current = ui
+        .data(|data| data.get_temp::<Filter>(filter_id()))
+        .unwrap_or_default();
+    let labels = [
+        (Filter::All, gettext(app.locale, "All")),
+        (Filter::Music, gettext(app.locale, "Music")),
+        (Filter::Podcasts, gettext(app.locale, "Podcasts")),
+    ];
+    let options: Vec<(Filter, &str)> = labels
+        .iter()
+        .map(|(filter, label)| (*filter, label.as_ref()))
+        .collect();
+    match widgets::chips(ui, &app.palette, &options, current) {
+        Some(chosen) if chosen != current => {
+            ui.data_mut(|data| data.insert_temp(filter_id(), chosen));
+            chosen
+        }
+        _ => current,
+    }
+}
+
+/// How far down the wash reaches, as Spotify's Home gradient.
+const WASH_HEIGHT: f32 = 332.0;
+/// How much of the art's colour the wash starts with. Spotify darkens the
+/// colour by 60%; this also meets the window's own header wash, which has
+/// faded to about this much where the page starts.
+const WASH_STRENGTH: f32 = 0.4;
+/// How quickly the wash turns to a newly hovered shortcut's colour.
+const WASH_EASE_SECONDS: f32 = 0.1;
+/// Liked Songs' colour, as the window tints its page with.
+const LIKED_TINT: Color32 = Color32::from_rgb(0x50, 0x38, 0xc8);
+
+/// The wash's colour at the top: the hovered shortcut's art, or else the
+/// playing song's, darkened into the window; transparent with neither.
+fn wash_target(palette: &Palette, art: Option<Color32>) -> egui::Rgba {
+    art.map_or(egui::Rgba::TRANSPARENT, |art| {
+        egui::Rgba::from(super::blend(palette.window, art, WASH_STRENGTH))
+    })
+}
+
+/// Moves `current` toward `target` by the share of the way a frame `dt`
+/// long covers; `None` once there.
+fn ease_toward(current: egui::Rgba, target: egui::Rgba, dt: f32) -> Option<egui::Rgba> {
+    let share = 1.0 - (-dt / WASH_EASE_SECONDS).exp();
+    let channel = |from: f32, to: f32| from + (to - from) * share;
+    let next = egui::Rgba::from_rgba_premultiplied(
+        channel(current.r(), target.r()),
+        channel(current.g(), target.g()),
+        channel(current.b(), target.b()),
+        channel(current.a(), target.a()),
+    );
+    let apart = [
+        next.r() - target.r(),
+        next.g() - target.g(),
+        next.b() - target.b(),
+        next.a() - target.a(),
+    ]
+    .into_iter()
+    .any(|difference| difference.abs() > 0.002);
+    apart.then_some(next)
+}
+
+/// Paints the wash into the slot `show` kept under the page, turning to
+/// the hovered shortcut's colour as Spotify's Home does.
+fn paint_wash(
+    app: &App,
+    ui: &Ui,
+    slot: egui::layers::ShapeIdx,
+    top: f32,
+    hovered: Option<Color32>,
+) {
+    if !app.settings.accent_from_art {
+        return;
+    }
+    let target = wash_target(&app.palette, hovered.or_else(|| app.now_playing_tint()));
+    let id = Id::new("home-wash");
+    let dt = ui.input(|input| input.stable_dt).min(0.1);
+    let current = ui
+        .data(|data| data.get_temp::<egui::Rgba>(id))
+        .unwrap_or(target);
+    let color = match ease_toward(current, target, dt) {
+        Some(next) => {
+            ui.ctx().request_repaint();
+            next
+        }
+        None => target,
+    };
+    ui.data_mut(|data| data.insert_temp(id, color));
+    if color.a() <= 0.0 {
+        return;
+    }
+    let page = ui.max_rect();
+    let rect = Rect::from_min_max(
+        pos2(page.left() - widgets::PAGE_PADDING, top - 4.0),
+        pos2(
+            page.right() + widgets::PAGE_PADDING,
+            top - 4.0 + WASH_HEIGHT,
+        ),
+    );
+    ui.painter().set(
+        slot,
+        widgets::vertical_gradient(rect, Color32::from(color), Color32::TRANSPARENT),
+    );
 }
 
 struct Tile {
@@ -72,8 +232,16 @@ struct Tile {
     song: Option<crate::api::models::Track>,
 }
 
-/// The height of a quick-access tile, and so the side of its cover.
-const TILE_HEIGHT: f32 = 60.0;
+impl Tile {
+    fn podcast(&self) -> bool {
+        matches!(self.page, Page::Show(_))
+    }
+}
+
+/// The height of a shortcut, and so the side of its cover, as Spotify's.
+const TILE_HEIGHT: f32 = 48.0;
+/// The space between shortcuts.
+const TILE_GAP: f32 = 8.0;
 /// How many quick-access tiles Home shows, as Spotify does.
 const TILES: usize = 8;
 
@@ -81,8 +249,10 @@ const TILES: usize = 8;
 /// albums, artists and podcasts songs were played from, Liked Songs, and
 /// songs played on their own, newest first (#942). Until Spotify's play
 /// history arrives, or when it holds fewer, Liked Songs and the first
-/// playlists in the Library fill the rest.
-fn quick_access_tiles(app: &App) -> Vec<Tile> {
+/// playlists in the Library fill the rest. Under the Podcasts chip only
+/// podcasts are shortcuts, and saved ones fill the rest; under Music, no
+/// podcast is.
+fn quick_access_tiles(app: &App, filter: Filter) -> Vec<Tile> {
     let tile_art = app.art_px(TILE_HEIGHT);
     let collection = app
         .user
@@ -172,13 +342,33 @@ fn quick_access_tiles(app: &App) -> Vec<Tile> {
                 }),
         };
         if let Some(tile) = tile
+            && filter.admits(tile.podcast())
             && seen.insert(tile.page.clone())
         {
             tiles.push(tile);
         }
     }
-    let library = app.library.playlists.get().into_iter().flatten();
-    for tile in std::iter::once(liked_tile()).chain(library.map(playlist_tile)) {
+    let fill: Vec<Tile> = if filter == Filter::Podcasts {
+        app.home
+            .podcasts
+            .iter()
+            .map(|(show, _)| Tile {
+                image: pick_image(&show.images, tile_art).map(str::to_string),
+                name: show.name.clone(),
+                page: Page::Show(show.id.clone()),
+                uri: Some(show.uri.clone()),
+                liked: false,
+                owned_playlist: None,
+                song: None,
+            })
+            .collect()
+    } else {
+        let library = app.library.playlists.get().into_iter().flatten();
+        std::iter::once(liked_tile())
+            .chain(library.map(playlist_tile))
+            .collect()
+    };
+    for tile in fill {
         if tiles.len() == TILES {
             break;
         }
@@ -189,143 +379,554 @@ fn quick_access_tiles(app: &App) -> Vec<Tile> {
     tiles
 }
 
-fn quick_access(app: &mut App, ui: &mut egui::Ui) {
+/// How many shortcuts share a row: four, as Spotify's, until a row of four
+/// would leave too little room for their titles.
+fn shortcut_columns(width: f32) -> usize {
+    ((width / 220.0).floor() as usize).clamp(2, 4)
+}
+
+/// Paints `galley` in `rect`, aligned as its text asks.
+fn paint_galley(ui: &Ui, rect: Rect, galley: Arc<egui::Galley>, color: Color32) {
+    let pos = match galley.job.halign {
+        egui::Align::RIGHT => pos2(rect.right(), rect.top()),
+        egui::Align::Center => pos2(rect.center().x, rect.top()),
+        _ => rect.min,
+    };
+    ui.painter().galley(pos, galley, color);
+}
+
+/// A shortcut's play control: shown while the shortcut is hovered, fading
+/// in as Spotify's does. True when it was pressed.
+fn hover_play(
+    app: &App,
+    ui: &mut Ui,
+    center: egui::Pos2,
+    size: f32,
+    shown: f32,
+    playing: bool,
+) -> bool {
     let palette = app.palette;
-    let tiles = quick_access_tiles(app);
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(Rect::from_center_size(center, Vec2::splat(size)))
+            .layout(egui::Layout::centered_and_justified(
+                egui::Direction::LeftToRight,
+            )),
+    );
+    child.multiply_opacity(shown);
+    theme::circle_button(
+        &mut child,
+        if playing {
+            Icon::PauseFilled
+        } else {
+            Icon::PlayFilled
+        },
+        size,
+        palette.accent,
+        palette.accent_hover,
+        palette.on_accent,
+        &gettext(app.locale, if playing { "Pause" } else { "Play" }),
+    )
+    .clicked()
+}
+
+/// The shortcut grid; returns the colour of the hovered shortcut's art, for
+/// the wash behind it.
+fn quick_access(app: &mut App, ui: &mut Ui, filter: Filter) -> Option<Color32> {
+    let tiles = quick_access_tiles(app, filter);
     let available = ui.available_width();
-    let columns = ((available / 300.0).floor() as usize).clamp(2, 4);
-    let gap = 10.0;
-    let tile_width = (available - gap * (columns as f32 - 1.0)) / columns as f32;
+    let columns = shortcut_columns(available);
+    let tile_width = (available - TILE_GAP * (columns as f32 - 1.0)) / columns as f32;
     let rows = tiles.len().div_ceil(columns);
+    let playing_uri = app.playing_context_uri();
+    let believed_playing = app.believed_playing();
+    let mut hovered_tint = None;
     for row in 0..rows {
+        if row > 0 {
+            ui.add_space(TILE_GAP - ui.spacing().item_spacing.y);
+        }
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
+            ui.spacing_mut().item_spacing.x = TILE_GAP;
             for column in 0..columns {
-                let Some(Tile {
-                    image,
-                    name,
-                    page,
-                    uri,
-                    liked,
-                    owned_playlist,
-                    song,
-                }) = tiles.get(row * columns + column)
-                else {
+                let Some(tile) = tiles.get(row * columns + column) else {
                     break;
                 };
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(tile_width, TILE_HEIGHT), Sense::click());
-                if ui.is_rect_visible(rect) {
-                    let hovered = ui.rect_contains_pointer(rect);
-                    let fill = if hovered {
-                        palette.surface_hover
-                    } else {
-                        palette.surface
-                    };
-                    ui.painter().rect_filled(rect, CornerRadius::same(6), fill);
-                    let cover = Rect::from_min_size(rect.min, Vec2::splat(TILE_HEIGHT));
-                    if *liked {
-                        super::sidebar::liked_cover(ui, cover, 6.0);
-                    } else {
-                        widgets::paint_cover(
-                            ui,
-                            &palette,
-                            image.as_deref(),
-                            cover,
-                            6.0,
-                            Icon::Music,
-                            Some(app.backend.art()),
-                        );
-                    }
-                    let play_room = if hovered && uri.is_some() { 52.0 } else { 12.0 };
-                    let text_rect = Rect::from_min_max(
-                        pos2(cover.right() + 12.0, rect.top()),
-                        pos2(rect.right() - play_room, rect.bottom()),
-                    );
-                    crate::bidi::paint_line(
-                        &ui.painter().with_clip_rect(text_rect),
-                        text_rect.left(),
-                        text_rect.right(),
-                        rect.center().y,
-                        name,
-                        theme::bold(14.5),
-                        palette.text,
-                    );
-                    if hovered && let Some(uri) = uri {
-                        let context_here =
-                            app.playing_context_uri().as_deref() == Some(uri.as_str());
-                        let playing_here = context_here && app.believed_playing();
-                        let button = Rect::from_center_size(
-                            pos2(rect.right() - 28.0, rect.center().y),
-                            Vec2::splat(40.0),
-                        );
-                        let mut child =
-                            ui.new_child(egui::UiBuilder::new().max_rect(button).layout(
-                                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                            ));
-                        if theme::circle_button(
-                            &mut child,
-                            if playing_here {
-                                Icon::PauseFilled
-                            } else {
-                                Icon::PlayFilled
-                            },
-                            40.0,
-                            palette.accent,
-                            palette.accent_hover,
-                            palette.on_accent,
-                            &gettext(app.locale, if playing_here { "Pause" } else { "Play" }),
-                        )
-                        .clicked()
-                        {
-                            if context_here {
-                                app.actions.push(Action::TogglePlay);
-                            } else if song.is_some() {
-                                app.actions.push(Action::PlayUris {
-                                    uris: vec![uri.clone()],
-                                    index: 0,
-                                });
-                            } else {
-                                app.actions.push(Action::PlayContext {
-                                    uri: uri.clone(),
-                                    offset_uri: None,
-                                    offset_index: None,
-                                });
-                            }
-                        }
-                    }
-                }
-                if response.clicked() {
-                    app.actions.push(Action::Open(page.clone()));
-                }
-                if !liked && let Some(uri) = uri {
-                    egui::Popup::context_menu(&response)
-                        .id(ui.make_persistent_id(("quick-access-menu", uri)))
-                        .frame(widgets::menu_frame(&palette))
-                        .show(|ui| match song {
-                            Some(track) => widgets::item_menu(
-                                ui,
-                                app,
-                                &PlayableItem::Track(track.clone()),
-                                None,
-                                None,
-                            ),
-                            None => widgets::context_menu_items(
-                                ui,
-                                app,
-                                uri,
-                                name,
-                                owned_playlist.as_ref(),
-                            ),
-                        });
+                // Asked for every shortcut, so the wash's colour is there
+                // by the time one is hovered.
+                let tint = if tile.liked {
+                    Some(LIKED_TINT)
+                } else {
+                    app.tint_for(tile.image.as_deref())
+                };
+                if shortcut(app, ui, tile, tile_width, &playing_uri, believed_playing) {
+                    hovered_tint = tint;
                 }
             }
         });
     }
+    hovered_tint
+}
+
+/// One shortcut: its cover, its title on up to two lines, Play on hover
+/// and Spotify's green bars while it plays. True while it is hovered.
+fn shortcut(
+    app: &mut App,
+    ui: &mut Ui,
+    tile: &Tile,
+    width: f32,
+    playing_uri: &Option<String>,
+    believed_playing: bool,
+) -> bool {
+    let palette = app.palette;
+    let Tile {
+        image,
+        name,
+        page,
+        uri,
+        liked,
+        owned_playlist,
+        song,
+    } = tile;
+    let (rect, response) = ui.allocate_exact_size(vec2(width, TILE_HEIGHT), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    let hovered = ui.rect_contains_pointer(rect);
+    let context_here = uri.is_some() && playing_uri.as_deref() == uri.as_deref();
+    let playing_here = context_here && believed_playing;
+    let shown = ui.ctx().animate_bool_with_time_and_easing(
+        response.id.with("play"),
+        hovered && uri.is_some(),
+        0.2,
+        egui::emath::easing::cubic_out,
+    );
+    if ui.is_rect_visible(rect) {
+        // Spotify's shortcuts are translucent, so the wash shows through.
+        let fill = palette.text.gamma_multiply(if hovered { 0.2 } else { 0.1 });
+        let corner = CornerRadius::same(theme::RADIUS_SMALL);
+        ui.painter().rect_filled(rect, corner, fill);
+        let cover = Rect::from_min_size(rect.min, Vec2::splat(TILE_HEIGHT));
+        if *liked {
+            super::sidebar::liked_cover(ui, cover, f32::from(theme::RADIUS_SMALL));
+        } else {
+            widgets::paint_cover(
+                ui,
+                &palette,
+                image.as_deref(),
+                cover,
+                f32::from(theme::RADIUS_SMALL),
+                if tile.podcast() {
+                    Icon::Mic
+                } else {
+                    Icon::Music
+                },
+                Some(app.backend.art()),
+            );
+        }
+        let end_room = if shown > 0.0 {
+            48.0
+        } else if playing_here {
+            40.0
+        } else {
+            8.0
+        };
+        let text_left = cover.right() + 8.0;
+        let text_width = (rect.right() - end_room - text_left).max(0.0);
+        let galley = widgets::ellipsized(ui, name, theme::bold(14.0), palette.text, text_width, 2);
+        let text_rect = Rect::from_min_size(
+            pos2(text_left, rect.center().y - galley.size().y / 2.0),
+            vec2(text_width, galley.size().y),
+        );
+        paint_galley(ui, text_rect, galley, palette.text);
+        if playing_here && shown < 1.0 {
+            let bars = Rect::from_center_size(
+                pos2(rect.right() - 24.0, rect.center().y),
+                Vec2::splat(16.0),
+            );
+            theme::paint_icon(
+                ui,
+                Icon::AudioLines,
+                bars,
+                16.0,
+                palette.accent.gamma_multiply(1.0 - shown),
+            );
+        }
+    }
+    if shown > 0.0
+        && let Some(uri) = uri
+        && hover_play(
+            app,
+            ui,
+            pos2(rect.right() - 24.0, rect.center().y),
+            32.0,
+            shown,
+            playing_here,
+        )
+    {
+        if context_here {
+            app.actions.push(Action::TogglePlay);
+        } else if song.is_some() {
+            app.actions.push(Action::PlayUris {
+                uris: vec![uri.clone()],
+                index: 0,
+            });
+        } else {
+            app.actions.push(Action::PlayContext {
+                uri: uri.clone(),
+                offset_uri: None,
+                offset_index: None,
+            });
+        }
+    } else if response.clicked() {
+        app.actions.push(Action::Open(page.clone()));
+    }
+    theme::focus_ring(ui, &response);
+    if !liked && let Some(uri) = uri {
+        egui::Popup::context_menu(&response)
+            .id(ui.make_persistent_id(("quick-access-menu", uri)))
+            .frame(widgets::menu_frame(&palette))
+            .show(|ui| match song {
+                Some(track) => {
+                    widgets::item_menu(ui, app, &PlayableItem::Track(track.clone()), None, None);
+                }
+                None => widgets::context_menu_items(ui, app, uri, name, owned_playlist.as_ref()),
+            });
+    }
+    hovered
+}
+
+/// A Home card's cover, inside its 12 point padding, as Spotify's.
+const CARD_ART: f32 = 160.0;
+const CARD_PAD: f32 = 12.0;
+const CARD_WIDTH: f32 = CARD_ART + 2.0 * CARD_PAD;
+/// The play control on a hovered card's cover.
+const CARD_PLAY: f32 = 48.0;
+
+/// What a Home [`card`] shows.
+struct Card<'a> {
+    image: Option<&'a str>,
+    title: &'a str,
+    subtitle: &'a str,
+    /// A round cover, as an artist's portrait.
+    round: bool,
+    /// The card's context is the one playing: its control stays in sight
+    /// and pauses.
+    playing: bool,
+}
+
+/// A card in Spotify's style: the cover, the title on one line and the
+/// subtitle on two, a lighter background on hover, and the green play
+/// button sliding up into the cover's corner.
+fn card(ui: &mut Ui, app: &mut App, card: &Card<'_>) -> CardResponse {
+    let palette = app.palette;
+    let title_font = theme::regular(15.0);
+    let subtitle_font = theme::regular(13.5);
+    let (title_row, subtitle_row) = ui.fonts_mut(|fonts| {
+        (
+            fonts.row_height(&title_font),
+            fonts.row_height(&subtitle_font),
+        )
+    });
+    let height = CARD_PAD + CARD_ART + 8.0 + title_row + 2.0 + 2.0 * subtitle_row + CARD_PAD;
+    let (rect, response) = ui.allocate_exact_size(vec2(CARD_WIDTH, height), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            format!("{}, {}", card.title, card.subtitle),
+        )
+    });
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
+    let hovered = ui.rect_contains_pointer(rect);
+    let shown = ui.ctx().animate_bool_with_time_and_easing(
+        response.id.with("play"),
+        hovered || response.has_focus() || card.playing,
+        0.2,
+        egui::emath::easing::cubic_out,
+    );
+    let art = Rect::from_min_size(rect.min + Vec2::splat(CARD_PAD), Vec2::splat(CARD_ART));
+    if ui.is_rect_visible(rect) {
+        if hovered {
+            ui.painter().rect_filled(
+                rect,
+                CornerRadius::same(theme::RADIUS_SMALL + 2),
+                palette.surface,
+            );
+        }
+        let radius = if card.round { CARD_ART / 2.0 } else { 6.0 };
+        widgets::paint_shadow(ui, &palette, art, radius);
+        widgets::paint_cover(
+            ui,
+            &palette,
+            card.image,
+            art,
+            radius,
+            if card.round { Icon::User } else { Icon::Music },
+            Some(app.backend.art()),
+        );
+        let title = widgets::ellipsized(ui, card.title, title_font, palette.text, CARD_ART, 1);
+        let title_rect = Rect::from_min_size(
+            pos2(art.left(), art.bottom() + 8.0),
+            vec2(CARD_ART, title_row),
+        );
+        paint_galley(ui, title_rect, title, palette.text);
+        let subtitle = widgets::ellipsized(
+            ui,
+            card.subtitle,
+            subtitle_font,
+            palette.secondary,
+            CARD_ART,
+            2,
+        );
+        let subtitle_rect = Rect::from_min_size(
+            pos2(art.left(), title_rect.bottom() + 2.0),
+            vec2(CARD_ART, 2.0 * subtitle_row),
+        );
+        paint_galley(ui, subtitle_rect, subtitle, palette.secondary);
+    }
+    let mut play = false;
+    if shown > 0.0 && ui.is_rect_visible(art) {
+        // Spotify's button rises 8 points into place as it fades in.
+        let center = pos2(
+            art.right() - 8.0 - CARD_PLAY / 2.0,
+            art.bottom() - 8.0 - CARD_PLAY / 2.0 + 8.0 * (1.0 - shown),
+        );
+        let shadow = egui::epaint::Shadow {
+            offset: [0, 8],
+            blur: 8,
+            spread: 0,
+            color: Color32::from_black_alpha((77.0 * shown) as u8),
+        };
+        ui.painter().add(shadow.as_shape(
+            Rect::from_center_size(center, Vec2::splat(CARD_PLAY)),
+            CornerRadius::same((CARD_PLAY / 2.0) as u8),
+        ));
+        play = hover_play(app, ui, center, CARD_PLAY, shown, card.playing);
+    }
+    crate::autoscroll::row(ui, &response);
+    theme::focus_ring(ui, &response);
+    CardResponse {
+        clicked: response.clicked() && !play,
+        response,
+        play,
+    }
+}
+
+/// What a shelf's header was asked to do.
+struct ShelfClicks {
+    /// The title, which opens the shelf's page when it has one.
+    title: bool,
+    /// Show all, which opens that page, or else lays every card out.
+    show_all: bool,
+    /// Where the title was drawn, for a badge beside it.
+    title_rect: Rect,
+}
+
+/// A shelf's place on Home.
+struct ShelfSpec<'a> {
+    id: &'a str,
+    title: &'a str,
+    /// The shelf has a page of its own, which its title and Show all open.
+    linked: bool,
+    /// How many cards it holds, to know whether they overflow a row.
+    cards: usize,
+    /// The least height of its header, to line it up with a neighbour's.
+    header_height: f32,
+}
+
+impl<'a> ShelfSpec<'a> {
+    fn new(id: &'a str, title: &'a str, cards: usize) -> Self {
+        Self {
+            id,
+            title,
+            linked: false,
+            cards,
+            header_height: 0.0,
+        }
+    }
+
+    fn linked(self) -> Self {
+        Self {
+            linked: true,
+            ..self
+        }
+    }
+}
+
+/// A section's header, as Spotify's: the title in 24 point bold, underlined
+/// on hover when it opens a page, and an action such as Show all at the
+/// end of the row.
+fn section_header(
+    ui: &mut Ui,
+    palette: &Palette,
+    id: &str,
+    title: &str,
+    linked: bool,
+    action: Option<&str>,
+    min_height: f32,
+) -> ShelfClicks {
+    let painter = ui.painter().clone();
+    let width = ui.available_width();
+    let action_galley = action.map(|label| {
+        crate::bidi::layout_line(&painter, label, theme::bold(14.0), palette.secondary)
+    });
+    let action_width = action_galley
+        .as_ref()
+        .map_or(0.0, |galley| galley.size().x + 16.0);
+    let title_galley = widgets::ellipsized(
+        ui,
+        title,
+        theme::bold(SECTION_TITLE),
+        palette.text,
+        (width - action_width).max(0.0),
+        1,
+    );
+    let height = title_galley.size().y.max(min_height);
+    let (row, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    let title_rect = Rect::from_min_size(
+        pos2(row.left(), row.bottom() - title_galley.size().y),
+        title_galley.size(),
+    );
+    let mut clicks = ShelfClicks {
+        title: false,
+        show_all: false,
+        title_rect,
+    };
+    if linked {
+        let response = ui.interact(
+            title_rect,
+            ui.make_persistent_id(("home-shelf-title", id)),
+            Sense::click(),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Link, ui.is_enabled(), title)
+        });
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            underline(&painter, title_rect, palette.text);
+        }
+        theme::focus_ring(ui, &response);
+        clicks.title = response.clicked();
+    }
+    painter.galley(title_rect.min, title_galley, palette.text);
+    if let (Some(label), Some(galley)) = (action, action_galley) {
+        let rect = Rect::from_min_size(
+            pos2(
+                row.right() - galley.size().x,
+                title_rect.center().y - galley.size().y / 2.0,
+            ),
+            galley.size(),
+        );
+        let response = ui.interact(
+            rect,
+            ui.make_persistent_id(("home-shelf-action", id)),
+            Sense::click(),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        });
+        let color = if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            underline(&painter, rect, palette.text);
+            palette.text
+        } else {
+            palette.secondary
+        };
+        painter.galley_with_override_text_color(rect.min, galley, color);
+        theme::focus_ring(ui, &response);
+        clicks.show_all = response.clicked();
+    }
+    clicks
+}
+
+fn underline(painter: &egui::Painter, rect: Rect, color: Color32) {
+    painter.line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        egui::Stroke::new(1.0, color),
+    );
+}
+
+/// A shelf of cards under its header. Its cards stay on one row that
+/// scrolls sideways; Show all opens the shelf's page, or, for a shelf
+/// without one, lays every card out in rows until Show less.
+fn shelf(
+    ui: &mut Ui,
+    palette: &Palette,
+    locale: Locale,
+    spec: &ShelfSpec<'_>,
+    add_contents: impl FnOnce(&mut Ui),
+) -> ShelfClicks {
+    ui.add_space(SECTION_GAP);
+    let expanded_id = Id::new(("home-shelf-expanded", spec.id));
+    let expanded = !spec.linked && ui.data(|data| data.get_temp::<bool>(expanded_id)) == Some(true);
+    let overflows = spec.cards as f32 * CARD_WIDTH > ui.available_width() + 2.0 * CARD_PAD;
+    let show_all = gettext(locale, "Show all");
+    let show_less = gettext(locale, "Show less");
+    let action = if expanded {
+        Some(show_less.as_ref())
+    } else if spec.linked || overflows {
+        Some(show_all.as_ref())
+    } else {
+        None
+    };
+    let clicks = section_header(
+        ui,
+        palette,
+        spec.id,
+        spec.title,
+        spec.linked,
+        action,
+        spec.header_height,
+    );
+    if clicks.show_all && !spec.linked {
+        ui.data_mut(|data| data.insert_temp(expanded_id, !expanded));
+    }
+    ui.add_space(8.0);
+    // The cards' padding sits outside the page's edge, so their covers line
+    // up with the title, as Spotify's do.
+    let body = ui.available_rect_before_wrap();
+    let body = Rect::from_min_max(
+        pos2(body.left() - CARD_PAD, body.top()),
+        pos2(body.right() + CARD_PAD, body.bottom()),
+    );
+    let mut body = ui.new_child(
+        UiBuilder::new()
+            .max_rect(body)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    {
+        let ui = &mut body;
+        if expanded {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                add_contents(ui);
+            });
+        } else {
+            crate::autoscroll::show(
+                ui,
+                egui::ScrollArea::horizontal().id_salt(spec.id),
+                egui::Vec2b::new(true, false),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        add_contents(ui);
+                    });
+                },
+            );
+        }
+    }
+    // Only the page's own width is taken, so the page does not widen.
+    let used = body.min_rect();
+    let page = ui.max_rect();
+    ui.advance_cursor_after_rect(Rect::from_min_max(
+        pos2(page.left(), used.top()),
+        pos2(page.right(), used.bottom()),
+    ));
+    clicks
 }
 
 /// Renders session Home cards or approximate fallback cards in the same shelf.
-fn made_for_you(app: &mut App, ui: &mut egui::Ui) {
+fn made_for_you(app: &mut App, ui: &mut Ui) {
     let palette = app.palette;
     let (playlists, loading, failure) = match &app.home.made_for_you {
         Loadable::Loaded(playlists) => (playlists.clone(), false, None),
@@ -335,11 +936,13 @@ fn made_for_you(app: &mut App, ui: &mut egui::Ui) {
     if playlists.is_empty() && !loading && failure.is_none() {
         return;
     }
-    widgets::shelf(
+    let title = gettext(app.locale, "Made for you");
+    let cards = if loading { 7 } else { playlists.len() };
+    shelf(
         ui,
         &palette,
-        "made-for-you",
-        &gettext(app.locale, "Made for you"),
+        app.locale,
+        &ShelfSpec::new("made-for-you", &title, cards),
         |ui| {
             if playlists.is_empty() && loading {
                 widgets::skeleton_cards(ui, &palette, app.locale, 7, false);
@@ -353,7 +956,7 @@ fn made_for_you(app: &mut App, ui: &mut egui::Ui) {
     );
 }
 
-fn top_mixes(app: &mut App, ui: &mut egui::Ui) {
+fn top_mixes(app: &mut App, ui: &mut Ui) {
     let palette = app.palette;
     let Some(playlists) = app
         .home
@@ -364,19 +967,31 @@ fn top_mixes(app: &mut App, ui: &mut egui::Ui) {
     else {
         return;
     };
-    widgets::shelf(
+    let title = gettext(app.locale, "Your top mixes");
+    shelf(
         ui,
         &palette,
-        "top-mixes",
-        &gettext(app.locale, "Your top mixes"),
+        app.locale,
+        &ShelfSpec::new("top-mixes", &title, playlists.len()),
         |ui| playlist_cards(app, ui, "home-top_mixes-menu", &playlists),
     );
 }
 
-/// The latest releases from followed artists. A card opens its release;
-/// the title opens the page that plays all their songs, newest first.
-fn new_releases(app: &mut App, ui: &mut egui::Ui) {
-    let palette = app.palette;
+/// Where the hero for the newest release sits beside the New releases
+/// shelf instead of above it.
+const HERO_BESIDE_WIDTH: f32 = 860.0;
+/// The space between the hero and the shelf beside it.
+const HERO_GAP: f32 = 24.0;
+/// The height of the hero's card, and so the side of its cover.
+const HERO_HEIGHT: f32 = 200.0;
+/// The height of the hero's header: the artist's portrait.
+const HERO_HEADER: f32 = 48.0;
+
+/// The latest releases from followed artists: the newest in Spotify's
+/// "New release from" block, then the shelf of them all. A card opens its
+/// release; the title and Show all open the page that plays all their
+/// songs, newest first.
+fn new_releases(app: &mut App, ui: &mut Ui) {
     let (albums, loading, failure) = match &app.home.new_releases {
         Loadable::Loaded(albums) => (albums.clone(), false, None),
         Loadable::Loading | Loadable::NotLoaded => (Vec::new(), true, None),
@@ -385,46 +1000,324 @@ fn new_releases(app: &mut App, ui: &mut egui::Ui) {
     if albums.is_empty() && !loading && failure.is_none() {
         return;
     }
+    let Some(newest) = albums.first().cloned() else {
+        release_shelf(app, ui, &albums, loading, failure.as_deref(), 0.0);
+        return;
+    };
+    if ui.available_width() >= HERO_BESIDE_WIDTH {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = HERO_GAP;
+            let half = (ui.available_width() - HERO_GAP) / 2.0;
+            let column = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui)| {
+                ui.allocate_ui_with_layout(
+                    vec2(half, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(half);
+                        add(ui);
+                    },
+                );
+            };
+            column(ui, &mut |ui| release_hero(app, ui, &newest));
+            column(ui, &mut |ui| {
+                release_shelf(app, ui, &albums, loading, failure.as_deref(), HERO_HEADER);
+            });
+        });
+    } else {
+        release_hero(app, ui, &newest);
+        release_shelf(app, ui, &albums, loading, failure.as_deref(), 0.0);
+    }
+}
+
+fn release_shelf(
+    app: &mut App,
+    ui: &mut Ui,
+    albums: &[Album],
+    loading: bool,
+    failure: Option<&str>,
+    header_height: f32,
+) {
+    let palette = app.palette;
     let title = gettext(app.locale, "New releases");
-    // The shelf leaves 8 points above its title.
-    let title_at = ui.cursor().min + egui::vec2(0.0, 8.0);
-    let open = widgets::linked_shelf(ui, &palette, "new-releases", &title, |ui| {
+    let spec = ShelfSpec {
+        header_height,
+        ..ShelfSpec::new("new-releases", &title, albums.len()).linked()
+    };
+    let clicks = shelf(ui, &palette, app.locale, &spec, |ui| {
         if albums.is_empty() && loading {
             widgets::loading_row(ui, &palette, app.locale);
         } else if albums.is_empty()
-            && let Some(message) = &failure
+            && let Some(message) = failure
         {
             widgets::error_row(ui, app, message, Some(Page::Home));
         }
-        for album in &albums {
+        for album in albums {
             release_card(app, ui, album);
         }
     });
-    super::new_releases::shelf_badge(app, ui, title_at, &title);
-    if open {
+    super::new_releases::shelf_badge(app, ui, clicks.title_rect);
+    if clicks.title || clicks.show_all {
         app.actions.push(Action::Open(Page::NewReleases));
     }
 }
 
-fn release_card(app: &mut App, ui: &mut egui::Ui, album: &Album) {
-    let palette = app.palette;
+/// "Kind • Artists", as a release's card and hero say what it is.
+fn release_subtitle(locale: Locale, album: &Album) -> String {
     let artists =
         crate::api::models::join_names(album.artists.iter().map(|artist| artist.name.as_str()));
-    let subtitle = if artists.is_empty() {
-        album.kind_label(app.locale).into_owned()
+    if artists.is_empty() {
+        album.kind_label(locale).into_owned()
     } else {
-        format!("{} • {artists}", album.kind_label(app.locale))
+        format!("{} • {artists}", album.kind_label(locale))
+    }
+}
+
+/// Spotify's "New release from" block: the artist's portrait and name over
+/// a card with the release's cover, what it is, its title, Play and Save.
+fn release_hero(app: &mut App, ui: &mut Ui, album: &Album) {
+    let palette = app.palette;
+    let locale = app.locale;
+    ui.add_space(SECTION_GAP);
+    let artist = album.artists.first();
+    let artist_id = artist.and_then(|artist| artist.id.clone());
+    let portrait = artist_id
+        .as_deref()
+        .and_then(|id| app.known_artist(id))
+        .and_then(|artist| pick_image(&artist.images, app.art_px(HERO_HEADER)))
+        .map(str::to_string);
+    let width = ui.available_width();
+    let (header, _) = ui.allocate_exact_size(vec2(width, HERO_HEADER), Sense::hover());
+    let face = Rect::from_min_size(header.min, Vec2::splat(HERO_HEADER));
+    if artist.is_some() {
+        widgets::paint_cover(
+            ui,
+            &palette,
+            portrait.as_deref(),
+            face,
+            HERO_HEADER / 2.0,
+            Icon::User,
+            Some(app.backend.art()),
+        );
+    }
+    let text_left = if artist.is_some() {
+        face.right() + 12.0
+    } else {
+        header.left()
     };
+    let text_width = (header.right() - text_left).max(0.0);
+    let from = widgets::ellipsized(
+        ui,
+        &gettext(locale, "New release from"),
+        theme::regular(13.0),
+        palette.secondary,
+        text_width,
+        1,
+    );
+    let name = widgets::ellipsized(
+        ui,
+        artist.map_or("", |artist| artist.name.as_str()),
+        theme::bold(SECTION_TITLE),
+        palette.text,
+        text_width,
+        1,
+    );
+    let block = from.size().y + name.size().y;
+    let from_rect = Rect::from_min_size(
+        pos2(text_left, header.center().y - block / 2.0),
+        vec2(text_width, from.size().y),
+    );
+    let name_rect = Rect::from_min_size(
+        pos2(text_left, from_rect.bottom()),
+        vec2(name.size().x.min(text_width), name.size().y),
+    );
+    paint_galley(ui, from_rect, from, palette.secondary);
+    if let Some(id) = &artist_id {
+        let response = ui.interact(
+            face.union(name_rect),
+            ui.make_persistent_id(("home-hero-artist", id)),
+            Sense::click(),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Link,
+                true,
+                artist.map_or("", |artist| artist.name.as_str()),
+            )
+        });
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            underline(ui.painter(), name_rect, palette.text);
+        }
+        theme::focus_ring(ui, &response);
+        if response.clicked() {
+            app.actions.push(Action::Open(Page::Artist(id.clone())));
+        }
+    }
+    paint_galley(ui, name_rect, name, palette.text);
+    ui.add_space(8.0);
+
+    // The card itself.
+    let side = HERO_HEIGHT.min(width * 0.45);
+    let (rect, response) = ui.allocate_exact_size(vec2(width, side), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &album.name));
+    let hovered = ui.rect_contains_pointer(rect);
     let context_here = app.playing_context_uri().as_deref() == Some(album.uri.as_str());
     let playing_here = context_here && app.believed_playing();
-    let card_art = app.art_px(widgets::CARD_ART);
-    let card = widgets::card(
+    let cover = Rect::from_min_size(rect.min, Vec2::splat(side));
+    let info_left = cover.right() + 16.0;
+    let info_width = (rect.right() - 16.0 - info_left).max(0.0);
+    let kind = widgets::ellipsized(
+        ui,
+        &release_subtitle(locale, album),
+        theme::regular(13.5),
+        palette.secondary,
+        info_width,
+        1,
+    );
+    let title = widgets::ellipsized(
+        ui,
+        &album.name,
+        theme::bold(if side < HERO_HEIGHT { 18.0 } else { 22.0 }),
+        palette.text,
+        info_width,
+        2,
+    );
+    const BUTTONS: f32 = 32.0;
+    let block = kind.size().y + 4.0 + title.size().y + 16.0 + BUTTONS;
+    let kind_rect = Rect::from_min_size(
+        pos2(info_left, rect.center().y - block / 2.0),
+        vec2(info_width, kind.size().y),
+    );
+    let title_rect = Rect::from_min_size(
+        pos2(info_left, kind_rect.bottom() + 4.0),
+        vec2(info_width, title.size().y),
+    );
+    let buttons_top = title_rect.bottom() + 16.0;
+    if ui.is_rect_visible(rect) {
+        let fill = if hovered {
+            palette.surface_hover
+        } else {
+            palette.surface
+        };
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
+        widgets::paint_cover(
+            ui,
+            &palette,
+            pick_image(&album.images, app.art_px(side)),
+            cover,
+            f32::from(theme::RADIUS),
+            Icon::Disc,
+            Some(app.backend.art()),
+        );
+        paint_galley(ui, kind_rect, kind, palette.secondary);
+        paint_galley(ui, title_rect, title, palette.text);
+    }
+    // Spotify's hero plays with a white button, not the green one.
+    let mut play = ui.new_child(
+        UiBuilder::new()
+            .max_rect(Rect::from_min_size(
+                pos2(info_left, buttons_top),
+                Vec2::splat(BUTTONS),
+            ))
+            .layout(egui::Layout::centered_and_justified(
+                egui::Direction::LeftToRight,
+            )),
+    );
+    let played = theme::circle_button(
+        &mut play,
+        if playing_here {
+            Icon::PauseFilled
+        } else {
+            Icon::PlayFilled
+        },
+        BUTTONS,
+        palette.text,
+        palette.text,
+        palette.window,
+        &gettext(locale, if playing_here { "Pause" } else { "Play" }),
+    )
+    .clicked();
+    let saved = app.is_saved(&album.uri) == Some(true);
+    let mut save = ui.new_child(
+        UiBuilder::new()
+            .max_rect(Rect::from_min_size(
+                pos2(info_left + BUTTONS + 12.0, buttons_top),
+                Vec2::splat(BUTTONS),
+            ))
+            .layout(egui::Layout::centered_and_justified(
+                egui::Direction::LeftToRight,
+            )),
+    );
+    let toggled = theme::icon_button(
+        &mut save,
+        if saved {
+            Icon::CircleCheck
+        } else {
+            Icon::CirclePlus
+        },
+        22.0,
+        if saved {
+            palette.accent
+        } else {
+            palette.secondary
+        },
+        if saved {
+            palette.accent_hover
+        } else {
+            palette.text
+        },
+        &gettext(
+            locale,
+            if saved {
+                "Remove from Your Library"
+            } else {
+                "Save to Your Library"
+            },
+        ),
+    )
+    .clicked();
+    if played {
+        if context_here {
+            app.actions.push(Action::TogglePlay);
+        } else {
+            app.actions.push(Action::PlayContext {
+                uri: album.uri.clone(),
+                offset_uri: None,
+                offset_index: None,
+            });
+        }
+    } else if toggled {
+        app.actions.push(Action::ToggleSaved(album.uri.clone()));
+    } else if response.clicked() {
+        app.actions
+            .push(Action::Open(Page::Album(album.id.clone())));
+    }
+    theme::focus_ring(ui, &response);
+    egui::Popup::context_menu(&response)
+        .id(ui.make_persistent_id(("home-new-release-hero-menu", &album.uri)))
+        .frame(widgets::menu_frame(&palette))
+        .show(|ui| {
+            widgets::context_menu_items(ui, app, &album.uri, &album.name, None);
+        });
+}
+
+fn release_card(app: &mut App, ui: &mut Ui, album: &Album) {
+    let palette = app.palette;
+    let subtitle = release_subtitle(app.locale, album);
+    let context_here = app.playing_context_uri().as_deref() == Some(album.uri.as_str());
+    let playing_here = context_here && app.believed_playing();
+    let card_art = app.art_px(CARD_ART);
+    let card = card(
         ui,
         app,
-        pick_image(&album.images, card_art),
-        &album.name,
-        &subtitle,
-        widgets::CardCover::square(playing_here),
+        &Card {
+            image: pick_image(&album.images, card_art),
+            title: &album.name,
+            subtitle: &subtitle,
+            round: false,
+            playing: playing_here,
+        },
     );
     if card.play {
         if context_here {
@@ -449,7 +1342,7 @@ fn release_card(app: &mut App, ui: &mut egui::Ui, album: &Album) {
         });
 }
 
-fn playlist_cards(app: &mut App, ui: &mut egui::Ui, menu: &str, playlists: &[Playlist]) {
+fn playlist_cards(app: &mut App, ui: &mut Ui, menu: &str, playlists: &[Playlist]) {
     let palette = app.palette;
     for playlist in playlists {
         let subtitle = playlist
@@ -463,14 +1356,17 @@ fn playlist_cards(app: &mut App, ui: &mut egui::Ui, menu: &str, playlists: &[Pla
             });
         let context_here = app.playing_context_uri().as_deref() == Some(playlist.uri.as_str());
         let playing_here = context_here && app.believed_playing();
-        let card_art = app.art_px(widgets::CARD_ART);
-        let card = widgets::card(
+        let card_art = app.art_px(CARD_ART);
+        let card = card(
             ui,
             app,
-            pick_image(&playlist.images, card_art),
-            &playlist.name,
-            &subtitle,
-            widgets::CardCover::square(playing_here),
+            &Card {
+                image: pick_image(&playlist.images, card_art),
+                title: &playlist.name,
+                subtitle: &subtitle,
+                round: false,
+                playing: playing_here,
+            },
         );
         if card.play {
             if context_here {
@@ -503,26 +1399,27 @@ fn playlist_cards(app: &mut App, ui: &mut egui::Ui, menu: &str, playlists: &[Pla
     }
 }
 
-fn recently_played(app: &mut App, ui: &mut egui::Ui) {
+fn recently_played(app: &mut App, ui: &mut Ui) {
     let palette = app.palette;
+    let title = gettext(app.locale, "Recently played");
     let history = match app.home.recently_played.clone() {
         Loadable::Loaded(history) => history,
         Loadable::Loading | Loadable::NotLoaded => {
-            widgets::shelf(
+            shelf(
                 ui,
                 &palette,
-                "recent",
-                &gettext(app.locale, "Recently played"),
+                app.locale,
+                &ShelfSpec::new("recent", &title, 0),
                 |ui| widgets::skeleton_cards(ui, &palette, app.locale, 7, false),
             );
             return;
         }
         Loadable::Failed(message) => {
-            widgets::shelf(
+            shelf(
                 ui,
                 &palette,
-                "recent",
-                &gettext(app.locale, "Recently played"),
+                app.locale,
+                &ShelfSpec::new("recent", &title, 0),
                 |ui| {
                     widgets::error_row(ui, app, &message, Some(Page::Home));
                 },
@@ -545,22 +1442,26 @@ fn recently_played(app: &mut App, ui: &mut egui::Ui) {
     if tracks.is_empty() {
         return;
     }
-    widgets::shelf(
+    shelf(
         ui,
         &palette,
-        "recent",
-        &gettext(app.locale, "Recently played"),
+        app.locale,
+        &ShelfSpec::new("recent", &title, tracks.len()),
         |ui| {
             for entry in &tracks {
                 let track = &entry.track;
-                let card_art = app.art_px(widgets::CARD_ART);
-                let card = widgets::card(
+                let card_art = app.art_px(CARD_ART);
+                let artists = track.artist_names();
+                let card = card(
                     ui,
                     app,
-                    track.image(card_art),
-                    &track.name,
-                    &track.artist_names(),
-                    widgets::CardCover::square(false),
+                    &Card {
+                        image: track.image(card_art),
+                        title: &track.name,
+                        subtitle: &artists,
+                        round: false,
+                        playing: false,
+                    },
                 );
                 if card.play {
                     app.actions.push(Action::PlayUris {
@@ -672,7 +1573,8 @@ pub(crate) fn podcast_episodes(
         .collect()
 }
 
-fn podcasts(app: &mut App, ui: &mut egui::Ui) {
+/// The podcast shelf; false when it has no episode to show.
+fn podcasts(app: &mut App, ui: &mut Ui) -> bool {
     let palette = app.palette;
     let episodes = podcast_episodes(
         &app.home.podcasts,
@@ -680,13 +1582,14 @@ fn podcasts(app: &mut App, ui: &mut egui::Ui) {
         jiff::Zoned::now().date(),
     );
     if episodes.is_empty() {
-        return;
+        return false;
     }
-    widgets::shelf(
+    let title = gettext(app.locale, "Your podcasts");
+    shelf(
         ui,
         &palette,
-        "podcasts",
-        &gettext(app.locale, "Your podcasts"),
+        app.locale,
+        &ShelfSpec::new("podcasts", &title, episodes.len()),
         |ui| {
             for (show, episode, reason) in &episodes {
                 let subtitle = match reason {
@@ -704,15 +1607,18 @@ fn podcasts(app: &mut App, ui: &mut egui::Ui) {
                         gettext(app.locale, "New • {show}").replace("{show}", &show.name)
                     }
                 };
-                let card_art = app.art_px(widgets::CARD_ART);
-                let card = widgets::card(
+                let card_art = app.art_px(CARD_ART);
+                let card = card(
                     ui,
                     app,
-                    pick_image(&episode.images, card_art)
-                        .or_else(|| pick_image(&show.images, card_art)),
-                    &episode.name,
-                    &subtitle,
-                    widgets::CardCover::square(false),
+                    &Card {
+                        image: pick_image(&episode.images, card_art)
+                            .or_else(|| pick_image(&show.images, card_art)),
+                        title: &episode.name,
+                        subtitle: &subtitle,
+                        round: false,
+                        playing: false,
+                    },
                 );
                 if card.play {
                     app.actions.push(Action::PlayEpisode {
@@ -738,28 +1644,30 @@ fn podcasts(app: &mut App, ui: &mut egui::Ui) {
             }
         },
     );
+    true
 }
 
-fn top_artists(app: &mut App, ui: &mut egui::Ui) {
+fn top_artists(app: &mut App, ui: &mut Ui) {
     let palette = app.palette;
+    let title = gettext(app.locale, "Your top artists");
     let artists = match app.home.top_artists.clone() {
         Loadable::Loaded(artists) => artists,
         Loadable::Loading | Loadable::NotLoaded => {
-            widgets::shelf(
+            shelf(
                 ui,
                 &palette,
-                "top-artists",
-                &gettext(app.locale, "Your top artists"),
+                app.locale,
+                &ShelfSpec::new("top-artists", &title, 0),
                 |ui| widgets::skeleton_cards(ui, &palette, app.locale, 7, true),
             );
             return;
         }
         Loadable::Failed(message) => {
-            widgets::shelf(
+            shelf(
                 ui,
                 &palette,
-                "top-artists",
-                &gettext(app.locale, "Your top artists"),
+                app.locale,
+                &ShelfSpec::new("top-artists", &title, 0),
                 |ui| {
                     widgets::error_row(ui, app, &message, Some(Page::Home));
                 },
@@ -770,24 +1678,28 @@ fn top_artists(app: &mut App, ui: &mut egui::Ui) {
     if artists.is_empty() {
         return;
     }
-    widgets::shelf(
+    shelf(
         ui,
         &palette,
-        "top-artists",
-        &gettext(app.locale, "Your top artists"),
+        app.locale,
+        &ShelfSpec::new("top-artists", &title, artists.len()),
         |ui| {
             for artist in &artists {
                 let context_here =
                     app.playing_context_uri().as_deref() == Some(artist.uri.as_str());
                 let playing_here = context_here && app.believed_playing();
-                let card_art = app.art_px(widgets::CARD_ART);
-                let card = widgets::card(
+                let card_art = app.art_px(CARD_ART);
+                let kind = gettext(app.locale, "Artist");
+                let card = card(
                     ui,
                     app,
-                    pick_image(&artist.images, card_art),
-                    &artist.name,
-                    &gettext(app.locale, "Artist"),
-                    widgets::CardCover::portrait(playing_here),
+                    &Card {
+                        image: pick_image(&artist.images, card_art),
+                        title: &artist.name,
+                        subtitle: &kind,
+                        round: true,
+                        playing: playing_here,
+                    },
                 );
                 if card.play {
                     if context_here {
@@ -815,48 +1727,8 @@ fn top_artists(app: &mut App, ui: &mut egui::Ui) {
     );
 }
 
-fn track_list(
-    app: &mut App,
-    ui: &mut egui::Ui,
-    title: &str,
-    tracks: Loadable<Vec<crate::api::models::Track>>,
-    limit: usize,
-    title_page: Option<Page>,
-    more_label: Option<&str>,
-) {
-    let palette = app.palette;
-    let tracks = match tracks {
-        Loadable::Loaded(tracks) => tracks,
-        Loadable::Loading | Loadable::NotLoaded => {
-            if let Some(page) = title_page {
-                if theme::link(ui, title, theme::bold(17.0), palette.text).clicked() {
-                    app.actions.push(Action::Open(page));
-                }
-            } else {
-                theme::section_title(ui, &palette, title);
-            }
-            widgets::skeleton_rows(ui, &palette, app.locale, 4);
-            ui.add_space(12.0);
-            return;
-        }
-        Loadable::Failed(message) => {
-            theme::section_title(ui, &palette, title);
-            widgets::error_row(ui, app, &message, Some(title_page.unwrap_or(Page::Home)));
-            ui.add_space(12.0);
-            return;
-        }
-    };
-    if tracks.is_empty() {
-        return;
-    }
-    if let Some(page) = title_page {
-        if theme::link(ui, title, theme::bold(17.0), palette.text).clicked() {
-            app.actions.push(Action::Open(page));
-        }
-    } else {
-        theme::section_title(ui, &palette, title);
-    }
-    ui.add_space(4.0);
+/// The rows of a song list on Home, played as one list.
+fn song_rows(app: &mut App, ui: &mut Ui, tracks: &[crate::api::models::Track], limit: usize) {
     let uris: Arc<[String]> = tracks
         .iter()
         .map(|track| track.uri.clone())
@@ -889,25 +1761,31 @@ fn track_list(
             },
         );
     }
-    if let Some(label) = more_label
-        && tracks.len() > limit
-        && theme::link(ui, label, theme::semibold(14.0), palette.secondary).clicked()
-    {
-        app.actions.push(Action::Open(Page::TopSongs));
-    }
-    ui.add_space(16.0);
 }
 
-fn top_tracks(app: &mut App, ui: &mut egui::Ui) {
+/// How many of the top songs Home lists; Show all lists the rest.
+const TOP_SONGS: usize = 10;
+
+fn top_tracks(app: &mut App, ui: &mut Ui) {
     let palette = app.palette;
     let title = gettext(app.locale, "Your top songs");
-    let more = gettext(app.locale, "Show more top songs");
+    let show_all = gettext(app.locale, "Show all");
     let tracks = app.home.top_tracks.clone();
 
-    if theme::link(ui, &*title, theme::bold(17.0), palette.text).clicked() {
+    ui.add_space(SECTION_GAP);
+    let clicks = section_header(
+        ui,
+        &palette,
+        "top-songs",
+        &title,
+        true,
+        Some(&show_all),
+        0.0,
+    );
+    if clicks.title || clicks.show_all {
         app.actions.push(Action::Open(Page::TopSongs));
     }
-    ui.add_space(4.0);
+    ui.add_space(8.0);
 
     let labels: Vec<_> = TopPeriod::ALL
         .iter()
@@ -922,64 +1800,36 @@ fn top_tracks(app: &mut App, ui: &mut egui::Ui) {
     }
     ui.add_space(8.0);
 
-    let tracks = match tracks {
-        Loadable::Loaded(tracks) => tracks,
+    match tracks {
+        Loadable::Loaded(tracks) => song_rows(app, ui, &tracks, TOP_SONGS),
         Loadable::Loading | Loadable::NotLoaded => {
             widgets::loading_row(ui, &palette, app.locale);
-            ui.add_space(12.0);
-            return;
         }
         Loadable::Failed(message) => {
             widgets::error_row(ui, app, &message, Some(Page::TopSongs));
-            ui.add_space(12.0);
-            return;
         }
-    };
-
-    let uris: Arc<[String]> = tracks
-        .iter()
-        .map(|track| track.uri.clone())
-        .collect::<Vec<_>>()
-        .into();
-    let context = RowContext::Uris(Arc::clone(&uris));
-    for (index, track) in tracks.iter().take(10).enumerate() {
-        let item = PlayableItem::Track(track.clone());
-        widgets::track_row(
-            ui,
-            app,
-            TrackRow {
-                index,
-                number: None,
-                item: &item,
-                context: &context,
-                show_cover: !app.settings.tracklist_compact,
-                show_album: true,
-                added_at: None,
-                added_by: None,
-                show_added_by: false,
-                show_plays: false,
-                compact: false,
-                thin: app.settings.tracklist_compact,
-                shift: 0.0,
-                picked: false,
-                picked_songs: &[],
-                picked_positions: &[],
-                position: None,
-            },
-        );
     }
-    if tracks.len() > 10
-        && theme::link(ui, &*more, theme::semibold(14.0), palette.secondary).clicked()
-    {
-        app.actions.push(Action::Open(Page::TopSongs));
-    }
-    ui.add_space(16.0);
 }
 
-fn recommendations(app: &mut App, ui: &mut egui::Ui) {
-    let tracks = app.home.recommendations.clone();
+fn recommendations(app: &mut App, ui: &mut Ui) {
+    let palette = app.palette;
     let title = gettext(app.locale, "Recommended for you");
-    track_list(app, ui, &title, tracks, 20, None, None);
+    let tracks = match app.home.recommendations.clone() {
+        Loadable::Loaded(tracks) if tracks.is_empty() => return,
+        tracks => tracks,
+    };
+    ui.add_space(SECTION_GAP);
+    section_header(ui, &palette, "recommendations", &title, false, None, 0.0);
+    ui.add_space(8.0);
+    match tracks {
+        Loadable::Loaded(tracks) => song_rows(app, ui, &tracks, 20),
+        Loadable::Loading | Loadable::NotLoaded => {
+            widgets::skeleton_rows(ui, &palette, app.locale, 4);
+        }
+        Loadable::Failed(message) => {
+            widgets::error_row(ui, app, &message, Some(Page::Home));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1052,12 +1902,12 @@ mod tests {
         };
         app.pixels_per_point = 1.0;
         assert_eq!(
-            width(quick_access_tiles(&app)[1].image.as_deref()),
+            width(quick_access_tiles(&app, Filter::All)[1].image.as_deref()),
             Some(300)
         );
         app.pixels_per_point = 3.0;
         assert_eq!(
-            width(quick_access_tiles(&app)[1].image.as_deref()),
+            width(quick_access_tiles(&app, Filter::All)[1].image.as_deref()),
             Some(300)
         );
         let _ = std::fs::remove_dir_all(root);
@@ -1089,7 +1939,7 @@ mod tests {
         );
         crate::demo::populate(&mut app);
         let history = app.home.recently_played.get().unwrap().clone();
-        let tiles = quick_access_tiles(&app);
+        let tiles = quick_access_tiles(&app, Filter::All);
         assert_eq!(tiles.len(), TILES);
         assert_eq!(
             tiles[0].page,
@@ -1115,7 +1965,7 @@ mod tests {
         assert_eq!(unique.len(), pages.len(), "each once");
 
         app.home.recently_played = Loadable::Loading;
-        let tiles = quick_access_tiles(&app);
+        let tiles = quick_access_tiles(&app, Filter::All);
         assert_eq!(
             tiles[0].page,
             Page::LikedSongs,
@@ -1126,6 +1976,154 @@ mod tests {
         assert_eq!(tiles.len(), TILES);
         app.backend.shutdown();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "demo")]
+    fn demo_app(name: &str) -> (App, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("spotifast-{name}-{}", std::process::id()));
+        let mut app = App::new(
+            &crate::backend::Waker::default(),
+            crate::paths::AppDirs {
+                config: root.join("config"),
+                state: root.join("state"),
+                cache: root.join("cache"),
+            },
+            crate::settings::Settings::default(),
+            crate::app::AppOptions {
+                media_controls: false,
+                restore_sign_in: false,
+                tray: false,
+                autostart: false,
+            },
+        );
+        crate::demo::populate(&mut app);
+        (app, root)
+    }
+
+    /// Draws Home at `width` and returns the text it painted.
+    #[cfg(feature = "demo")]
+    fn painted(ctx: &egui::Context, app: &mut App, width: f32) -> Vec<String> {
+        fn walk(shape: &egui::epaint::Shape, text: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(shape) => text.push(shape.galley.job.text.clone()),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, text)),
+                _ => {}
+            }
+        }
+        let mut text = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(width, 3200.0))),
+                    ..Default::default()
+                },
+                |ui| super::show(app, ui),
+            );
+            output.textures_delta.clear();
+            text.clear();
+            for shape in &output.shapes {
+                walk(&shape.shape, &mut text);
+            }
+        }
+        text
+    }
+
+    /// The chips sort the shortcuts as Spotify's do: Music leaves podcasts
+    /// out, Podcasts shows only podcasts, filled from the saved ones.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn home_chips_filter_the_shortcuts() {
+        let (mut app, root) = demo_app("home-chip-tiles");
+        assert!(
+            quick_access_tiles(&app, Filter::Music)
+                .iter()
+                .all(|tile| !tile.podcast())
+        );
+        let podcasts = quick_access_tiles(&app, Filter::Podcasts);
+        assert!(!podcasts.is_empty());
+        assert!(podcasts.iter().all(Tile::podcast));
+        app.backend.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Under the Podcasts chip Home shows only the podcast shelf; All brings
+    /// the music shelves back, with the newest release's hero and Show all.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn home_podcasts_chip_keeps_only_podcasts() {
+        let (mut app, root) = demo_app("home-chip-shelves");
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.reveal_theme_changes = false;
+        let text = painted(&ctx, &mut app, 1280.0);
+        for label in [
+            "All",
+            "Music",
+            "Podcasts",
+            "Made for you",
+            "New release from",
+            "New releases",
+            "Your podcasts",
+            "Show all",
+        ] {
+            assert!(text.iter().any(|text| text == label), "{label}");
+        }
+        ctx.data_mut(|data| data.insert_temp(filter_id(), Filter::Podcasts));
+        let text = painted(&ctx, &mut app, 1280.0);
+        assert!(text.iter().any(|text| text == "Your podcasts"));
+        for label in ["Made for you", "New releases", "Your top artists"] {
+            assert!(!text.iter().any(|text| text == label), "{label}");
+        }
+        ctx.data_mut(|data| data.insert_temp(filter_id(), Filter::Music));
+        let text = painted(&ctx, &mut app, 1280.0);
+        assert!(text.iter().any(|text| text == "Made for you"));
+        assert!(!text.iter().any(|text| text == "Your podcasts"));
+        app.backend.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Show all on a shelf without a page of its own lays all its cards out,
+    /// and Show less puts them back on one row.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn home_show_all_expands_a_shelf_without_a_page() {
+        let (mut app, root) = demo_app("home-show-all");
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.reveal_theme_changes = false;
+        let expanded = Id::new(("home-shelf-expanded", "made-for-you"));
+        let row = painted(&ctx, &mut app, 900.0);
+        assert!(!row.iter().any(|text| text == "Show less"));
+        ctx.data_mut(|data| data.insert_temp(expanded, true));
+        let all = painted(&ctx, &mut app, 900.0);
+        assert!(all.iter().any(|text| text == "Show less"));
+        let count = |text: &[String]| {
+            app.home
+                .made_for_you
+                .get()
+                .unwrap()
+                .iter()
+                .filter(|playlist| text.contains(&playlist.name))
+                .count()
+        };
+        assert!(count(&all) > count(&row), "every card in sight");
+        app.backend.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The wash eases toward the hovered shortcut's colour and settles there.
+    #[test]
+    fn the_wash_settles_on_its_colour() {
+        let target = egui::Rgba::from(Color32::from_rgb(120, 40, 40));
+        let mut color = egui::Rgba::TRANSPARENT;
+        let mut frames = 0;
+        while let Some(next) = ease_toward(color, target, 1.0 / 60.0) {
+            assert!(next.a() >= color.a(), "it only moves toward the colour");
+            color = next;
+            frames += 1;
+            assert!(frames < 120, "settled within two seconds");
+        }
+        assert!(frames > 3, "eased, not cut");
     }
 
     fn today() -> jiff::civil::Date {

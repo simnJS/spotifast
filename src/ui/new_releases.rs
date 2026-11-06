@@ -185,21 +185,16 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
 
 /// The unread badge beside the Home shelf's **New releases** title: how
 /// many releases were announced on the desktop and not opened on this page
-/// or What's New since, as Spotify's bell counts them. `title_at` is where
-/// the shelf put its title, `title` the text it drew; nothing is drawn while
-/// none are unread.
-pub fn shelf_badge(app: &App, ui: &egui::Ui, title_at: egui::Pos2, title: &str) {
+/// or What's New since, as Spotify's bell counts them. `title` is where the
+/// shelf drew its title; nothing is drawn while none are unread.
+pub fn shelf_badge(app: &App, ui: &egui::Ui, title: egui::Rect) {
     let unread = app.unread_new_releases();
     if unread == 0 {
         return;
     }
     let palette = app.palette;
     let painter = ui.painter();
-    let title = painter.layout_no_wrap(title.to_owned(), theme::bold(17.0), palette.text);
     let width = theme::count_pill_width(painter, &palette, unread);
-    let center = egui::pos2(
-        title_at.x + title.size().x + 6.0 + width / 2.0,
-        title_at.y + title.size().y / 2.0,
-    );
+    let center = egui::pos2(title.right() + 8.0 + width / 2.0, title.center().y);
     theme::paint_count_pill(painter, &palette, center, unread);
 }
