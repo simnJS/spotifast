@@ -1985,8 +1985,8 @@ mod tests {
                 let (ctx, mut app) = accessible_app("library-heading");
                 app.locale = locale;
                 app.settings.sidebar_width = width;
-                let heading = crate::i18n::gettext(locale, "Library").into_owned();
-                let search = crate::i18n::gettext(locale, "Search Your Library").into_owned();
+                let heading = crate::i18n::gettext(locale, "Your Library").into_owned();
+                let search = crate::i18n::gettext(locale, "Create a playlist").into_owned();
                 let mut last = None;
                 for _ in 0..2 {
                     let mut output = ctx.run_ui(
@@ -2018,7 +2018,7 @@ mod tests {
                     .iter()
                     .find(|(_, node)| node.label() == Some(search.as_str()))
                     .and_then(|(_, node)| node.bounds())
-                    .expect("the Search Your Library button");
+                    .expect("the Create button");
                 if let Some(label) = label {
                     assert!(
                         f64::from(label.right()) <= button.x0,
@@ -3274,6 +3274,8 @@ mod tests {
     #[test]
     fn the_podcasts_shelf_leaves_out_audiobooks() {
         let (ctx, mut app) = accessible_app("library-podcasts-audiobooks");
+        // Wide enough that every shelf chip shows without scrolling.
+        app.settings.sidebar_width = 600.0;
         let view = crate::ui::sidebar::show;
         view_frame(&ctx, &mut app, vec![], view);
         let painted = view_frame(&ctx, &mut app, vec![], view);
@@ -3725,6 +3727,8 @@ mod tests {
             (LibraryShelf::Podcasts, "Podcasts", Page::Podcasts),
         ] {
             let (ctx, mut app) = accessible_app(&format!("library-sort-paging-{shelf:?}"));
+            // Wide enough that every shelf chip shows without scrolling.
+            app.settings.sidebar_width = 600.0;
             let view = crate::ui::sidebar::show;
             app.settings.library_sort.insert(shelf, LibrarySort::Name);
             app.library.albums.next_offset = Some(50);
