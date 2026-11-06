@@ -9,8 +9,8 @@ use egui::Color32;
 
 use crate::api::PlayRequest;
 use crate::api::models::{
-    Album, Artist, ArtistRef, Device, PlayableItem, PlaybackState, Playlist, PlaylistItem, Queue,
-    Show, Track, TrackCount, User, UserRef, pick_image,
+    Album, Artist, ArtistRef, Device, Episode, PlayableItem, PlaybackState, Playlist, PlaylistItem,
+    Queue, Show, Track, TrackCount, User, UserRef, pick_image,
 };
 use crate::backend::{
     ApiRequest, ApiResponse, AuthStatus, Backend, Command, Event, LocalPlayback, LyricsRequest,
@@ -377,6 +377,9 @@ pub struct App {
     release_notifier: crate::notifications::Notifier,
     /// When the feed was last asked for on the notifications' schedule.
     releases_checked_at: Option<Instant>,
+    /// What the bell counted when What's New was opened: shown as new
+    /// there until the page is left, though the bell is already cleared.
+    whats_new_fresh: HashSet<String>,
     /// A hidden start's deadline for a panel to show the tray item: a start
     /// at login can beat the desktop's tray host, and without one by then
     /// the window opens, since nothing else could bring it back.
@@ -1191,6 +1194,7 @@ impl App {
             seen_releases,
             release_notifier,
             releases_checked_at: None,
+            whats_new_fresh: HashSet::new(),
             tray_wait: None,
             autostart: None,
             autostart_wanted: None,
@@ -3476,6 +3480,11 @@ impl App {
                     self.load_new_release_page(true);
                 }
             }
+            Page::WhatsNew => {
+                if self.home.new_releases.get().is_none() || self.home.refresh_failed {
+                    self.load_home(true);
+                }
+            }
             Page::Search => {}
             Page::LikedSongs => {
                 if !self.liked_songs.cache_checked {
@@ -4862,7 +4871,7 @@ impl App {
         for click in self.release_notifier.clicks() {
             let page = match click {
                 crate::notifications::Click::Album(id) => Page::Album(id),
-                crate::notifications::Click::NewReleases => Page::NewReleases,
+                crate::notifications::Click::WhatsNew => Page::WhatsNew,
             };
             self.actions.push(Action::ShowWindow);
             self.actions.push(Action::Open(page));
@@ -4878,20 +4887,77 @@ impl App {
             self.releases_checked_at = Some(Instant::now());
             self.load_new_releases();
         }
-        if !self.window_hidden
-            && *self.page() == Page::NewReleases
-            && let Some(account) = self.user_id().map(str::to_owned)
-            && self.seen_releases.mark_read(&account)
-        {
-            self.save_seen_releases();
+        if *self.page() != Page::WhatsNew {
+            self.whats_new_fresh.clear();
+        }
+        let Some(account) = self.user_id().map(str::to_owned) else {
+            return;
+        };
+        if self.window_hidden {
+            return;
+        }
+        match self.page() {
+            Page::NewReleases => {
+                if self.seen_releases.mark_releases_read(&account) {
+                    self.save_seen_releases();
+                }
+            }
+            Page::WhatsNew => {
+                let unread = self.seen_releases.take_unread(&account);
+                if !unread.is_empty() {
+                    self.whats_new_fresh.extend(unread);
+                    self.save_seen_releases();
+                }
+            }
+            _ => {}
         }
     }
 
     /// Releases on the New releases entry's badge: announced, and not seen
-    /// on its page since.
+    /// on its page or What's New since.
     pub fn unread_new_releases(&self) -> usize {
         self.user_id()
+            .map_or(0, |account| self.seen_releases.unread_releases(account))
+    }
+
+    /// Replaces what the demo account has seen of the feed.
+    #[cfg(any(test, feature = "demo"))]
+    pub(crate) fn demo_seen_releases(&mut self, state: crate::notifications::ReleaseState) {
+        self.seen_releases = state;
+    }
+
+    /// What the bell counts: releases and episodes not seen on What's New
+    /// since they arrived.
+    pub fn unread_whats_new(&self) -> usize {
+        self.user_id()
             .map_or(0, |account| self.seen_releases.unread(account))
+    }
+
+    /// Whether What's New shows `uri` as new: still on the bell, or on it
+    /// when the page was opened.
+    pub fn is_whats_new_unread(&self, uri: &str) -> bool {
+        self.whats_new_fresh.contains(uri)
+            || self
+                .user_id()
+                .is_some_and(|account| self.seen_releases.is_unread(account, uri))
+    }
+
+    /// Remembers the recent episodes among `episodes`; the account's first
+    /// ones only seed, later ones go on the bell.
+    fn observe_new_episodes<'a>(&mut self, episodes: impl IntoIterator<Item = &'a Episode>) {
+        let Some(account) = self.user_id().map(str::to_owned) else {
+            return;
+        };
+        let today = jiff::Zoned::now().date();
+        let uris = episodes
+            .into_iter()
+            .filter(|episode| {
+                crate::new_releases::is_recent(episode.release_date.as_deref(), today)
+            })
+            .map(|episode| episode.uri.as_str());
+        if self.seen_releases.observe_episodes(&account, uris) {
+            self.save_seen_releases();
+        }
     }
 
     /// Announces the releases the feed did not hold before. The account's
@@ -4916,7 +4982,7 @@ impl App {
         if plan.more > 0 {
             self.release_notifier.show(
                 crate::notifications::more_notification(plan.more, self.locale),
-                crate::notifications::Click::NewReleases,
+                crate::notifications::Click::WhatsNew,
             );
         }
     }
@@ -5680,6 +5746,12 @@ impl App {
             Page::NewReleases => {
                 if self.network_reachable {
                     self.load_new_release_page(false);
+                }
+            }
+            Page::WhatsNew => {
+                // Home reads both the releases and the podcasts' episodes.
+                if self.network_reachable {
+                    self.load_home(self.home.refresh_failed);
                 }
             }
             Page::Search => {}
@@ -6460,6 +6532,7 @@ impl App {
                 self.load_new_releases();
                 self.load_new_release_page(true);
             }
+            Page::WhatsNew => self.load_home(true),
             Page::LikedSongs => {
                 self.refresh_liked_songs();
                 return;
@@ -7910,12 +7983,15 @@ impl App {
                 generation,
                 result,
                 from_feed,
+                episodes,
             } => {
                 if generation != self.home.new_releases_generation {
                     return;
                 }
                 if from_feed && let Ok(albums) = &result {
                     self.announce_new_releases(albums);
+                    self.observe_new_episodes(&episodes);
+                    self.home.feed_episodes = episodes;
                 }
                 let changed = result.is_ok();
                 self.home.refresh_failed |= !changed;
@@ -8638,6 +8714,7 @@ impl App {
             ApiResponse::HomeEpisodes { generation, .. } if generation != self.home.generation => {}
             ApiResponse::HomeEpisodes { result, .. } => match result {
                 Ok(podcasts) => {
+                    self.observe_new_episodes(podcasts.iter().flat_map(|(_, episodes)| episodes));
                     self.home.podcasts = podcasts;
                     self.home.podcasts_answered = true;
                     self.store_home_cache();
@@ -17022,6 +17099,7 @@ mod tests {
             generation: app.home.new_releases_generation,
             result: Err(crate::api::ApiError::RateLimited),
             from_feed: false,
+            episodes: Vec::new(),
         });
 
         // The failed shelf refresh keeps its cached cards. Successful
@@ -32439,6 +32517,7 @@ mod tests {
             generation: first,
             result: Ok(vec![release("newest"), release("older")]),
             from_feed: false,
+            episodes: Vec::new(),
         });
         assert_eq!(app.home.new_releases.get().map(Vec::len), Some(2));
         assert!(!app.home.new_releases_loading);
@@ -32449,11 +32528,13 @@ mod tests {
             generation: first,
             result: Ok(Vec::new()),
             from_feed: false,
+            episodes: Vec::new(),
         });
         app.handle_api(ApiResponse::NewReleases {
             generation: app.home.new_releases_generation,
             result: Err(crate::api::ApiError::RateLimited),
             from_feed: false,
+            episodes: Vec::new(),
         });
         assert_eq!(app.home.new_releases.get().map(Vec::len), Some(2));
         assert!(app.home.refresh_failed);
@@ -32480,6 +32561,7 @@ mod tests {
                 generation: app.home.new_releases_generation,
                 result: Ok(albums),
                 from_feed,
+                episodes: Vec::new(),
             });
         };
         answer(&mut app, vec![release("older")], true);
@@ -32505,6 +32587,80 @@ mod tests {
         assert!(app.flush_files());
         let saved = crate::notifications::ReleaseState::load(&app.dirs.seen_releases_file());
         assert_eq!(saved.unread("alice"), 0);
+        app.backend.shutdown();
+    }
+
+    /// The bell counts the feed's new releases and episodes until What's
+    /// New is opened; the page still marks them as new while it is on
+    /// screen, the bell clears here only, and the summary notification
+    /// opens the page.
+    #[test]
+    fn whats_new_clears_the_bell_locally_and_keeps_its_new_marks_while_open() {
+        let mut app = test_app("whats-new-bell");
+        app.backend.set_offline(true);
+        app.window_hidden = false;
+        app.user = Some(User {
+            id: "alice".into(),
+            ..Default::default()
+        });
+        let today = jiff::Zoned::now().date().to_string();
+        let episode = |id: &str| Episode {
+            id: id.into(),
+            uri: format!("spotify:episode:{id}"),
+            name: id.into(),
+            release_date: Some(today.clone()),
+            ..Default::default()
+        };
+        let answer = |app: &mut App, albums: Vec<Album>, episodes: Vec<Episode>| {
+            app.load_new_releases();
+            app.handle_api(ApiResponse::NewReleases {
+                generation: app.home.new_releases_generation,
+                result: Ok(albums),
+                from_feed: true,
+                episodes,
+            });
+        };
+        answer(&mut app, vec![release("older")], vec![episode("talk")]);
+        assert_eq!(app.unread_whats_new(), 0, "the first answer only seeds");
+        answer(
+            &mut app,
+            vec![release("newest"), release("older")],
+            vec![episode("fresh"), episode("talk")],
+        );
+        assert_eq!(app.home.feed_episodes.len(), 2);
+        assert_eq!(app.unread_whats_new(), 2);
+        assert_eq!(app.unread_new_releases(), 1, "the shelf counts releases");
+
+        app.open(Page::WhatsNew);
+        app.sync_release_notifications();
+        assert_eq!(
+            app.unread_whats_new(),
+            0,
+            "opening the page clears the bell"
+        );
+        assert!(app.is_whats_new_unread("spotify:album:newest"));
+        assert!(app.is_whats_new_unread("spotify:episode:fresh"));
+        assert!(!app.is_whats_new_unread("spotify:episode:talk"));
+        assert!(app.flush_files());
+        let saved = crate::notifications::ReleaseState::load(&app.dirs.seen_releases_file());
+        assert_eq!(saved.unread("alice"), 0);
+
+        app.open(Page::Home);
+        app.sync_release_notifications();
+        assert!(
+            !app.is_whats_new_unread("spotify:album:newest"),
+            "leaving the page files them under Earlier"
+        );
+
+        app.release_notifier
+            .click_for_test(crate::notifications::Click::WhatsNew);
+        app.actions.clear();
+        app.sync_release_notifications();
+        assert!(
+            app.actions
+                .iter()
+                .any(|action| matches!(action, Action::Open(Page::WhatsNew)))
+        );
         app.backend.shutdown();
     }
 

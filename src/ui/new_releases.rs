@@ -185,9 +185,9 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
 
 /// The unread badge beside the Home shelf's **New releases** title: how
 /// many releases were announced on the desktop and not opened on this page
-/// since, as Spotify's bell counts them. `title_at` is where the shelf put
-/// its title, `title` the text it drew; nothing is drawn while none are
-/// unread.
+/// or What's New since, as Spotify's bell counts them. `title_at` is where
+/// the shelf put its title, `title` the text it drew; nothing is drawn while
+/// none are unread.
 pub fn shelf_badge(app: &App, ui: &egui::Ui, title_at: egui::Pos2, title: &str) {
     let unread = app.unread_new_releases();
     if unread == 0 {
@@ -196,22 +196,10 @@ pub fn shelf_badge(app: &App, ui: &egui::Ui, title_at: egui::Pos2, title: &str) 
     let palette = app.palette;
     let painter = ui.painter();
     let title = painter.layout_no_wrap(title.to_owned(), theme::bold(17.0), palette.text);
-    let count = painter.layout_no_wrap(
-        if unread > 99 {
-            "99+".to_owned()
-        } else {
-            unread.to_string()
-        },
-        theme::bold(10.5),
-        palette.on_accent,
-    );
-    let height = 16.0;
-    let size = egui::vec2((count.size().x + 10.0).max(height), height);
+    let width = theme::count_pill_width(painter, &palette, unread);
     let center = egui::pos2(
-        title_at.x + title.size().x + 6.0 + size.x / 2.0,
+        title_at.x + title.size().x + 6.0 + width / 2.0,
         title_at.y + title.size().y / 2.0,
     );
-    let rect = egui::Rect::from_center_size(center, size);
-    painter.rect_filled(rect, height / 2.0, palette.accent);
-    painter.galley(rect.center() - count.size() / 2.0, count, palette.on_accent);
+    theme::paint_count_pill(painter, &palette, center, unread);
 }

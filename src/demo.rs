@@ -689,11 +689,15 @@ pub fn populate(app: &mut App) {
     app.home.recommendations = Loadable::Loaded(tracks.iter().skip(20).take(10).cloned().collect());
     app.home.made_for_you = Loadable::Loaded(playlists.iter().take(10).cloned().collect());
     app.home.top_mixes = Loadable::Loaded((0..TOP_MIXES.len()).map(top_mix).collect());
-    // New releases: this autumn's records, newest first, and their songs.
+    // New releases: the last month's records, newest first, and their
+    // songs, dated from today so What's New keeps listing them.
     let releases: Vec<Album> = (0..8)
         .map(|index| {
             let mut release = album(index);
-            release.release_date = Some(format!("2026-10-{:02}", 16 - index * 2));
+            release.release_date = today
+                .checked_sub(jiff::Span::new().days(1 + index as i64 * 4))
+                .ok()
+                .map(|date| date.to_string());
             release
         })
         .collect();
@@ -713,6 +717,30 @@ pub fn populate(app: &mut App) {
             .collect(),
     );
     app.home.new_release_tracks_for = releases.iter().map(|release| release.uri.clone()).collect();
+    // What's New: one episode from the feed, and the bell counting the two
+    // newest releases and that episode; the rest were seen before.
+    let mut feed_episode = episode(9, 2);
+    feed_episode.release_date = Some(today.to_string());
+    feed_episode.resume_point = None;
+    let mut unread: Vec<String> = releases
+        .iter()
+        .take(2)
+        .map(|release| release.uri.clone())
+        .collect();
+    unread.push(feed_episode.uri.clone());
+    app.demo_seen_releases(crate::notifications::ReleaseState {
+        version: 0,
+        accounts: [(
+            "demo".to_owned(),
+            crate::notifications::AccountReleases {
+                seen: releases.iter().map(|release| release.uri.clone()).collect(),
+                unread,
+                episodes: Some(vec![feed_episode.uri.clone()]),
+            },
+        )]
+        .into(),
+    });
+    app.home.feed_episodes = vec![feed_episode];
     app.home.new_releases = Loadable::Loaded(releases);
 
     // Search.
@@ -1544,6 +1572,16 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
             }
             "dark" => {
                 app.settings.theme = crate::settings::ThemeChoice::Dark;
+                app.actions.push(Action::SettingsChanged);
+            }
+            // The bundled Spotify palette, as if picked in Settings.
+            "spotify-theme" => {
+                app.settings.theme = crate::settings::ThemeChoice::Dark;
+                app.settings.custom_theme = Some("Spotify.json".into());
+                app.settings.custom_theme_cache = Some(crate::theme::CustomTheme {
+                    filename: "Spotify.json".into(),
+                    palette: crate::theme::spotify_palette(),
+                });
                 app.actions.push(Action::SettingsChanged);
             }
             // Follow system on a desktop fixed light or dark (Linux), for
@@ -6890,6 +6928,186 @@ mod tests {
         app.backend.shutdown();
     }
 
+    fn whats_new_palettes() -> [(&'static str, crate::theme::Palette); 3] {
+        [
+            ("dark", crate::theme::Palette::dark()),
+            ("light", crate::theme::Palette::light()),
+            ("spotify", crate::theme::spotify_palette()),
+        ]
+    }
+
+    fn find<'a>(text: &'a [(String, egui::Rect)], label: &str) -> &'a egui::Rect {
+        &text
+            .iter()
+            .find(|(text, _)| text == label)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{label} missing from {:?}",
+                    text.iter().map(|(text, _)| text).collect::<Vec<_>>()
+                )
+            })
+            .1
+    }
+
+    /// What's New lists the unread releases and the feed's episode under
+    /// New, the rest under Earlier, and its chips narrow the list.
+    #[test]
+    fn the_whats_new_page_lists_new_then_earlier_and_filters() {
+        for (name, palette) in whats_new_palettes() {
+            let (ctx, mut app) = accessible_app(&format!("whats-new-page-{name}"));
+            app.palette = palette;
+            crate::theme::apply(&ctx, &palette);
+            let view = crate::ui::whats_new::page;
+            let releases = app.home.new_releases.get().unwrap().clone();
+            let feed_episode = app.home.feed_episodes[0].name.clone();
+            view_frame(&ctx, &mut app, vec![], view);
+            let text = view_frame(&ctx, &mut app, vec![], view);
+            for label in ["What's new", "All", "Music", "Podcasts & Shows", "Today"] {
+                find(&text, label);
+            }
+            let new = find(&text, "New").top();
+            let earlier = find(&text, "Earlier").top();
+            let unread = find(&text, &releases[0].name).top();
+            let seen = find(&text, &releases[4].name).top();
+            assert!(new < unread && unread < earlier && earlier < seen);
+            assert!(find(&text, &feed_episode).top() < earlier);
+            assert!(text.iter().any(|(text, _)| text.starts_with("Single • ")
+                || text.starts_with("Album • ")
+                || text.starts_with("EP • ")));
+            assert!(text.iter().any(|(text, _)| text.starts_with("Episode • ")));
+
+            // A row opens its release.
+            let row = *find(&text, &releases[0].name);
+            app.actions.clear();
+            view_frame(
+                &ctx,
+                &mut app,
+                pointer_click(row.center(), egui::PointerButton::Primary),
+                view,
+            );
+            assert!(app.actions.iter().any(|action| matches!(
+                action,
+                Action::Open(Page::Album(id)) if *id == releases[0].id
+            )));
+
+            // Music leaves the episodes out, Podcasts & Shows the releases.
+            let music = *find(&text, "Music");
+            view_frame(
+                &ctx,
+                &mut app,
+                pointer_click(music.center(), egui::PointerButton::Primary),
+                view,
+            );
+            let text = view_frame(&ctx, &mut app, vec![], view);
+            find(&text, &releases[0].name);
+            assert!(!text.iter().any(|(text, _)| *text == feed_episode));
+            let podcasts = *find(&text, "Podcasts & Shows");
+            view_frame(
+                &ctx,
+                &mut app,
+                pointer_click(podcasts.center(), egui::PointerButton::Primary),
+                view,
+            );
+            let text = view_frame(&ctx, &mut app, vec![], view);
+            find(&text, &feed_episode);
+            assert!(!text.iter().any(|(text, _)| *text == releases[0].name));
+            app.backend.shutdown();
+        }
+    }
+
+    #[test]
+    fn the_whats_new_page_says_when_there_is_nothing_new() {
+        let (ctx, mut app) = accessible_app("whats-new-empty");
+        app.home.new_releases = Loadable::Loaded(Vec::new());
+        app.home.feed_episodes.clear();
+        app.home.podcasts.clear();
+        let view = crate::ui::whats_new::page;
+        view_frame(&ctx, &mut app, vec![], view);
+        let text = view_frame(&ctx, &mut app, vec![], view);
+        find(&text, "Nothing new yet");
+        app.home.new_releases = Loadable::Loading;
+        let text = view_frame(&ctx, &mut app, vec![], view);
+        assert!(!text.iter().any(|(text, _)| text == "Nothing new yet"));
+        app.backend.shutdown();
+    }
+
+    /// The bell sits at the right end of the top bar with its count, at a
+    /// normal and at the narrowest width, in every palette, never over the
+    /// search field, and opens What's New.
+    #[test]
+    fn the_top_bar_bell_shows_its_count_and_opens_whats_new() {
+        for (name, palette) in whats_new_palettes() {
+            for width in [
+                1280.0,
+                crate::ui::topbar::least_width(&egui::Context::default()),
+            ] {
+                let (ctx, mut app) = accessible_app(&format!("whats-new-bell-{name}-{width}"));
+                app.palette = palette;
+                crate::theme::apply(&ctx, &palette);
+                let size = egui::vec2(width, 120.0);
+                let view = crate::ui::topbar::show;
+                view_frame_sized(&ctx, &mut app, vec![], view, size);
+                let text = view_frame_sized(&ctx, &mut app, vec![], view, size);
+                assert_eq!(app.unread_whats_new(), 3);
+                let pill = *find(&text, "3");
+                assert!(pill.right() <= width, "the pill stays on screen at {width}");
+                if let Some((_, field)) = text
+                    .iter()
+                    .find(|(text, _)| text.starts_with("What do you want"))
+                {
+                    assert!(
+                        field.right() < pill.left(),
+                        "the bell is clear of the field"
+                    );
+                }
+                app.actions.clear();
+                let bell = pill.center() + egui::vec2(-7.0, 8.0);
+                view_frame_sized(
+                    &ctx,
+                    &mut app,
+                    pointer_click(bell, egui::PointerButton::Primary),
+                    view,
+                    size,
+                );
+                assert!(
+                    app.actions
+                        .iter()
+                        .any(|action| matches!(action, Action::Open(Page::WhatsNew))),
+                    "the bell opens What's New at {width}"
+                );
+                app.backend.shutdown();
+            }
+        }
+    }
+
+    #[test]
+    fn the_bell_caps_its_count_and_hides_it_once_read() {
+        let (ctx, mut app) = accessible_app("whats-new-bell-cap");
+        let mut state = crate::notifications::ReleaseState::default();
+        state.accounts.insert(
+            "demo".into(),
+            crate::notifications::AccountReleases {
+                unread: (0..120).map(|n| format!("spotify:album:{n}")).collect(),
+                ..Default::default()
+            },
+        );
+        app.demo_seen_releases(state);
+        let view = crate::ui::topbar::show;
+        let size = egui::vec2(1280.0, 120.0);
+        view_frame_sized(&ctx, &mut app, vec![], view, size);
+        let text = view_frame_sized(&ctx, &mut app, vec![], view, size);
+        find(&text, "99+");
+
+        // Opening the page clears the bell, here only.
+        app.window_hidden = false;
+        app.open(Page::WhatsNew);
+        app.background_frame(&ctx);
+        assert_eq!(app.unread_whats_new(), 0);
+        let text = view_frame_sized(&ctx, &mut app, vec![], view, size);
+        assert!(!text.iter().any(|(text, _)| text == "99+"));
+        app.backend.shutdown();
+    }
+
     #[test]
     fn home_cards_open_item_menus() {
         for (section, title, uri, labels) in [
@@ -8573,6 +8791,7 @@ mod tests {
             Page::Album("alb0".into()),
             Page::Artist("art0".into()),
             Page::Show("sh0".into()),
+            Page::WhatsNew,
             Page::Queue,
             Page::Settings,
         ];

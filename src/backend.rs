@@ -460,6 +460,9 @@ pub enum ApiResponse {
         /// Whether the releases are Spotify's own What's New feed rather
         /// than the Web API's stand-in, which alone may be announced.
         from_feed: bool,
+        /// The podcast episodes the feed held, newest first; none from the
+        /// stand-in.
+        episodes: Vec<Episode>,
     },
     NewReleaseTracks {
         generation: u64,
@@ -5216,30 +5219,27 @@ const UNSUPPORTED_DJ_URI: &str = "spotify:playlist:37i9dQZF1EYkqdzj48dyYq";
 /// Search is an approximation, used only when Spotify's personalized Home
 /// section cannot be read.
 /// Releases from Spotify's own new-releases feed over the playback session,
-/// or, when that cannot answer, from the Web API's followed artists. The
-/// flag tells the feed's answer apart.
+/// or, when that cannot answer, from the Web API's followed artists. Only
+/// the feed's answer comes with its episodes, which tell it apart.
 async fn read_new_releases(
     api: &ApiGateway,
     new_releases: &crate::new_releases::NewReleases,
     engine: Option<&Engine>,
     background_session: &tokio::sync::Semaphore,
-) -> (ApiResult<Vec<Album>>, bool) {
+) -> (ApiResult<Vec<Album>>, Option<Vec<Episode>>) {
     if let Some(engine) = engine {
         let _permit = background_session.acquire().await.ok();
         match new_releases.feed(engine.session()).await {
-            Ok(albums) => {
+            Ok(feed) => {
                 log::debug!("Spotify route operation=NewReleases source=session");
-                return (Ok(albums), true);
+                return (Ok(feed.albums), Some(feed.episodes));
             }
             Err(error) => {
                 log::warn!("New releases session read failed; asking the Web API: {error}");
             }
         }
     }
-    (
-        read_followed_artist_releases(api, new_releases).await,
-        false,
-    )
+    (read_followed_artist_releases(api, new_releases).await, None)
 }
 
 /// The Web API's stand-in for the feed, kept for a while per account.
@@ -5508,7 +5508,7 @@ async fn handle(
         engine.filter(|engine| same_account(&engine.session().username(), api.account().as_ref()));
     if let ApiRequest::NewReleases { generation } = request {
         let mut expired = Vec::new();
-        let (result, from_feed) =
+        let (result, episodes) =
             read_new_releases(api, new_releases, session_engine, background_session).await;
         let result = match result {
             Err(ApiError::SignInExpired { api_source }) => {
@@ -5521,7 +5521,8 @@ async fn handle(
             ApiResponse::NewReleases {
                 generation,
                 result,
-                from_feed,
+                from_feed: episodes.is_some(),
+                episodes: episodes.unwrap_or_default(),
             },
             expired,
         );

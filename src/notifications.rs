@@ -7,8 +7,10 @@
 //! an unreadable one are seeded silently, so the first start never floods
 //! the desktop. Afterwards each release the feed adds is announced once, at
 //! most [`MAX_SHOWN`] at a time with one summary for the rest, and counted on
-//! the New releases entry until that page is opened. Nothing is sent back to
-//! Spotify: the feed stays unread in Spotify's apps.
+//! the New releases entry until that page is opened. New podcast episodes are
+//! remembered the same way, without a notification of their own. The bell in
+//! the top bar counts both until the What's New page is opened. Nothing is
+//! sent back to Spotify: the feed stays unread in Spotify's apps.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -42,9 +44,18 @@ pub struct AccountReleases {
     /// Release URIs already read in the feed, oldest first.
     #[serde(default)]
     pub seen: Vec<String>,
-    /// Releases announced since the New releases page was last opened.
+    /// Releases announced since the New releases page was last opened,
+    /// and episodes since What's New was, by URI, oldest first.
     #[serde(default)]
     pub unread: Vec<String>,
+    /// Podcast episode URIs already seen, oldest first; `None` until the
+    /// account's first episodes seed it, as `seen` is for releases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episodes: Option<Vec<String>>,
+}
+
+fn is_release(uri: &str) -> bool {
+    uri.starts_with("spotify:album:")
 }
 
 /// The seen releases of every account signed in here.
@@ -115,7 +126,7 @@ impl ReleaseState {
                 account.to_owned(),
                 AccountReleases {
                     seen,
-                    unread: Vec::new(),
+                    ..AccountReleases::default()
                 },
             );
             return (Plan::default(), true);
@@ -146,18 +157,80 @@ impl ReleaseState {
         (Plan { shown, more }, true)
     }
 
-    /// Releases announced to `account` since it last opened New releases.
+    /// Takes in the newest episodes of the account's podcasts. The first
+    /// ones only seed what it has seen, and nothing is counted before the
+    /// account's releases are seeded, so a first start never fills the bell.
+    /// Answers whether the state needs saving.
+    pub fn observe_episodes<'a>(
+        &mut self,
+        account: &str,
+        uris: impl IntoIterator<Item = &'a str>,
+    ) -> bool {
+        let Some(known) = self.accounts.get_mut(account) else {
+            return false;
+        };
+        let seeding = known.episodes.is_none();
+        let seen = known.episodes.get_or_insert_with(Vec::new);
+        let mut changed = seeding;
+        for uri in uris {
+            if uri.is_empty() || seen.iter().any(|known| known == uri) {
+                continue;
+            }
+            seen.push(uri.to_owned());
+            if !seeding {
+                known.unread.push(uri.to_owned());
+            }
+            changed = true;
+        }
+        let over = seen.len().saturating_sub(REMEMBERED);
+        seen.drain(..over);
+        let over = known.unread.len().saturating_sub(REMEMBERED);
+        known.unread.drain(..over);
+        changed
+    }
+
+    /// Everything the bell counts for `account`: releases and episodes not
+    /// opened since they arrived.
     pub fn unread(&self, account: &str) -> usize {
         self.accounts
             .get(account)
             .map_or(0, |account| account.unread.len())
     }
 
-    /// Clears the badge, here only. Answers whether anything changed.
-    pub fn mark_read(&mut self, account: &str) -> bool {
+    /// The releases alone, which Home's New releases shelf counts.
+    pub fn unread_releases(&self, account: &str) -> usize {
+        self.accounts.get(account).map_or(0, |account| {
+            account.unread.iter().filter(|uri| is_release(uri)).count()
+        })
+    }
+
+    pub fn is_unread(&self, account: &str, uri: &str) -> bool {
+        self.accounts
+            .get(account)
+            .is_some_and(|account| account.unread.iter().any(|known| known == uri))
+    }
+
+    /// Clears the bell, here only, and hands back what it counted.
+    pub fn take_unread(&mut self, account: &str) -> Vec<String> {
         self.accounts
             .get_mut(account)
-            .is_some_and(|account| !std::mem::take(&mut account.unread).is_empty())
+            .map(|account| std::mem::take(&mut account.unread))
+            .unwrap_or_default()
+    }
+
+    /// Clears the bell, here only. Answers whether anything changed.
+    pub fn mark_read(&mut self, account: &str) -> bool {
+        !self.take_unread(account).is_empty()
+    }
+
+    /// Clears the releases only, as the New releases page shows no
+    /// episodes. Answers whether anything changed.
+    pub fn mark_releases_read(&mut self, account: &str) -> bool {
+        self.accounts.get_mut(account).is_some_and(|account| {
+            let before = account.unread.len();
+            account.unread.retain(|uri| !is_release(uri));
+            account.unread.len() != before
+        })
     }
 }
 
@@ -166,8 +239,8 @@ impl ReleaseState {
 pub enum Click {
     /// Open this album.
     Album(String),
-    /// Open the New releases page.
-    NewReleases,
+    /// Open the What's New page.
+    WhatsNew,
 }
 
 /// The desktop's notification service, with the clicks it reports.
@@ -239,6 +312,12 @@ impl Notifier {
                 }
             }
         }
+    }
+
+    /// Reports a click as the desktop would.
+    #[cfg(test)]
+    pub fn click_for_test(&self, click: Click) {
+        let _ = self.sender.send(click);
     }
 
     /// The clicks reported since the last call.
@@ -461,6 +540,44 @@ mod tests {
         assert_eq!(state.unread("me"), 0);
         assert!(!state.mark_read("me"));
         assert!(!state.mark_read("nobody"));
+    }
+
+    #[test]
+    fn episodes_seed_after_the_releases_then_count_on_the_bell_only() {
+        let mut state = ReleaseState::default();
+        assert!(
+            !state.observe_episodes("me", ["spotify:episode:a"]),
+            "nothing is counted before the releases seed the account"
+        );
+        state.observe("me", &feed(0..1));
+        assert!(state.observe_episodes("me", ["spotify:episode:a"]));
+        assert_eq!(state.unread("me"), 0, "the first episodes only seed");
+        assert!(!state.observe_episodes("me", ["spotify:episode:a"]));
+        assert!(state.observe_episodes("me", ["spotify:episode:b", "spotify:episode:a"]));
+        state.observe("me", &feed(0..2));
+        assert_eq!(state.unread("me"), 2);
+        assert_eq!(state.unread_releases("me"), 1);
+        assert!(state.is_unread("me", "spotify:episode:b"));
+        assert!(!state.is_unread("me", "spotify:episode:a"));
+
+        // New releases shows no episodes, so it leaves them on the bell.
+        assert!(state.mark_releases_read("me"));
+        assert_eq!(state.unread("me"), 1);
+        assert!(!state.mark_releases_read("me"));
+        assert_eq!(state.take_unread("me"), ["spotify:episode:b"]);
+        assert_eq!(state.unread("me"), 0);
+    }
+
+    #[test]
+    fn a_file_from_before_episodes_still_reads() {
+        let old = r#"{"version":1,"accounts":{"me":{"seen":["spotify:album:a"],"unread":["spotify:album:a"]}}}"#;
+        let mut state = ReleaseState::decode(old).unwrap();
+        assert_eq!(state.unread("me"), 1);
+        assert_eq!(state.accounts["me"].episodes, None);
+        assert!(state.observe_episodes("me", ["spotify:episode:a"]));
+        assert_eq!(state.unread("me"), 1, "the first episodes still seed");
+        let text = state.encode().unwrap();
+        assert_eq!(ReleaseState::decode(&text).unwrap(), state);
     }
 
     #[test]

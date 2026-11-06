@@ -1,5 +1,5 @@
 //! The latest releases from the artists the account follows, for Home's
-//! **New releases** shelf and the page it opens.
+//! **New releases** shelf, the page it opens and the What's New page.
 //!
 //! Spotify's own apps read them from the private Pathfinder feed behind their
 //! "What's New" bell (`queryWhatsNewFeed`), with the playback session's tokens.
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use librespot_core::Session;
 
 use crate::api::ApiError;
-use crate::api::models::{Album, ArtistRef, Image};
+use crate::api::models::{Album, ArtistRef, Episode, Image, Show};
 use crate::http::Http;
 
 const ENDPOINT: &str = "https://api-partner.spotify.com/pathfinder/v2/query";
@@ -31,6 +31,15 @@ pub const FALLBACK_ARTISTS: usize = 50;
 /// each followed artist, and releases come out once a day at most.
 const FALLBACK_AGE: Duration = Duration::from_secs(60 * 60);
 
+/// What one answer from the feed holds, each list newest first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Feed {
+    /// Albums, singles and EPs, without repeats, at most [`LIMIT`].
+    pub albums: Vec<Album>,
+    /// Podcast episodes, with their show, without repeats.
+    pub episodes: Vec<Episode>,
+}
+
 /// The feed reader, with the Web API stand-in's last answer for one account.
 pub struct NewReleases {
     http: Http,
@@ -46,7 +55,7 @@ impl NewReleases {
     }
 
     /// Reads the account's feed of new releases over the playback session.
-    pub async fn feed(&self, session: &Session) -> Result<Vec<Album>, ApiError> {
+    pub async fn feed(&self, session: &Session) -> Result<Feed, ApiError> {
         tokio::time::timeout(TIMEOUT, read_feed(session, &self.http))
             .await
             .map_err(|_| {
@@ -69,7 +78,7 @@ impl NewReleases {
     }
 }
 
-async fn read_feed(session: &Session, http: &Http) -> Result<Vec<Album>, ApiError> {
+async fn read_feed(session: &Session, http: &Http) -> Result<Feed, ApiError> {
     let client = http.client().map_err(ApiError::Network)?;
     let token = session
         .login5()
@@ -115,7 +124,8 @@ fn response_error() -> ApiError {
 }
 
 /// The first page of the feed, albums only, as Spotify's web player asks
-/// for it.
+/// for it. [`parse`] still reads the episodes an answer holds, and the What's
+/// New page adds the followed shows' newest episodes from the Web API.
 fn query() -> serde_json::Value {
     serde_json::json!({
         "operationName": "queryWhatsNewFeed",
@@ -130,10 +140,11 @@ fn query() -> serde_json::Value {
     })
 }
 
-/// The releases in a feed answer, newest first. Items that are not albums,
-/// such as episodes or event notices, are passed over; an answer without the
-/// feed at all is an error rather than an empty shelf.
-fn parse(body: &serde_json::Value) -> Result<Vec<Album>, ApiError> {
+/// The items of a feed answer, newest first: the releases, as the shelf
+/// has always read them, and the podcast episodes. Any other kind, such as
+/// an event notice or one Spotify adds later, is passed over; an answer
+/// without the feed at all is an error rather than an empty shelf.
+fn parse(body: &serde_json::Value) -> Result<Feed, ApiError> {
     if body.get("errors").is_some_and(|errors| {
         !errors.is_null() && errors.as_array().is_none_or(|errors| !errors.is_empty())
     }) {
@@ -144,24 +155,98 @@ fn parse(body: &serde_json::Value) -> Result<Vec<Album>, ApiError> {
         .and_then(|items| items.as_array())
         .ok_or_else(response_error)?;
     let mut albums = Vec::new();
+    let mut episodes: Vec<Episode> = Vec::new();
     for item in items {
-        if item
-            .pointer("/content/__typename")
-            .and_then(|kind| kind.as_str())
-            != Some("AlbumResponseWrapper")
-        {
-            continue;
-        }
         let Some(data) = item.pointer("/content/data") else {
             continue;
         };
-        if let Some(album) = album(data)
-            && !albums.iter().any(|known: &Album| known.uri == album.uri)
+        match item
+            .pointer("/content/__typename")
+            .and_then(|kind| kind.as_str())
         {
-            albums.push(album);
+            Some("AlbumResponseWrapper") => {
+                if let Some(album) = album(data)
+                    && !albums.iter().any(|known: &Album| known.uri == album.uri)
+                {
+                    albums.push(album);
+                }
+            }
+            Some("EpisodeOrChapterResponseWrapper") => {
+                if let Some(episode) = episode(data)
+                    && !episodes.iter().any(|known| known.uri == episode.uri)
+                {
+                    episodes.push(episode);
+                }
+            }
+            _ => {}
         }
     }
-    Ok(newest_first(albums))
+    episodes.sort_by(|a, b| b.release_date.cmp(&a.release_date));
+    Ok(Feed {
+        albums: newest_first(albums),
+        episodes,
+    })
+}
+
+/// A 22-character base62 ID behind `prefix` in `uri`.
+fn spotify_id<'a>(uri: &'a str, prefix: &str) -> Option<&'a str> {
+    uri.strip_prefix(prefix)
+        .filter(|id| id.len() == 22 && id.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+}
+
+fn images(sources: Option<&serde_json::Value>) -> Vec<Image> {
+    sources
+        .and_then(|sources| sources.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|source| serde_json::from_value::<Image>(source.clone()).ok())
+        .filter(|image| image.url.starts_with("https://"))
+        .collect()
+}
+
+/// A podcast episode card, with the show it belongs to when the card names
+/// it. Audiobook chapters, which share the card's wrapper, are left out.
+fn episode(data: &serde_json::Value) -> Option<Episode> {
+    if data.get("__typename").and_then(|kind| kind.as_str()) != Some("Episode") {
+        return None;
+    }
+    let uri = data.get("uri")?.as_str()?;
+    let id = spotify_id(uri, "spotify:episode:")?;
+    let name = data.get("name")?.as_str()?;
+    let release_date = data
+        .pointer("/releaseDate/isoString")
+        .and_then(|date| date.as_str())
+        .map(|date| release_date(date, data.pointer("/releaseDate/precision")));
+    let duration_ms = data
+        .pointer("/duration/totalMilliseconds")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|ms| u32::try_from(ms).ok())
+        .unwrap_or(0);
+    let show = data.pointer("/podcastV2/data").and_then(|show| {
+        let uri = show.get("uri")?.as_str()?;
+        let id = spotify_id(uri, "spotify:show:")?;
+        Some(Show {
+            id: id.to_owned(),
+            uri: uri.to_owned(),
+            name: show
+                .get("name")
+                .and_then(|name| name.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            images: images(show.pointer("/coverArt/sources")),
+            ..Show::default()
+        })
+    });
+    Some(Episode {
+        id: id.to_owned(),
+        uri: uri.to_owned(),
+        name: name.to_owned(),
+        duration_ms,
+        images: images(data.pointer("/coverArt/sources")),
+        release_date,
+        show,
+        ..Episode::default()
+    })
 }
 
 fn album(data: &serde_json::Value) -> Option<Album> {
@@ -169,9 +254,7 @@ fn album(data: &serde_json::Value) -> Option<Album> {
         return None;
     }
     let uri = data.get("uri")?.as_str()?;
-    let id = uri
-        .strip_prefix("spotify:album:")
-        .filter(|id| id.len() == 22 && id.bytes().all(|byte| byte.is_ascii_alphanumeric()))?;
+    let id = spotify_id(uri, "spotify:album:")?;
     let name = data.get("name")?.as_str()?;
     let album_type = data
         .get("albumType")
@@ -198,14 +281,7 @@ fn album(data: &serde_json::Value) -> Option<Album> {
             })
         })
         .collect();
-    let images = data
-        .pointer("/coverArt/sources")
-        .and_then(|sources| sources.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|source| serde_json::from_value::<Image>(source.clone()).ok())
-        .filter(|image| image.url.starts_with("https://"))
-        .collect();
+    let images = images(data.pointer("/coverArt/sources"));
     Some(Album {
         id: id.to_owned(),
         uri: uri.to_owned(),
@@ -227,6 +303,32 @@ fn release_date(iso: &str, precision: Option<&serde_json::Value>) -> String {
         Some("MONTH") => day.get(..7).unwrap_or(day).to_owned(),
         _ => day.to_owned(),
     }
+}
+
+/// How long the What's New page and its bell keep an item, as Spotify's
+/// own bell does.
+pub const KEPT_DAYS: i64 = 60;
+
+/// The most items the What's New page lists, as Spotify's own bell does.
+pub const KEPT_ITEMS: usize = 100;
+
+/// The day a release or an episode came out, from a Web API date: `YYYY-MM-DD`,
+/// or the first of the month or the year when Spotify knows no more.
+pub fn release_day(date: &str) -> Option<jiff::civil::Date> {
+    let mut parts = date.get(..10).unwrap_or(date).splitn(3, '-');
+    let year = parts.next()?.parse().ok()?;
+    let month = parts.next().map_or(Some(1), |month| month.parse().ok())?;
+    let day = parts.next().map_or(Some(1), |day| day.parse().ok())?;
+    jiff::civil::Date::new(year, month, day).ok()
+}
+
+/// Whether an item released on `date` is still kept on `today`. An item
+/// without a readable date is not.
+pub fn is_recent(date: Option<&str>, today: jiff::civil::Date) -> bool {
+    let oldest = today
+        .checked_sub(jiff::Span::new().days(KEPT_DAYS))
+        .unwrap_or(today);
+    date.and_then(release_day).is_some_and(|day| day >= oldest)
 }
 
 /// Releases sorted newest first, ties kept in the order given, at most
@@ -288,7 +390,7 @@ mod tests {
             {"content": {"__typename": "EpisodeOrChapterResponseWrapper", "data": {"__typename": "Episode"}}},
             feed_item("spotify:album:2222222222222222222222", "Newest", "SINGLE", "2026-10-16T00:00:00Z"),
         ], "totalCount": 4}}});
-        let albums = parse(&body).unwrap();
+        let albums = parse(&body).unwrap().albums;
         assert_eq!(
             albums
                 .iter()
@@ -313,9 +415,8 @@ mod tests {
         assert!(parse(&json!({"errors": [{"message": "PersistedQueryNotFound"}]})).is_err());
         assert!(parse(&json!({"data": null})).is_err());
         assert!(
-            parse(&json!({"data": {"whatsNewFeedItems": {"items": []}}}))
-                .unwrap()
-                .is_empty()
+            parse(&json!({"data": {"whatsNewFeedItems": {"items": []}}})).unwrap()
+                == Feed::default()
         );
     }
 
@@ -336,7 +437,116 @@ mod tests {
         unknown["content"]["data"]["__typename"] = json!("FutureThing");
         bad["content"]["data"]["coverArt"] = json!(null);
         let body = json!({"data": {"whatsNewFeedItems": {"items": [bad, unknown]}}});
-        assert!(parse(&body).unwrap().is_empty());
+        assert_eq!(parse(&body).unwrap(), Feed::default());
+    }
+
+    fn episode_item(uri: &str, name: &str, date: &str) -> serde_json::Value {
+        json!({
+            "id": "podcast_episode:1",
+            "content": {
+                "__typename": "EpisodeOrChapterResponseWrapper",
+                "data": {
+                    "__typename": "Episode",
+                    "uri": uri,
+                    "name": name,
+                    "releaseDate": {"isoString": date, "precision": "DAY"},
+                    "duration": {"totalMilliseconds": 1_800_000},
+                    "coverArt": {"sources": [{"url": "https://i.scdn.co/image/e", "width": 64, "height": 64}]},
+                    "podcastV2": {"data": {
+                        "__typename": "Podcast",
+                        "uri": "spotify:show:5555555555555555555555",
+                        "name": "The Show",
+                        "coverArt": {"sources": [{"url": "https://i.scdn.co/image/s"}]}
+                    }}
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn reads_the_feeds_episodes_with_their_show() {
+        let body = json!({"data": {"whatsNewFeedItems": {"items": [
+            episode_item("spotify:episode:6666666666666666666666", "Older talk", "2026-10-01T05:00:00Z"),
+            feed_item("spotify:album:1111111111111111111111", "Record", "EP", "2026-10-02T00:00:00Z"),
+            episode_item("spotify:episode:7777777777777777777777", "Newest talk", "2026-10-20T05:00:00Z"),
+            episode_item("spotify:episode:7777777777777777777777", "Newest talk", "2026-10-20T05:00:00Z"),
+        ]}}});
+        let feed = parse(&body).unwrap();
+        assert_eq!(feed.albums.len(), 1);
+        assert_eq!(feed.albums[0].album_type.as_deref(), Some("ep"));
+        assert_eq!(
+            feed.episodes
+                .iter()
+                .map(|episode| episode.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Newest talk", "Older talk"]
+        );
+        let newest = &feed.episodes[0];
+        assert_eq!(newest.id, "7777777777777777777777");
+        assert_eq!(newest.release_date.as_deref(), Some("2026-10-20"));
+        assert_eq!(newest.duration_ms, 1_800_000);
+        assert_eq!(newest.images[0].url, "https://i.scdn.co/image/e");
+        let show = newest.show.as_ref().unwrap();
+        assert_eq!(show.id, "5555555555555555555555");
+        assert_eq!(show.name, "The Show");
+    }
+
+    #[test]
+    fn unknown_kinds_chapters_and_events_are_skipped_silently() {
+        let mut chapter = episode_item(
+            "spotify:episode:8888888888888888888888",
+            "Chapter",
+            "2026-10-01T00:00:00Z",
+        );
+        chapter["content"]["data"]["__typename"] = json!("Chapter");
+        let mut bad_episode = episode_item("spotify:episode:short", "Bad", "2026-10-01T00:00:00Z");
+        bad_episode["content"]["data"]["podcastV2"] = json!(null);
+        let body = json!({"data": {"whatsNewFeedItems": {"items": [
+            {"content": {"__typename": "ConcertResponseWrapper", "data": {"__typename": "Concert", "uri": "spotify:concert:1"}}},
+            {"content": {"__typename": "SomethingNew", "data": {}}},
+            {"content": {"__typename": "AlbumResponseWrapper"}},
+            {"unexpected": true},
+            chapter,
+            bad_episode,
+            feed_item("spotify:album:1111111111111111111111", "Kept", "ALBUM", "2026-10-02T00:00:00Z"),
+        ]}}});
+        let feed = parse(&body).unwrap();
+        assert!(feed.episodes.is_empty());
+        assert_eq!(feed.albums.len(), 1);
+        assert_eq!(feed.albums[0].name, "Kept");
+    }
+
+    #[test]
+    fn an_episode_without_its_show_keeps_its_own_fields() {
+        let mut item = episode_item(
+            "spotify:episode:9999999999999999999999",
+            "Alone",
+            "2026-10-01T00:00:00Z",
+        );
+        item["content"]["data"]["podcastV2"] = json!(null);
+        item["content"]["data"]["duration"] = json!("long");
+        let body = json!({"data": {"whatsNewFeedItems": {"items": [item]}}});
+        let feed = parse(&body).unwrap();
+        assert_eq!(feed.episodes.len(), 1);
+        assert!(feed.episodes[0].show.is_none());
+        assert_eq!(feed.episodes[0].duration_ms, 0);
+    }
+
+    #[test]
+    fn items_are_kept_for_sixty_days() {
+        let today = jiff::civil::date(2026, 11, 6);
+        assert_eq!(
+            release_day("2026-10-16"),
+            Some(jiff::civil::date(2026, 10, 16))
+        );
+        assert_eq!(release_day("2026-10"), Some(jiff::civil::date(2026, 10, 1)));
+        assert_eq!(release_day("2026"), Some(jiff::civil::date(2026, 1, 1)));
+        assert_eq!(release_day("soon"), None);
+        assert!(is_recent(Some("2026-11-06"), today));
+        assert!(is_recent(Some("2026-09-07"), today));
+        assert!(!is_recent(Some("2026-09-06"), today));
+        assert!(!is_recent(Some("2026"), today));
+        assert!(!is_recent(None, today));
     }
 
     #[test]

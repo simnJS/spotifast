@@ -25,6 +25,7 @@ pub mod sidebar;
 mod soloist;
 pub mod topbar;
 mod update;
+pub mod whats_new;
 pub mod widgets;
 
 use egui::{Align2, Color32, Context, CornerRadius, Frame, Id, Margin, Rect, Stroke, vec2};
@@ -354,6 +355,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                             Page::Home => home::show(app, ui),
                             Page::TopSongs => collection::top_songs(app, ui),
                             Page::NewReleases => new_releases::page(app, ui),
+                            Page::WhatsNew => whats_new::page(app, ui),
                             Page::Search => search::show(app, ui),
                             Page::LikedSongs => collection::liked(app, ui),
                             Page::Albums | Page::Artists | Page::Podcasts | Page::Episodes => {

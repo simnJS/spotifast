@@ -17,6 +17,12 @@ const BUNDLED: &[(&str, &str)] = &[(
     include_str!("../assets/themes/Spotify.json"),
 )];
 
+/// The bundled Spotify palette, for tests and demo shots that draw with it.
+#[cfg(any(test, feature = "demo"))]
+pub(crate) fn spotify_palette() -> Palette {
+    fastframe_theme::parse_palette(BUNDLED[0].1).expect("the bundled Spotify palette")
+}
+
 /// Writes each bundled palette into `directory`, creating it when missing,
 /// unless something already has its name: a file the user edited, or a link,
 /// is theirs and is never touched. Files go through a temporary file and a
@@ -702,6 +708,84 @@ pub fn paint_icon(ui: &egui::Ui, icon: Icon, rect: egui::Rect, size: f32, color:
         Vec2::splat(size),
     );
     icon.image(color, size).paint_at(ui, icon_rect);
+}
+
+/// A bell, drawn in the line style of the Lucide icons, which have none in
+/// fastframe-icons: a dome over a flared rim, and the clapper below it.
+/// `size` is the icon's edge, as for [`paint_icon`].
+pub fn paint_bell(painter: &egui::Painter, center: egui::Pos2, size: f32, color: Color32) {
+    let unit = size / 24.0;
+    let at = |x: f32, y: f32| center + Vec2::new((x - 12.0) * unit, (y - 12.0) * unit);
+    let stroke = egui::Stroke::new((2.0 * unit).max(1.0), color);
+    // Lucide's bell outline, its curves broken into short segments.
+    let mut outline = Vec::new();
+    // The left flare up to the dome.
+    outline.push(at(3.3, 15.5));
+    outline.push(at(6.0, 12.6));
+    outline.push(at(6.0, 8.0));
+    // The dome, a half circle of radius 6 around (12, 8).
+    let steps = 16;
+    for step in 1..steps {
+        let angle = std::f32::consts::PI * (1.0 - step as f32 / steps as f32);
+        outline.push(at(12.0 + 6.0 * angle.cos(), 8.0 - 6.0 * angle.sin()));
+    }
+    outline.push(at(18.0, 8.0));
+    outline.push(at(18.0, 12.6));
+    outline.push(at(20.7, 15.5));
+    outline.push(at(20.7, 17.0));
+    outline.push(at(3.3, 17.0));
+    outline.push(at(3.3, 15.5));
+    painter.add(egui::Shape::line(outline, stroke));
+    // The clapper.
+    let clapper = (0..=8)
+        .map(|step| {
+            let angle = std::f32::consts::PI * step as f32 / 8.0;
+            at(12.0 - 1.8 * angle.cos(), 20.0 + 1.6 * angle.sin())
+        })
+        .collect();
+    painter.add(egui::Shape::line(clapper, stroke));
+}
+
+fn count_pill_galley(
+    painter: &egui::Painter,
+    palette: &Palette,
+    count: usize,
+) -> std::sync::Arc<egui::Galley> {
+    let text = if count > 99 {
+        "99+".to_owned()
+    } else {
+        count.to_string()
+    };
+    painter.layout_no_wrap(text, bold(10.5), palette.on_accent)
+}
+
+const COUNT_PILL_HEIGHT: f32 = 16.0;
+
+/// How wide [`paint_count_pill`] draws `count`.
+pub fn count_pill_width(painter: &egui::Painter, palette: &Palette, count: usize) -> f32 {
+    (count_pill_galley(painter, palette, count).size().x + 10.0).max(COUNT_PILL_HEIGHT)
+}
+
+/// A count on an icon or beside a title, as Spotify's bell shows it: an
+/// accent pill, `99+` past 99. `center` is the pill's middle.
+pub fn paint_count_pill(
+    painter: &egui::Painter,
+    palette: &Palette,
+    center: egui::Pos2,
+    count: usize,
+) {
+    let galley = count_pill_galley(painter, palette, count);
+    let size = Vec2::new(
+        (galley.size().x + 10.0).max(COUNT_PILL_HEIGHT),
+        COUNT_PILL_HEIGHT,
+    );
+    let rect = egui::Rect::from_center_size(center, size);
+    painter.rect_filled(rect, COUNT_PILL_HEIGHT / 2.0, palette.accent);
+    painter.galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        palette.on_accent,
+    );
 }
 
 /// Make keyboard focus visible without changing the control's layout.

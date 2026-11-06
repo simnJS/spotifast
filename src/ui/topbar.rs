@@ -34,12 +34,18 @@ const SEARCH_FLOOR: f32 = 130.0;
 // Keep the original 80-point minimum inside the page's own toolbar.
 const SEARCH_MIN: f32 = 80.0;
 /// Everything at the right end whose width never changes: the page padding,
-/// the avatar, the gap the account menu leaves, the settings button, and
-/// the spacing between them. The cursor stops at the left edge of the last
-/// button, so this counts one gap, not two. The spinner and the badges
-/// are measured on top of it because they come and go.
-const RIGHT_CONTROLS_WIDTH: f32 =
-    super::widgets::PAGE_PADDING + AVATAR_SIZE + 4.0 + ICON_BUTTON_SIZE + ITEM_SPACING;
+/// the avatar, the What's New bell, the gap the account menu leaves, the
+/// settings button, and the spacing between them. The cursor stops at the
+/// left edge of the last button, so this counts one gap after it. The
+/// spinner and the badges are measured on top of it because they come and
+/// go.
+const RIGHT_CONTROLS_WIDTH: f32 = super::widgets::PAGE_PADDING
+    + AVATAR_SIZE
+    + ITEM_SPACING
+    + ICON_BUTTON_SIZE
+    + 4.0
+    + ICON_BUTTON_SIZE
+    + ITEM_SPACING;
 
 /// What precedes the field until the bar has drawn once: the page padding,
 /// the back and forward buttons and the gaps after them.
@@ -511,6 +517,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             app.actions.push(Action::SignOut);
                         }
                     });
+                whats_new_bell(app, ui);
                 if !app.network_reachable {
                     ui.add_space(4.0);
                     let (rect, response) =
@@ -611,6 +618,49 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             });
         },
     );
+}
+
+/// The bell beside the account: it opens What's New, with the count of
+/// what arrived since it was last opened on a small accent pill.
+fn whats_new_bell(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let unread = app.unread_whats_new();
+    let open = matches!(app.page(), Page::WhatsNew);
+    let tooltip = gettext(locale, "What's new");
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(ICON_BUTTON_SIZE), Sense::click());
+    response.widget_info(|| {
+        let label = if unread == 0 {
+            tooltip.clone().into_owned()
+        } else {
+            let count = u32::try_from(unread).unwrap_or(u32::MAX);
+            crate::i18n::ngettext(
+                locale,
+                // Translators: Keep {count} exactly as written. It becomes a number of new items.
+                "What's new, {count} new item",
+                "What's new, {count} new items",
+                count,
+            )
+            .replace("{count}", &count.to_string())
+        };
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    if ui.is_rect_visible(rect) {
+        let color = if response.hovered() || response.has_focus() || open {
+            palette.text
+        } else {
+            palette.secondary
+        };
+        let painter = ui.painter();
+        theme::paint_bell(painter, rect.center(), ICON_BUTTON_ICON, color);
+        if unread > 0 {
+            theme::paint_count_pill(painter, &palette, rect.center() + vec2(7.0, -8.0), unread);
+        }
+    }
+    theme::focus_ring(ui, &response);
+    if response.on_hover_text(tooltip.as_ref()).clicked() {
+        app.actions.push(Action::Open(Page::WhatsNew));
+    }
 }
 
 fn capitalize(text: &str) -> String {

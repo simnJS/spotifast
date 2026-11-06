@@ -112,6 +112,8 @@ pub enum Page {
     TopSongs,
     /// The songs of the latest releases from followed artists.
     NewReleases,
+    /// What's new: recent releases and podcast episodes, behind the bell.
+    WhatsNew,
     Search,
     LikedSongs,
     Albums,
@@ -135,6 +137,7 @@ impl Page {
             Page::Home => "home".into(),
             Page::TopSongs => "top-songs".into(),
             Page::NewReleases => "new-releases".into(),
+            Page::WhatsNew => "whats-new".into(),
             Page::Search => "search".into(),
             Page::LikedSongs => "liked".into(),
             Page::Albums => "albums".into(),
@@ -156,6 +159,7 @@ impl Page {
             "home" => Page::Home,
             "top-songs" => Page::TopSongs,
             "new-releases" => Page::NewReleases,
+            "whats-new" => Page::WhatsNew,
             "search" => Page::Search,
             "liked" => Page::LikedSongs,
             "albums" => Page::Albums,
@@ -715,6 +719,9 @@ pub struct HomeData {
     pub new_release_tracks: Loadable<Vec<Track>>,
     pub new_release_tracks_for: Vec<String>,
     pub new_release_tracks_generation: u64,
+    /// The podcast episodes Spotify's What's New feed last held, newest
+    /// first, for the What's New page.
+    pub feed_episodes: Vec<Episode>,
     /// Saved podcasts with their newest episodes, in library order, for the
     /// podcast shelf. A refresh replaces them only once it answers.
     pub podcasts: Vec<(Show, Vec<Episode>)>,
