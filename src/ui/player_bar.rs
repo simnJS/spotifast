@@ -126,27 +126,17 @@ fn remote_strip(app: &mut App, ui: &mut egui::Ui, rect: Rect, icon: Icon, label:
         ui.painter()
             .layout_no_wrap(label.to_owned(), theme::bold(13.0), palette.on_accent);
     let text_left = rect.right() - 24.0 - galley.size().x;
-    // The whole strip takes the click, as Spotify's does; the words and the
-    // icon are the button a screen reader and the keyboard reach.
-    let strip = ui.interact(
+    // The whole strip is one button, as Spotify's is.
+    let response = ui.interact(
         rect,
         egui::Id::new("player-bar-remote-strip"),
-        Sense::click(),
-    );
-    let label_rect = Rect::from_min_max(
-        pos2(text_left - 6.0 - GLYPH - 8.0, rect.top()),
-        pos2(rect.right() - 16.0, rect.bottom()),
-    );
-    let response = ui.interact(
-        label_rect,
-        egui::Id::new("player-bar-remote-strip-label"),
         Sense::click(),
     );
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
     });
     if ui.is_rect_visible(rect) {
-        let fill = if strip.hovered() || response.hovered() || response.has_focus() {
+        let fill = if response.hovered() || response.has_focus() {
             palette.accent_hover
         } else {
             palette.accent
@@ -173,9 +163,10 @@ fn remote_strip(app: &mut App, ui: &mut egui::Ui, rect: Rect, icon: Icon, label:
         );
     }
     theme::focus_ring(ui, &response);
-    let strip = strip.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    if strip.clicked() || response.clicked() {
+    if response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+    {
         app.actions.push(Action::ToggleDevicesPopup);
     }
 }

@@ -11781,9 +11781,6 @@ mod tests {
     fn the_top_bar_badges_never_cover_the_search_field() {
         use crate::updates::{DownloadState, Installation, Kind, Prepared};
         use egui::accesskit::{Action as AccessibleAction, Role};
-        // `widgets::search_field` insets its text this far from the pill's
-        // right edge, so the pill reaches past the rect the field reports.
-        const FIELD_RIGHT_INSET: f32 = 30.0;
         let (ctx, mut app) = accessible_app("topbar-badges");
         app.open(Page::Playlist("pl1".into()));
         for panel in [None, Some("queue"), Some("lyrics")] {
@@ -11848,7 +11845,7 @@ mod tests {
                     // The first frame settles the new window size.
                     draw();
                     let tree = draw();
-                    let badge = |label: &str| {
+                    let bounds = |label: &str| {
                         tree.nodes
                             .iter()
                             .find(|(_, node)| {
@@ -11856,21 +11853,20 @@ mod tests {
                                     && node.label().is_some_and(|name| name.starts_with(label))
                             })
                             .and_then(|(_, node)| node.bounds())
-                            .map(|bounds| bounds.x0 as f32)
                     };
+                    let badge = |label: &str| bounds(label).map(|bounds| bounds.x0 as f32);
+                    // The pill spans the field, its clear button and browse.
                     let field = ctx
-                        .read_response(egui::Id::new("global-search"))
-                        .expect("the search field")
+                        .read_response(crate::ui::topbar::pill_id())
+                        .expect("the search pill")
                         .rect
-                        .right()
-                        + FIELD_RIGHT_INSET;
-                    // Collapsed to an icon a badge keeps its label for a screen
-                    // reader, so it is found at every width.
-                    let device = badge("Playing on").expect("the device badge");
+                        .right();
+                    // Where playback is has the player bar's strip, under the
+                    // top bar and so never over the field.
+                    let device = bounds("Playing on").expect("the device strip");
                     assert!(
-                        device >= field,
-                        "the device badge covers {} px of the search field at {width} px",
-                        field - device
+                        device.y0 as f32 >= 620.0 - crate::theme::PLAYER_BAR_HEIGHT,
+                        "the device strip is in the player bar at {width} px"
                     );
                     if let Some(label) = label {
                         let release = badge(label).expect("the update badge");
