@@ -1663,6 +1663,11 @@ pub enum Action {
     ClearPlayHistory,
     /// Pick the folder a playlist's local files play from.
     ChooseLocalFilesFolder,
+    /// Bring the listening stats up to date now (see [`crate::stats`]).
+    RefreshStats,
+    /// Import Spotify's streaming history into the listening stats: the
+    /// file given, or the one picked in a file dialog when `None`.
+    ImportStreamingHistory(Option<std::path::PathBuf>),
     /// Stop playing local files.
     ForgetLocalFilesFolder,
     OpenLocalFilesFolder,

@@ -1000,6 +1000,18 @@ pub enum Command {
         generation: u64,
         result: Result<Vec<crate::api::models::Track>, String>,
     },
+    /// Bring the listening stats up to date: Spotify's recently played and
+    /// the local history into the log, then index it (see [`crate::stats`]).
+    /// Sent at sign-in, after waking, on demand, and every twenty minutes.
+    RefreshStats,
+    /// Import Spotify's streaming history (the ZIP or one of its JSON
+    /// files) into the signed-in account's stats.
+    ImportStreamingHistory(std::path::PathBuf),
+    /// The streaming history file dialog, built on the UI thread.
+    ChooseStreamingHistory {
+        selected:
+            std::pin::Pin<Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>>,
+    },
     /// Internal: an audiobook lookup finished for the session it started in.
     AudiobookShowsResolved {
         session_generation: u64,
@@ -1215,6 +1227,8 @@ pub enum Event {
     },
     /// OS reports network reachability changed.
     NetworkStatus(bool),
+    /// The listening stats were read, refreshed or imported into.
+    Stats(crate::stats::Update),
     AccountCaches {
         account_id: String,
         generation: u64,
@@ -1471,6 +1485,18 @@ impl Backend {
             .set_title("Choose the local files folder")
             .pick_folder();
         self.send(Command::ChooseLocalFilesFolder {
+            selected: Box::pin(selected),
+        });
+    }
+
+    /// The file dialog for Spotify's streaming history, built on the UI
+    /// thread like the cover's; the import starts once a file is chosen.
+    pub fn choose_streaming_history(&self) {
+        let selected = rfd::AsyncFileDialog::new()
+            .set_title("Choose your Spotify streaming history")
+            .add_filter("Spotify data (ZIP or JSON)", &["zip", "json"])
+            .pick_file();
+        self.send(Command::ChooseStreamingHistory {
             selected: Box::pin(selected),
         });
     }
@@ -1942,6 +1968,8 @@ struct Worker {
     new_releases: Arc<crate::new_releases::NewReleases>,
     /// Recent tracks' Canvas answers and files, for any account.
     canvas: Arc<crate::canvas::Library>,
+    /// The listening stats' open log; refreshes and imports take turns.
+    stats: Arc<tokio::sync::Mutex<crate::stats::service::Service>>,
     connect: Arc<crate::sonos::Controller>,
     /// Reopening or refreshing the picker reuses an in-flight browse.
     receiver_discovery: Option<tokio::task::JoinHandle<()>>,
@@ -2067,6 +2095,7 @@ impl Worker {
             api: Arc::new(ApiGateway::new(http.clone(), activity)),
             made_for_you: Arc::new(crate::made_for_you::MadeForYou::new(http.clone())),
             new_releases: Arc::new(crate::new_releases::NewReleases::new(http.clone())),
+            stats: Arc::default(),
             canvas: Arc::new(crate::canvas::Library::new(http.clone())),
             connect: Arc::default(),
             receiver_discovery: None,
@@ -2106,6 +2135,86 @@ impl Worker {
             engine_retry_quiet: false,
             authorize_if_rejected: false,
         }
+    }
+
+    /// Refreshes the signed-in account's listening stats, off this loop.
+    fn refresh_stats(&self) {
+        let Some(account) = self.api.account() else {
+            return;
+        };
+        let account_id = account.as_str().to_owned();
+        let dir = self.dirs.stats_dir(&account_id);
+        let history = self.dirs.history_file();
+        let stats = Arc::clone(&self.stats);
+        let source = StatsWeb(Arc::clone(&self.api));
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        tokio::spawn(async move {
+            let result = stats
+                .lock()
+                .await
+                .refresh(&account_id, dir, history, &source)
+                .await;
+            let update = match result {
+                Ok(index) => crate::stats::Update::Loaded { account_id, index },
+                Err(error) => crate::stats::Update::Failed { account_id, error },
+            };
+            let _ = events.send(Event::Stats(update));
+            waker.wake();
+        });
+    }
+
+    /// Imports a streaming history into the signed-in account's stats,
+    /// reporting progress as each file is read.
+    fn import_streaming_history(&self, path: std::path::PathBuf) {
+        let Some(account) = self.api.account() else {
+            self.emit(Event::Stats(crate::stats::Update::ImportFinished(Err(
+                "Sign in to import a streaming history.".into(),
+            ))));
+            return;
+        };
+        let account_id = account.as_str().to_owned();
+        let dir = self.dirs.stats_dir(&account_id);
+        let stats = Arc::clone(&self.stats);
+        let source = StatsWeb(Arc::clone(&self.api));
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        tokio::spawn(async move {
+            let progress = {
+                let events = events.clone();
+                let waker = waker.clone();
+                move |progress| {
+                    let _ =
+                        events.send(Event::Stats(crate::stats::Update::ImportProgress(progress)));
+                    waker.wake();
+                }
+            };
+            let _ = events.send(Event::Stats(crate::stats::Update::ImportProgress(
+                crate::stats::ImportProgress::default(),
+            )));
+            let result = stats
+                .lock()
+                .await
+                .import(&account_id, dir, path, &source, progress)
+                .await;
+            match result {
+                Ok((summary, index)) => {
+                    let _ = events.send(Event::Stats(crate::stats::Update::Loaded {
+                        account_id,
+                        index,
+                    }));
+                    let _ = events.send(Event::Stats(crate::stats::Update::ImportFinished(Ok(
+                        summary,
+                    ))));
+                }
+                Err(error) => {
+                    let _ = events.send(Event::Stats(crate::stats::Update::ImportFinished(Err(
+                        error,
+                    ))));
+                }
+            }
+            waker.wake();
+        });
     }
 
     fn emit(&self, event: Event) {
@@ -2255,6 +2364,22 @@ impl Worker {
             self.events.clone(),
             self.waker.clone(),
         ));
+        // The stats logger reads recently played every twenty minutes while
+        // Spotifast runs; the interface asks at sign-in and after waking.
+        let stats_timer = {
+            let commands = self.commands.clone();
+            tokio::spawn(async move {
+                let mut ticks = tokio::time::interval(crate::stats::logger::INTERVAL);
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                ticks.tick().await;
+                loop {
+                    ticks.tick().await;
+                    if commands.send(Command::RefreshStats).is_err() {
+                        break;
+                    }
+                }
+            })
+        };
         while let Some(command) = commands.recv().await {
             if self.restoring_proxy
                 && !matches!(
@@ -2405,6 +2530,17 @@ impl Worker {
                         waker.wake();
                     });
                 }
+                Command::RefreshStats => self.refresh_stats(),
+                Command::ImportStreamingHistory(path) => self.import_streaming_history(path),
+                Command::ChooseStreamingHistory { selected } => {
+                    let commands = self.commands.clone();
+                    tokio::spawn(async move {
+                        if let Some(file) = selected.await {
+                            let _ = commands
+                                .send(Command::ImportStreamingHistory(file.path().to_path_buf()));
+                        }
+                    });
+                }
                 Command::ChooseLocalFilesFolder { selected } => {
                     let events = self.events.clone();
                     let waker = self.waker.clone();
@@ -2481,6 +2617,7 @@ impl Worker {
                     self.pending_authorization = None;
                 }
                 Command::SignOut => {
+                    self.stats.lock().await.close();
                     self.stop_soloist().await;
                     self.sign_out();
                     if crate::soloist::forget(&self.dirs).await.is_err() {
@@ -3059,6 +3196,7 @@ impl Worker {
         }
         self.stop_kept_player();
         self.stop_soloist().await;
+        stats_timer.abort();
         drop(cache_writes);
         let _ = cache_writer.await;
     }
@@ -5193,6 +5331,36 @@ impl Worker {
                 }
             }
         });
+    }
+}
+
+/// The Web API as the listening stats read it: recently played, and one
+/// track or artist at a time for the details imports lack. Each read waits
+/// for a background slot, so the stats never crowd out what is on screen.
+struct StatsWeb(Arc<ApiGateway>);
+
+impl crate::stats::logger::RecentSource for StatsWeb {
+    async fn recently_played(&self, after_ms: Option<i64>) -> ApiResult<CursorPage<PlayHistory>> {
+        let client = self.0.client_for(Operation::UserData).await?;
+        let _permit = client.background_permit().await;
+        let after = after_ms.map(|ms| ms.to_string());
+        client
+            .recently_played(crate::stats::logger::PAGE, after.as_deref(), None)
+            .await
+    }
+}
+
+impl crate::stats::metadata::MetadataSource for StatsWeb {
+    async fn track(&self, id: &str) -> ApiResult<Track> {
+        let client = self.0.client_for(Operation::Catalog).await?;
+        let _permit = client.background_permit().await;
+        client.track(id).await
+    }
+
+    async fn artist(&self, id: &str) -> ApiResult<Artist> {
+        let client = self.0.client_for(Operation::Catalog).await?;
+        let _permit = client.background_permit().await;
+        client.artist(id).await
     }
 }
 

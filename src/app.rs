@@ -593,6 +593,8 @@ pub struct App {
     pub home: HomeData,
     /// Local play history. See [`crate::history`].
     pub plays: crate::history::History,
+    /// The listening stats of the signed-in account. See [`crate::stats`].
+    pub stats: crate::stats::StatsState,
     /// Writes settings, session and history off the UI thread.
     files: fastframe_file::Writer,
     /// Current track timing used to decide when a play counts.
@@ -1349,6 +1351,7 @@ impl App {
             liked_recheck_at: None,
             home: HomeData::default(),
             plays,
+            stats: crate::stats::StatsState::default(),
             files: fastframe_file::Writer::new(),
             listening: None,
             recents: crate::model::CursorList::default(),
@@ -2906,6 +2909,10 @@ impl App {
                 Event::Soloist(update) => self.on_soloist(update),
                 Event::Auth(status) => self.handle_auth(status),
                 Event::Playback(status) => self.handle_playback(status),
+                Event::Stats(update) => {
+                    let account = self.user_id().map(str::to_owned);
+                    self.stats.receive(update, account.as_deref());
+                }
                 Event::NetworkStatus(reachable) => {
                     let became_reachable = !self.network_reachable && reachable;
                     self.network_reachable = reachable;
@@ -5809,6 +5816,15 @@ impl App {
         }
     }
 
+    /// Asks the backend to bring the signed-in account's listening stats up
+    /// to date; what is shown stays until the new index arrives.
+    fn refresh_stats(&mut self) {
+        if let Some(account) = self.user_id().map(str::to_owned) {
+            self.stats.loading(&account);
+            self.backend.send(Command::RefreshStats);
+        }
+    }
+
     /// Asks for the verified account's cached library, replacing any read
     /// still on its way.
     fn request_account_caches(&mut self) {
@@ -7943,6 +7959,9 @@ impl App {
                         self.request_account_caches();
                     }
                     self.user = Some(user);
+                    if changed {
+                        self.refresh_stats();
+                    }
                     let page = self.page().clone();
                     self.ensure_loaded(page);
                     if let Some(now) = self.now_playing() {
@@ -13710,6 +13729,12 @@ impl App {
             // close-to-tray setting decides what follows.
             Action::CloseWindow => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Action::ChooseLocalFilesFolder => self.backend.choose_local_files_folder(),
+            Action::RefreshStats => self.refresh_stats(),
+            Action::ImportStreamingHistory(Some(path)) => {
+                self.stats.importing = Some(crate::stats::ImportProgress::default());
+                self.backend.send(Command::ImportStreamingHistory(path));
+            }
+            Action::ImportStreamingHistory(None) => self.backend.choose_streaming_history(),
             Action::ForgetLocalFilesFolder => self.set_local_files_folder(None),
             Action::OpenLocalFilesFolder => {
                 if let Some(folder) = self.settings.local_files_folder() {
@@ -14164,7 +14189,9 @@ impl App {
                     self.files.flush(SUSPEND_FLUSH_TIMEOUT);
                     ack.done();
                 }
-                Event::Resumed => {}
+                // The stats logger reads what other devices played while
+                // this computer slept.
+                Event::Resumed => self.refresh_stats(),
             }
         }
     }

@@ -53,6 +53,7 @@ pub mod single_instance;
 pub mod sink;
 pub mod soloist;
 pub mod sonos;
+pub mod stats;
 mod storage;
 pub mod theme;
 pub mod thumbbar;

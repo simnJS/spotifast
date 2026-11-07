@@ -217,6 +217,16 @@ impl AppDirs {
             .join(account_file_name(account_id))
     }
 
+    /// The account's listening stats: its play log and the details
+    /// cached for it. See [`crate::stats`].
+    pub fn stats_dir(&self, account_id: &str) -> PathBuf {
+        let account: String = account_id
+            .bytes()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        self.state.join("stats").join(account)
+    }
+
     /// The account's last playlist list, shown while it is read again.
     pub fn library_cache_file(&self, account_id: &str) -> PathBuf {
         self.cache
