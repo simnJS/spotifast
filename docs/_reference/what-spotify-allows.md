@@ -20,6 +20,17 @@ Spotifast uses the Web API for:
 - **Account:** profile details, followed artists, top artists and tracks, and
   the last fifty plays. Spotifast keeps a longer local
   [history](/using-spotifast/#recent).
+- **Listening stats:** the last fifty plays of every device, read every
+  twenty minutes and kept in a log on this computer, plus the streaming
+  history Spotify's privacy page sends on request, imported from its ZIP or
+  JSON files. Recently played gives no listening time, so the track's
+  length stands in for it until an import gives the real one. Track and
+  artist details (covers, lengths, genres) come one item at a time: the
+  batch `GET /tracks?ids=` and `GET /artists?ids=` reads are gone for
+  Development Mode apps since February 2026. Spotify offers no complete
+  history through any API, so plays beyond the last fifty, from before the
+  log started, come only from an import
+  ([How It Connects](/how-it-connects/#listening-stats)).
 - **Library:** playlists, saved tracks, albums, shows, and episodes. It can
   also save and remove items.
 - **Playlists:** reading, creating, renaming, changing the description and

@@ -450,6 +450,39 @@ run when Home refreshes: on opening Home, at most once every ten minutes, and
 on a manual refresh. A rate limit, exhausted quota or expired sign-in stops the
 remaining shows for that refresh; the shelf keeps what it showed before.
 
+## Listening stats
+
+Spotifast keeps a log of what the account plays, for its listening stats,
+on this computer only. Nothing is sent anywhere but Spotify's own Web API.
+
+- **Logger.** At sign-in, after the computer wakes, and every twenty
+  minutes while Spotifast runs, it asks for
+  `GET /me/player/recently-played?limit=50&after=<newest logged play>`
+  through the personal app. That one request covers every device on the
+  account, so plays from a phone or a speaker are logged too. Spotify keeps
+  only the last fifty plays, so plays from a device that played more than
+  fifty songs between two reads are lost unless an imported history fills
+  them in. Spotify gives no listening time, so the track's length stands in
+  for it. The plays in the local [history](/using-spotifast/#recent) that
+  Spotify's answer lacks are added from that file, without a request.
+- **Details.** An imported history has names but no artist or album IDs,
+  covers, lengths or genres. They are read one at a time, with
+  `GET /tracks/{id}` and `GET /artists/{id}` (Spotify removed the batch
+  `?ids=` reads for Development Mode apps in February 2026), at most forty
+  tracks and forty artists per refresh, most played first. A rate limit,
+  exhausted quota or lost connection stops that refresh's reads. Each read
+  waits for a background slot, like Home's shelves. Answers are cached, so no
+  item is asked for twice.
+- **Import.** The streaming history Spotify's privacy page sends on request
+  (the "Extended streaming history" ZIP, one of its JSON files, or the
+  older account data's `StreamingHistory_music_*.json`) is read from the
+  disk and never uploaded.
+
+The log is stored per account under the state folder, in `stats/`, readable
+by the user only: segments of one JSON line per play, each written whole and
+atomically, and a `metadata.json` cache. A play Spotify, the local history
+and an import all report is kept once.
+
 ## Album queueing
 
 Since 0.9.0, adding an album, single, or EP to the queue resolves
