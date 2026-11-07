@@ -45,6 +45,9 @@ const REMOTE_FRESH: Duration = Duration::from_secs(60);
 /// How often the open Friend activity panel asks for news.
 const FRIENDS_POLL: Duration = Duration::from_secs(15);
 const DEVICES_FRESH: Duration = Duration::from_secs(12);
+/// How often the device list is read while a started Soloist is not in it
+/// yet, so "Verifying Soloist" ends soon after Spotify lists the player.
+const SOLOIST_DEVICE_POLL: Duration = Duration::from_secs(2);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(280);
 /// How long a suspend or the end of the session waits for pending file
 /// writes. fastframe-power holds the system back for 1.5 s before a
@@ -4764,15 +4767,27 @@ impl App {
                 }
                 self.poll_remote(true);
             }
-            if (self.show_devices
-                || (matches!(self.soloist_status, crate::soloist::Status::Ready { .. })
-                    && self.soloist_device_id.is_none()))
+            // While a started Soloist waits to be found in Spotify's device
+            // list, look again every few seconds: Spotify lists a new player
+            // a few seconds after it signs in, and waiting the usual twelve
+            // made "Verifying Soloist" last up to that long for nothing.
+            let verifying = matches!(self.soloist_status, crate::soloist::Status::Ready { .. })
+                && self.soloist_device_id.is_none();
+            let fresh = if verifying {
+                SOLOIST_DEVICE_POLL
+            } else {
+                DEVICES_FRESH
+            };
+            if (self.show_devices || verifying)
                 && !self.devices_loading
                 && self
                     .devices_fetched_at
-                    .is_none_or(|at| at.elapsed() > DEVICES_FRESH)
+                    .is_none_or(|at| at.elapsed() > fresh)
             {
                 self.refresh_devices();
+            }
+            if verifying && !self.devices_loading {
+                ctx.request_repaint_after(SOLOIST_DEVICE_POLL);
             }
             if (self.show_queue_panel || matches!(self.page(), Page::Queue))
                 && !self.queue.is_loading()
