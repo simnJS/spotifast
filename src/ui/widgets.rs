@@ -4928,3 +4928,729 @@ mod tests {
         assert_eq!(meta.options.mipmap_mode, Some(egui::TextureFilter::Linear));
     }
 }
+
+/// The owner's own listening figures for a song, an artist or an album,
+/// read from the local stats store ([`crate::stats`]) for the artist page,
+/// the album page and the Now Playing panel.
+///
+/// The figures are worked out away from the interface thread, once per
+/// item and per indexed log, and kept until the log is indexed again.
+/// Nothing shows for an item the log has no stream of.
+pub(crate) mod your_stats {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use crate::i18n::{Locale, gettext, ngettext};
+    use crate::model::Loadable;
+    use crate::stats::Index;
+    use crate::stats::query::{self, Item, Kind, Range};
+    use crate::theme::{self, Palette};
+    use crate::util;
+
+    /// How many of an artist's songs the artist page lists.
+    pub const TOP_TRACKS: usize = 3;
+    /// How many items keep their figures before the oldest are dropped.
+    const CACHE_LIMIT: usize = 64;
+
+    /// What the figures are about, as the pages name it.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    pub enum Subject {
+        /// A song by its `spotify:track:` URI.
+        Track(String),
+        /// An artist by its Spotify ID.
+        Artist(String),
+        /// An album by its Spotify ID.
+        Album(String),
+    }
+
+    /// One song of a top, with what the log knows to show and play it.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct TopTrack {
+        pub uri: String,
+        pub name: String,
+        /// Each artist's Spotify ID, when known, and name, main artist first.
+        pub artists: Vec<(Option<String>, String)>,
+        pub album_id: Option<String>,
+        pub album_name: Option<String>,
+        pub album_image: Option<String>,
+        pub duration_ms: Option<u32>,
+        pub streams: u32,
+    }
+
+    /// The owner's figures for one item.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Figures {
+        /// Streams ever (plays of 30 seconds or more).
+        pub streams: u32,
+        /// Time streamed ever.
+        pub ms: u64,
+        /// The first stream, in milliseconds since the Unix epoch.
+        pub first_ms: Option<i64>,
+        /// The item's rank among its kind, all time and over four weeks.
+        pub rank_all: Option<u32>,
+        pub rank_weeks4: Option<u32>,
+        /// For a song: its main artist's name and all-time rank.
+        pub artist: Option<(String, u32)>,
+        /// For an artist or an album: its most streamed songs, all time.
+        pub top_tracks: Vec<TopTrack>,
+    }
+
+    /// What a page shows for an item.
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum Shown {
+        /// The log, or the item's figures, are still being read: a skeleton.
+        Loading,
+        /// No log, or nothing streamed: nothing at all.
+        Hidden,
+        Ready(Arc<Figures>),
+    }
+
+    fn top_track(index: &Index, track: u32, streams: u32) -> Option<TopTrack> {
+        let entry = index.tracks.get(track as usize)?;
+        let uri = entry.uri.clone()?;
+        let album = entry
+            .album
+            .and_then(|album| index.albums.get(album as usize));
+        Some(TopTrack {
+            uri,
+            name: entry.name.clone(),
+            artists: entry
+                .artists
+                .iter()
+                .filter_map(|artist| index.artists.get(*artist as usize))
+                .map(|artist| (artist.id.clone(), artist.name.clone()))
+                .collect(),
+            album_id: album.and_then(|album| album.id.clone()),
+            album_name: album.map(|album| album.name.clone()),
+            album_image: album.and_then(|album| album.image.clone()),
+            duration_ms: entry.duration_ms,
+            streams,
+        })
+    }
+
+    /// The most streamed songs, all time, that `keep` lets through. Songs
+    /// the log names without a URI cannot be played and are left out.
+    fn top_tracks(
+        index: &Index,
+        now_ms: i64,
+        limit: usize,
+        keep: impl Fn(&crate::stats::index::TrackEntry) -> bool,
+    ) -> Vec<TopTrack> {
+        query::top(index, Kind::Track, Range::AllTime, now_ms, usize::MAX)
+            .into_iter()
+            .filter_map(|row| match row.item {
+                Item::Track(track) => Some((track, row.count.streams)),
+                _ => None,
+            })
+            .filter(|(track, _)| index.tracks.get(*track as usize).is_some_and(&keep))
+            .filter_map(|(track, streams)| top_track(index, track, streams))
+            .take(limit)
+            .collect()
+    }
+
+    /// The owner's figures for `subject`, or `None` when the log has no
+    /// stream of it.
+    pub fn figures(index: &Index, subject: &Subject, now_ms: i64) -> Option<Figures> {
+        let item = match subject {
+            Subject::Track(uri) => Item::Track(index.track_by_uri(uri)?),
+            Subject::Artist(id) => Item::Artist(index.artist_by_id(id)?),
+            Subject::Album(id) => Item::Album(index.album_by_id(id)?),
+        };
+        let all = query::item_stats(index, item, Range::AllTime, now_ms);
+        if all.count.streams == 0 {
+            return None;
+        }
+        let weeks4 = query::item_stats(index, item, Range::Weeks4, now_ms);
+        let mut figures = Figures {
+            streams: all.count.streams,
+            ms: all.count.ms,
+            first_ms: all.first_ms,
+            rank_all: all.rank,
+            rank_weeks4: weeks4.rank,
+            ..Figures::default()
+        };
+        match item {
+            Item::Track(track) => {
+                let main = index.tracks[track as usize].artists.first().copied();
+                figures.artist = main.and_then(|artist| {
+                    let rank =
+                        query::item_stats(index, Item::Artist(artist), Range::AllTime, now_ms)
+                            .rank?;
+                    Some((index.artists[artist as usize].name.clone(), rank))
+                });
+            }
+            Item::Artist(artist) => {
+                figures.top_tracks = top_tracks(index, now_ms, TOP_TRACKS, |track| {
+                    track.artists.contains(&artist)
+                });
+            }
+            Item::Album(album) => {
+                figures.top_tracks =
+                    top_tracks(index, now_ms, 1, |track| track.album == Some(album));
+            }
+            Item::Genre(_) => {}
+        }
+        Some(figures)
+    }
+
+    /// What to show, from the state of the log and of the item's figures
+    /// (`None` while they are worked out, `Some(None)` for nothing
+    /// streamed).
+    pub fn shown<T>(log: &Loadable<T>, computed: Option<Option<Arc<Figures>>>) -> Shown {
+        match log {
+            // No account, stats not read yet or unreadable: nothing to say.
+            Loadable::NotLoaded | Loadable::Failed(_) => Shown::Hidden,
+            Loadable::Loading => Shown::Loading,
+            Loadable::Loaded(_) => match computed {
+                None => Shown::Loading,
+                Some(None) => Shown::Hidden,
+                Some(Some(figures)) => Shown::Ready(figures),
+            },
+        }
+    }
+
+    #[derive(Default)]
+    struct Cache {
+        /// The indexed log the figures were worked out from, held so that
+        /// a new log can never be taken for it.
+        index: Option<Arc<Index>>,
+        /// `None` while being worked out.
+        entries: HashMap<Subject, Option<Option<Arc<Figures>>>>,
+        /// Oldest first, for dropping.
+        order: Vec<Subject>,
+    }
+
+    type Shared = Arc<Mutex<Cache>>;
+
+    /// The figures to show for `subject` now, starting their work if they
+    /// have none yet.
+    pub fn for_subject(app: &crate::app::App, ctx: &egui::Context, subject: Subject) -> Shown {
+        let log = &app.stats.index;
+        let Loadable::Loaded(index) = log else {
+            return shown(log, None);
+        };
+        let shared: Shared = ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<Shared>(egui::Id::new("your-stats-cache"))
+                .clone()
+        });
+        let mut cache = shared.lock().unwrap_or_else(|poison| poison.into_inner());
+        if !cache
+            .index
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(held, index))
+        {
+            *cache = Cache {
+                index: Some(Arc::clone(index)),
+                ..Cache::default()
+            };
+        }
+        if let Some(computed) = cache.entries.get(&subject) {
+            return shown(log, computed.clone());
+        }
+        if cache.order.len() >= CACHE_LIMIT {
+            let oldest = cache.order.remove(0);
+            cache.entries.remove(&oldest);
+        }
+        cache.entries.insert(subject.clone(), None);
+        cache.order.push(subject.clone());
+        drop(cache);
+        let index = Arc::clone(index);
+        let ctx = ctx.clone();
+        let now_ms = jiff::Timestamp::now().as_millisecond();
+        let worker = Arc::clone(&shared);
+        let job = subject.clone();
+        let spawned = std::thread::Builder::new()
+            .name("your-stats".into())
+            .spawn(move || {
+                let result = figures(&index, &job, now_ms).map(Arc::new);
+                let mut cache = worker.lock().unwrap_or_else(|poison| poison.into_inner());
+                if cache
+                    .index
+                    .as_ref()
+                    .is_some_and(|held| Arc::ptr_eq(held, &index))
+                    && let Some(slot) = cache.entries.get_mut(&job)
+                {
+                    *slot = Some(result);
+                }
+                drop(cache);
+                ctx.request_repaint();
+            });
+        if let Err(error) = spawned {
+            log::warn!("listening stats: could not start the figures' work: {error}");
+            let mut cache = shared.lock().unwrap_or_else(|poison| poison.into_inner());
+            cache.entries.insert(subject, Some(None));
+        }
+        Shown::Loading
+    }
+
+    /// `1,234`, as Spotify writes counts.
+    pub fn count(value: u32) -> String {
+        util::format_count(u64::from(value))
+    }
+
+    /// `1,234 streams`.
+    pub fn streams(locale: Locale, value: u32) -> String {
+        ngettext(
+            locale,
+            // Translators: {count} is how many times the listener played something.
+            "{count} stream",
+            "{count} streams",
+            value,
+        )
+        .replace("{count}", &count(value))
+    }
+
+    /// Time listened as Spotify writes lengths: `12 hr 5 min`, `45 min`.
+    pub fn listened(locale: Locale, ms: u64) -> String {
+        let minutes = ms / 60_000;
+        let hours = minutes / 60;
+        if hours > 0 {
+            gettext(locale, "{hours} hr {minutes} min")
+                .replace("{hours}", &util::format_count(hours))
+                .replace("{minutes}", &(minutes % 60).to_string())
+        } else {
+            gettext(locale, "{minutes} min").replace("{minutes}", &minutes.to_string())
+        }
+    }
+
+    /// The day of `ms` in `zone`, as `Mar 14, 2021`.
+    pub fn date(locale: Locale, ms: i64, zone: &jiff::tz::TimeZone) -> Option<String> {
+        let day = jiff::Timestamp::from_millisecond(ms)
+            .ok()?
+            .to_zoned(zone.clone())
+            .date();
+        Some(util::format_date(locale, &day.to_string()))
+    }
+
+    /// The day of `ms` in the computer's time zone.
+    pub fn local_date(locale: Locale, ms: i64) -> Option<String> {
+        date(locale, ms, &jiff::tz::TimeZone::system())
+    }
+
+    /// `#3`.
+    pub fn rank(rank: u32) -> String {
+        format!("#{}", count(rank))
+    }
+
+    /// The Now Playing card's line: `You've played this 12 times`.
+    pub fn played_times(locale: Locale, value: u32) -> String {
+        if value == 1 {
+            gettext(locale, "You've played this once").into_owned()
+        } else {
+            ngettext(
+                locale,
+                // Translators: {count} is how many times the listener played the song.
+                "You've played this {count} time",
+                "You've played this {count} times",
+                value,
+            )
+            .replace("{count}", &count(value))
+        }
+    }
+
+    /// The figures' tiles, a value over its label each: streams, time
+    /// listened, first listen, and the item's ranks among `ranked` (such
+    /// as "Your top artists") when it has them, over four weeks too when
+    /// `weeks4`.
+    pub fn tiles(
+        locale: Locale,
+        figures: &Figures,
+        ranked: &str,
+        weeks4: bool,
+    ) -> Vec<(String, String)> {
+        let mut tiles = vec![
+            (
+                count(figures.streams),
+                gettext(locale, "Streams").into_owned(),
+            ),
+            (
+                listened(locale, figures.ms),
+                gettext(locale, "Listened").into_owned(),
+            ),
+        ];
+        if let Some(first) = figures.first_ms.and_then(|ms| local_date(locale, ms)) {
+            tiles.push((first, gettext(locale, "First listened").into_owned()));
+        }
+        if let Some(all) = figures.rank_all {
+            tiles.push((
+                rank(all),
+                // Translators: {list} is a top list, such as "Your top artists".
+                gettext(locale, "{list}, all time").replace("{list}", ranked),
+            ));
+        }
+        if let Some(weeks) = figures.rank_weeks4.filter(|_| weeks4) {
+            tiles.push((
+                rank(weeks),
+                // Translators: {list} is a top list, such as "Your top artists".
+                gettext(locale, "{list}, last 4 weeks").replace("{list}", ranked),
+            ));
+        }
+        tiles
+    }
+
+    /// The box the figures sit in: Spotify's elevated card.
+    pub fn frame(palette: &Palette, padding: i8) -> egui::Frame {
+        egui::Frame::new()
+            .fill(palette.surface)
+            .corner_radius(egui::CornerRadius::same(theme::RADIUS))
+            .inner_margin(egui::Margin::same(padding))
+    }
+
+    /// Draws `tiles` side by side, wrapping when the room runs out: the
+    /// value in bold, its label in the subdued colour under it.
+    pub fn draw_tiles(ui: &mut egui::Ui, palette: &Palette, tiles: &[(String, String)], size: f32) {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(32.0, 16.0);
+            for (value, label) in tiles {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    theme::text(ui, value, theme::bold(size), palette.text);
+                    theme::text(ui, label, theme::regular(13.0), palette.secondary);
+                });
+            }
+        });
+    }
+
+    /// The figures' loading box: a row of grey tiles.
+    pub fn draw_skeleton(ui: &mut egui::Ui, palette: &Palette, tiles: usize, size: f32) {
+        let fill = super::skeleton_fill(palette);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(32.0, 16.0);
+            for _ in 0..tiles {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    for (width, height) in [(72.0, size * 0.8), (96.0, 10.0)] {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+                        ui.painter().rect_filled(rect, 4.0, fill);
+                    }
+                });
+            }
+        });
+    }
+
+    /// A song as a track row plays and draws it, from what the log knows.
+    pub fn track(top: &TopTrack) -> crate::api::models::Track {
+        use crate::api::models::{Album, ArtistRef, Image, Track};
+        Track {
+            id: util::uri_id(&top.uri).map(str::to_string),
+            name: top.name.clone(),
+            uri: top.uri.clone(),
+            duration_ms: top.duration_ms.unwrap_or(0),
+            artists: top
+                .artists
+                .iter()
+                .map(|(id, name)| ArtistRef {
+                    id: id.clone(),
+                    name: name.clone(),
+                    ..ArtistRef::default()
+                })
+                .collect(),
+            album: top.album_id.as_ref().map(|id| Album {
+                id: id.clone(),
+                uri: format!("spotify:album:{id}"),
+                name: top.album_name.clone().unwrap_or_default(),
+                images: top
+                    .album_image
+                    .iter()
+                    .map(|url| Image {
+                        url: url.clone(),
+                        width: None,
+                        height: None,
+                    })
+                    .collect(),
+                ..Album::default()
+            }),
+            ..Track::default()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::stats::metadata::Metadata;
+        use crate::stats::{ArtistName, PlayRecord, Source};
+
+        const NOW: i64 = 1_700_000_000_000;
+        const DAY: i64 = 24 * 60 * 60 * 1000;
+
+        fn play(days_ago: i64, track: &str, artist: &str, album: &str, ms: u32) -> PlayRecord {
+            PlayRecord {
+                at_ms: NOW - days_ago * DAY,
+                ms_played: ms,
+                estimated: false,
+                source: Source::Extended,
+                uri: Some(format!("spotify:track:{track}")),
+                track: track.into(),
+                artists: vec![ArtistName {
+                    id: Some(artist.into()),
+                    name: artist.into(),
+                }],
+                album: Some(album.into()),
+                album_id: Some(album.into()),
+                duration_ms: Some(200_000),
+                skipped: None,
+                shuffle: None,
+            }
+        }
+
+        fn index(records: &[PlayRecord]) -> Index {
+            let mut records = records.to_vec();
+            records.sort_by_key(|record| record.at_ms);
+            Index::build(&records, &Metadata::default())
+        }
+
+        fn sample() -> Index {
+            index(&[
+                play(100, "a", "x", "xa", 120_000),
+                play(10, "a", "x", "xa", 120_000),
+                play(1, "b", "x", "xb", 60_000),
+                play(2, "c", "x", "xa", 60_000),
+                play(3, "c", "x", "xa", 60_000),
+                play(4, "c", "x", "xa", 60_000),
+                play(5, "d", "y", "ya", 60_000),
+                play(6, "d", "y", "ya", 60_000),
+                play(7, "e", "y", "ya", 60_000),
+                play(8, "e", "y", "ya", 60_000),
+                play(9, "f", "y", "ya", 60_000),
+                play(60, "f", "y", "ya", 60_000),
+                play(61, "f", "y", "ya", 60_000),
+                play(1, "g", "z", "za", 10_000), // a skip only
+            ])
+        }
+
+        #[test]
+        fn an_artists_figures_rank_it_and_list_its_three_most_played_songs() {
+            let index = sample();
+            let x = figures(&index, &Subject::Artist("x".into()), NOW).unwrap();
+            assert_eq!(x.streams, 6);
+            assert_eq!(x.ms, 480_000);
+            assert_eq!(x.first_ms, Some(NOW - 100 * DAY));
+            // All time y has 7 streams to x's 6. Over four weeks both
+            // have 5, and x streamed longer.
+            assert_eq!(x.rank_all, Some(2));
+            assert_eq!(x.rank_weeks4, Some(1));
+            let songs: Vec<(&str, u32)> = x
+                .top_tracks
+                .iter()
+                .map(|song| (song.uri.as_str(), song.streams))
+                .collect();
+            assert_eq!(
+                songs,
+                vec![
+                    ("spotify:track:c", 3),
+                    ("spotify:track:a", 2),
+                    ("spotify:track:b", 1),
+                ]
+            );
+            assert_eq!(x.top_tracks[0].album_id.as_deref(), Some("xa"));
+            assert_eq!(
+                x.top_tracks[0].artists,
+                vec![(Some("x".into()), "x".into())]
+            );
+        }
+
+        #[test]
+        fn an_albums_figures_name_its_most_played_song() {
+            let index = sample();
+            let album = figures(&index, &Subject::Album("xa".into()), NOW).unwrap();
+            assert_eq!(album.streams, 5);
+            assert_eq!(album.top_tracks.len(), 1);
+            assert_eq!(album.top_tracks[0].uri, "spotify:track:c");
+        }
+
+        #[test]
+        fn a_songs_figures_give_its_main_artists_rank() {
+            let index = sample();
+            let song = figures(&index, &Subject::Track("spotify:track:a".into()), NOW).unwrap();
+            assert_eq!(song.streams, 2);
+            assert_eq!(song.first_ms, Some(NOW - 100 * DAY));
+            assert_eq!(song.artist, Some(("x".into(), 2)));
+            assert!(song.top_tracks.is_empty());
+        }
+
+        #[test]
+        fn nothing_streamed_or_unknown_hides_the_figures() {
+            let index = sample();
+            // Only skipped.
+            assert_eq!(figures(&index, &Subject::Artist("z".into()), NOW), None);
+            assert_eq!(
+                figures(&index, &Subject::Track("spotify:track:g".into()), NOW),
+                None
+            );
+            // Never played.
+            assert_eq!(figures(&index, &Subject::Album("nope".into()), NOW), None);
+            assert_eq!(
+                figures(&Index::default(), &Subject::Artist("x".into()), NOW),
+                None
+            );
+        }
+
+        #[test]
+        fn the_figures_hide_without_a_log_and_wait_while_it_or_they_are_read() {
+            let ready = Arc::new(Figures {
+                streams: 1,
+                ..Figures::default()
+            });
+            let loaded: Loadable<()> = Loadable::Loaded(());
+            assert_eq!(shown(&Loadable::<()>::NotLoaded, None), Shown::Hidden);
+            assert_eq!(
+                shown(&Loadable::<()>::Failed("unreadable".into()), None),
+                Shown::Hidden
+            );
+            assert_eq!(shown(&Loadable::<()>::Loading, None), Shown::Loading);
+            assert_eq!(shown(&loaded, None), Shown::Loading);
+            assert_eq!(shown(&loaded, Some(None)), Shown::Hidden);
+            assert_eq!(
+                shown(&loaded, Some(Some(Arc::clone(&ready)))),
+                Shown::Ready(ready)
+            );
+        }
+
+        #[test]
+        fn figures_read_as_spotify_writes_numbers_and_lengths() {
+            let locale = Locale::default();
+            assert_eq!(count(1_234), "1,234");
+            assert_eq!(count(7), "7");
+            assert_eq!(streams(locale, 1), "1 stream");
+            assert_eq!(streams(locale, 12_345), "12,345 streams");
+            assert_eq!(listened(locale, 0), "0 min");
+            assert_eq!(listened(locale, 45 * 60_000 + 59_000), "45 min");
+            assert_eq!(listened(locale, (12 * 60 + 5) * 60_000), "12 hr 5 min");
+            assert_eq!(listened(locale, 1_500 * 3_600_000), "1,500 hr 0 min");
+            assert_eq!(rank(3), "#3");
+            assert_eq!(played_times(locale, 1), "You've played this once");
+            assert_eq!(
+                played_times(locale, 1_042),
+                "You've played this 1,042 times"
+            );
+            let utc = jiff::tz::TimeZone::UTC;
+            // 2023-11-14T22:13:20Z.
+            assert_eq!(date(locale, NOW, &utc).as_deref(), Some("Nov 14, 2023"));
+            let east = jiff::tz::TimeZone::fixed(jiff::tz::offset(3));
+            assert_eq!(date(locale, NOW, &east).as_deref(), Some("Nov 15, 2023"));
+        }
+
+        fn test_app() -> crate::app::App {
+            let root = std::env::temp_dir().join(format!(
+                "spotifast-your-stats-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos()
+            ));
+            crate::app::App::new(
+                &crate::backend::Waker::default(),
+                crate::paths::AppDirs {
+                    config: root.join("config"),
+                    state: root.join("state"),
+                    cache: root.join("cache"),
+                },
+                crate::settings::Settings::default(),
+                crate::app::AppOptions {
+                    media_controls: false,
+                    restore_sign_in: false,
+                    tray: false,
+                    autostart: false,
+                },
+            )
+        }
+
+        /// Asks until the work is done, as frames would.
+        fn settled(app: &crate::app::App, ctx: &egui::Context, subject: &Subject) -> Shown {
+            for _ in 0..500 {
+                let shown = for_subject(app, ctx, subject.clone());
+                if shown != Shown::Loading {
+                    return shown;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Shown::Loading
+        }
+
+        #[test]
+        fn pages_get_the_figures_once_worked_out_and_nothing_without_streams() {
+            let mut app = test_app();
+            let ctx = egui::Context::default();
+            let artist = Subject::Artist("x".into());
+            // No log read: nothing shows, and no work starts.
+            assert_eq!(for_subject(&app, &ctx, artist.clone()), Shown::Hidden);
+            app.stats.index = Loadable::Loading;
+            assert_eq!(for_subject(&app, &ctx, artist.clone()), Shown::Loading);
+            app.stats.index = Loadable::Loaded(Arc::new(sample()));
+            let Shown::Ready(figures) = settled(&app, &ctx, &artist) else {
+                panic!("the artist's figures arrive");
+            };
+            assert_eq!(figures.streams, 6);
+            // Kept: asked again, the same figures come back at once.
+            assert_eq!(
+                for_subject(&app, &ctx, artist.clone()),
+                Shown::Ready(Arc::clone(&figures))
+            );
+            assert_eq!(
+                settled(&app, &ctx, &Subject::Artist("z".into())),
+                Shown::Hidden
+            );
+            // A fresh log is worked out again.
+            app.stats.index = Loadable::Loaded(Arc::new(index(&[play(1, "a", "x", "xa", 60_000)])));
+            let Shown::Ready(fresh) = settled(&app, &ctx, &artist) else {
+                panic!("the fresh figures arrive");
+            };
+            assert_eq!(fresh.streams, 1);
+        }
+
+        #[test]
+        fn tiles_leave_out_what_the_figures_do_not_know() {
+            let locale = Locale::default();
+            let bare = Figures {
+                streams: 1_234,
+                ms: 3_600_000,
+                ..Figures::default()
+            };
+            assert_eq!(
+                tiles(locale, &bare, "Your top artists", true),
+                vec![
+                    ("1,234".to_string(), "Streams".to_string()),
+                    ("1 hr 0 min".to_string(), "Listened".to_string()),
+                ]
+            );
+            let ranked = Figures {
+                first_ms: Some(NOW),
+                rank_all: Some(3),
+                rank_weeks4: Some(1),
+                ..bare
+            };
+            assert_eq!(tiles(locale, &ranked, "Your top albums", false).len(), 4);
+            let labels: Vec<String> = tiles(locale, &ranked, "Your top artists", true)
+                .into_iter()
+                .map(|(value, label)| format!("{value} {label}"))
+                .collect();
+            assert_eq!(labels.len(), 5);
+            assert_eq!(labels[2].split(' ').last(), Some("listened"));
+            assert_eq!(labels[3], "#3 Your top artists, all time");
+            assert_eq!(labels[4], "#1 Your top artists, last 4 weeks");
+        }
+
+        #[test]
+        fn a_top_song_becomes_a_playable_track_with_its_cover() {
+            let song = TopTrack {
+                uri: "spotify:track:abc".into(),
+                name: "Song".into(),
+                artists: vec![(Some("x".into()), "X".into()), (None, "Y".into())],
+                album_id: Some("al".into()),
+                album_name: Some("Album".into()),
+                album_image: Some("https://i.scdn.co/image/1".into()),
+                duration_ms: Some(180_000),
+                streams: 4,
+            };
+            let track = track(&song);
+            assert_eq!(track.id.as_deref(), Some("abc"));
+            assert_eq!(track.duration_ms, 180_000);
+            assert_eq!(track.artists.len(), 2);
+            let album = track.album.unwrap();
+            assert_eq!(album.uri, "spotify:album:al");
+            assert_eq!(album.images[0].url, "https://i.scdn.co/image/1");
+        }
+    }
+}

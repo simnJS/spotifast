@@ -2527,6 +2527,7 @@ pub fn album(app: &mut App, ui: &mut egui::Ui, id: &str) {
                     plays_shown_rows: false,
                 },
             );
+            your_album_stats(app, ui, album, &items);
             album_footer(app, ui, album);
             chrome.finish(app, ui, &album.name, colour, play.as_ref());
         }
@@ -2580,6 +2581,71 @@ pub fn album(app: &mut App, ui: &mut egui::Ui, id: &str) {
         }
     }
     app.album_pages.insert(id.to_string(), page);
+}
+
+/// The owner's own figures for this album from the local listening stats,
+/// in one compact card under its songs: streams, time listened, first
+/// listen and the most played song, which plays from the album on click.
+/// Left out when the log has no stream of it.
+fn your_album_stats(app: &mut App, ui: &mut egui::Ui, album: &Album, items: &[TableItem]) {
+    use super::widgets::your_stats::{self, Shown, Subject};
+    let shown = your_stats::for_subject(app, ui.ctx(), Subject::Album(album.id.clone()));
+    if shown == Shown::Hidden {
+        return;
+    }
+    let palette = app.palette;
+    let locale = app.locale;
+    ui.add_space(24.0);
+    your_stats::frame(&palette, 16).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        theme::text(
+            ui,
+            gettext(locale, "Your stats"),
+            theme::bold(16.0),
+            palette.text,
+        );
+        ui.add_space(12.0);
+        let Shown::Ready(figures) = &shown else {
+            your_stats::draw_skeleton(ui, &palette, 4, 18.0);
+            return;
+        };
+        // Kept to one line: no four-week rank here.
+        let tiles = your_stats::tiles(locale, figures, &gettext(locale, "Your top albums"), false);
+        your_stats::draw_tiles(ui, &palette, &tiles, 18.0);
+        let Some(top) = figures.top_tracks.first() else {
+            return;
+        };
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            theme::text(
+                ui,
+                gettext(locale, "Most played: "),
+                theme::regular(13.0),
+                palette.secondary,
+            );
+            // The album's own copy of the name, when it lists the song.
+            let name = items
+                .iter()
+                .find(|(item, _, _)| item.uri() == top.uri)
+                .map(|(item, _, _)| item.name().to_string())
+                .unwrap_or_else(|| top.name.clone());
+            if theme::link(ui, name, theme::semibold(13.0), palette.text).clicked() {
+                app.actions.push(Action::PlayContext {
+                    uri: album.uri.clone(),
+                    offset_uri: Some(top.uri.clone()),
+                    offset_index: None,
+                });
+            }
+            theme::text(
+                ui,
+                format!(" · {}", your_stats::streams(locale, top.streams)),
+                theme::regular(13.0),
+                palette.secondary,
+            );
+        });
+    });
 }
 
 /// What Spotify sets under an album's songs: its release date, its

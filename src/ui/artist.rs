@@ -38,6 +38,8 @@ const ABOUT_PADDING: f32 = 40.0;
 const VERIFIED_BLUE: Color32 = Color32::from_rgb(0x4c, 0xb3, 0xff);
 /// How many popular songs show before "See more".
 const POPULAR_SHOWN: usize = 5;
+/// The column after a song of Your stats that holds its stream count.
+const STREAMS_WIDTH: f32 = 112.0;
 
 /// Draws the artist page and keeps discography loading placeholders in place.
 pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
@@ -97,6 +99,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
                 });
                 ui.add_space(28.0);
             }
+
+            your_stats(app, ui, artist, &page);
 
             about_card(app, ui, artist, about.as_ref());
             sticky_header(app, ui, artist, banner);
@@ -1181,6 +1185,121 @@ fn concerts_section(app: &mut App, ui: &mut egui::Ui, artist_id: &str, concerts:
             ui.data_mut(|data| data.insert_temp(expanded_id, !expanded));
         }
     }
+}
+
+/// Your stats: the owner's own figures for this artist from the local
+/// listening stats, in a card like About's, with their three most played
+/// songs of the artist. Left out when the log has no stream of them.
+fn your_stats(app: &mut App, ui: &mut egui::Ui, artist: &Artist, page: &crate::model::ArtistPage) {
+    use super::widgets::your_stats::{self, Shown, Subject};
+    let shown = your_stats::for_subject(app, ui.ctx(), Subject::Artist(artist.id.clone()));
+    if shown == Shown::Hidden {
+        return;
+    }
+    let palette = app.palette;
+    let locale = app.locale;
+    heading(ui, &palette, &gettext(locale, "Your stats"));
+    ui.add_space(16.0);
+    let width = ui.available_width().min(ABOUT_WIDTH);
+    ui.scope(|ui| {
+        ui.set_max_width(width);
+        your_stats::frame(&palette, 24).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let Shown::Ready(figures) = &shown else {
+                your_stats::draw_skeleton(ui, &palette, 4, 24.0);
+                return;
+            };
+            let tiles =
+                your_stats::tiles(locale, figures, &gettext(locale, "Your top artists"), true);
+            your_stats::draw_tiles(ui, &palette, &tiles, 24.0);
+            if figures.top_tracks.is_empty() {
+                return;
+            }
+            ui.add_space(24.0);
+            theme::text(
+                ui,
+                gettext(locale, "Your most played"),
+                theme::bold(16.0),
+                palette.text,
+            );
+            ui.add_space(8.0);
+            let known = page.top_tracks.get();
+            let items: Vec<PlayableItem> = figures
+                .top_tracks
+                .iter()
+                .map(|top| {
+                    // Spotify's own copy of the song, when Popular has it,
+                    // carries its cover and every detail.
+                    known
+                        .and_then(|tracks| tracks.iter().find(|track| track.uri == top.uri))
+                        .cloned()
+                        .unwrap_or_else(|| your_stats::track(top))
+                })
+                .map(PlayableItem::Track)
+                .collect();
+            let context = RowContext::Uris(
+                items
+                    .iter()
+                    .map(|item| item.uri().to_string())
+                    .collect::<Vec<_>>()
+                    .into(),
+            );
+            let row_height = if app.settings.tracklist_compact {
+                theme::THIN_ROW_HEIGHT
+            } else {
+                theme::ROW_HEIGHT
+            };
+            for (index, (item, top)) in items.iter().zip(&figures.top_tracks).enumerate() {
+                let room = ui.available_width();
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.allocate_ui_with_layout(
+                        vec2((room - STREAMS_WIDTH).max(0.0), row_height),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            widgets::track_row(
+                                ui,
+                                app,
+                                TrackRow {
+                                    index,
+                                    number: Some(index + 1),
+                                    item,
+                                    context: &context,
+                                    show_cover: !app.settings.tracklist_compact,
+                                    show_album: false,
+                                    added_at: None,
+                                    added_by: None,
+                                    show_added_by: false,
+                                    show_plays: false,
+                                    compact: false,
+                                    thin: app.settings.tracklist_compact,
+                                    shift: 0.0,
+                                    picked: false,
+                                    picked_songs: &[],
+                                    picked_positions: &[],
+                                    position: None,
+                                },
+                            );
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        vec2(STREAMS_WIDTH, row_height),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            ui.add_space(16.0);
+                            theme::text(
+                                ui,
+                                your_stats::streams(locale, top.streams),
+                                theme::regular(13.0),
+                                palette.secondary,
+                            );
+                        },
+                    );
+                });
+            }
+        });
+    });
+    ui.add_space(40.0);
 }
 
 /// One concert as Spotify lists it: a date tile, the city over the venue

@@ -229,6 +229,9 @@ fn contents(app: &mut App, ui: &mut egui::Ui, now: &NowPlaying) {
         // Without Spotify's answer, the panel keeps to what playback knows.
         _ => {}
     }
+    if !now.is_episode {
+        your_stats(app, ui, now);
+    }
     next_in_queue(app, ui);
 }
 
@@ -966,6 +969,59 @@ fn concert_row(app: &mut App, ui: &mut egui::Ui, concert: &Concert) {
     if response.clicked() {
         app.actions.push(Action::OpenUrl(concert.url()));
     }
+}
+
+/// Your stats: how often the owner played this song and since when, and
+/// where its artist stands among theirs, from the local listening stats.
+/// Left out when the log has no stream of the song.
+fn your_stats(app: &mut App, ui: &mut egui::Ui, now: &NowPlaying) {
+    use super::widgets::your_stats::{self, Shown, Subject};
+    let palette = app.palette;
+    let locale = app.locale;
+    match your_stats::for_subject(app, ui.ctx(), Subject::Track(now.uri.clone())) {
+        Shown::Hidden => {}
+        Shown::Loading => {
+            ui.add_space(SECTION_GAP);
+            skeleton(ui, &palette);
+        }
+        Shown::Ready(figures) => {
+            section(ui, palette.surface, |ui| {
+                section_title(ui, &palette, &gettext(locale, "Your stats"), None);
+                ui.add_space(8.0);
+                let mut line = your_stats::played_times(locale, figures.streams);
+                if let Some(first) = figures
+                    .first_ms
+                    .and_then(|ms| your_stats::local_date(locale, ms))
+                {
+                    line.push_str(" · ");
+                    // Translators: {date} is the day the listener first played the song.
+                    line.push_str(&gettext(locale, "first on {date}").replace("{date}", &first));
+                }
+                wrapped(ui, &line, palette.text);
+                if let Some((artist, rank)) = &figures.artist {
+                    ui.add_space(4.0);
+                    let text = gettext(locale, "{artist} is your {rank} artist")
+                        .replace("{artist}", artist)
+                        .replace("{rank}", &your_stats::rank(*rank));
+                    wrapped(ui, &text, palette.secondary);
+                }
+            });
+        }
+    }
+}
+
+/// A line of 14-point text that wraps in the panel's width.
+fn wrapped(ui: &mut egui::Ui, text: &str, color: Color32) {
+    let galley = crate::bidi::layout(
+        ui.painter(),
+        text,
+        theme::regular(14.0),
+        color,
+        ui.available_width(),
+        usize::MAX,
+        None,
+    );
+    ui.add(egui::Label::new(galley).selectable(false));
 }
 
 /// Next in queue: the queue's head, which plays on click, and a way to the
