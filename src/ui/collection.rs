@@ -3330,8 +3330,8 @@ impl PageChrome {
     ) {
         if let Some(colour) = colour {
             let x = ui.clip_rect().x_range();
-            let foot = super::blend(palette.window, colour, WASH_STRENGTH * HEADER_FOOT);
-            let start = super::blend(palette.window, colour, WASH_STRENGTH * ACTIONS_TOP);
+            let foot = super::blend(palette.panel, colour, WASH_STRENGTH * HEADER_FOOT);
+            let start = super::blend(palette.panel, colour, WASH_STRENGTH * ACTIONS_TOP);
             // The window's wash shows at the top and gives way to the
             // header's darker foot, so the two meet without a seam.
             let header = Rect::from_x_y_ranges(x, self.top..=self.header_bottom);
@@ -3341,7 +3341,7 @@ impl PageChrome {
                 self.wash,
                 egui::Shape::Vec(vec![
                     widgets::vertical_gradient(header, egui::Color32::TRANSPARENT, foot),
-                    widgets::vertical_gradient(actions, start, palette.window),
+                    widgets::vertical_gradient(actions, start, palette.panel),
                 ]),
             );
         }
@@ -3373,7 +3373,7 @@ impl PageChrome {
         let clip = ui.clip_rect();
         let rect = Rect::from_min_size(clip.min, vec2(clip.width(), STICKY_BAR));
         let fill = colour.map_or(palette.surface, |colour| {
-            super::blend(palette.window, colour, WASH_STRENGTH * HEADER_FOOT)
+            super::blend(palette.panel, colour, WASH_STRENGTH * HEADER_FOOT)
         });
         ui.painter()
             .rect_filled(rect, 0.0, fill.gamma_multiply(shown));

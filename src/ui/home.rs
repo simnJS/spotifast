@@ -160,7 +160,7 @@ const LIKED_TINT: Color32 = Color32::from_rgb(0x50, 0x38, 0xc8);
 /// playing song's, darkened into the window; transparent with neither.
 fn wash_target(palette: &Palette, art: Option<Color32>) -> egui::Rgba {
     art.map_or(egui::Rgba::TRANSPARENT, |art| {
-        egui::Rgba::from(super::blend(palette.window, art, WASH_STRENGTH))
+        egui::Rgba::from(super::blend(palette.panel, art, WASH_STRENGTH))
     })
 }
 

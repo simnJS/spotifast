@@ -364,8 +364,8 @@ fn action_wash(app: &mut App, ui: &mut egui::Ui, artist: &Artist, banner: Rect) 
     widgets::paint_vertical_gradient(
         ui,
         rect,
-        super::blend(palette.window, tint, 0.35),
-        palette.window,
+        super::blend(palette.panel, tint, 0.35),
+        palette.panel,
     );
 }
 
@@ -1094,7 +1094,7 @@ fn sticky_header(app: &mut App, ui: &mut egui::Ui, artist: &Artist, banner: Rect
     }
     let palette = app.palette;
     let fill = artist_tint(app, artist).map_or(palette.surface, |tint| {
-        super::blend(palette.window, tint, 0.45)
+        super::blend(palette.panel, tint, 0.45)
     });
     let bar = Rect::from_min_size(viewport.min, vec2(viewport.width(), STICKY_HEIGHT));
     // Registered after the page, so the bar, not the rows under it, takes
