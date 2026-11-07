@@ -687,9 +687,101 @@ impl TopPeriod {
     }
 }
 
+/// Which of Spotify's Home chips a read of its shortcuts is for. Spotify
+/// names each chip's feed by a facet; All has none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum HomeFacet {
+    #[default]
+    All,
+    Music,
+    Podcasts,
+}
+
+impl HomeFacet {
+    pub const ALL: [Self; 3] = [Self::All, Self::Music, Self::Podcasts];
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::All => 0,
+            Self::Music => 1,
+            Self::Podcasts => 2,
+        }
+    }
+
+    /// The facet Spotify's own Home asks its `home` query for.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::All => "",
+            Self::Music => "music-chip",
+            Self::Podcasts => "podcasts-chip",
+        }
+    }
+}
+
+/// One of Spotify's own Home shortcuts, the 2x4 grid its Home opens with:
+/// what the account returns to, in Spotify's order.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum HomeShortcut {
+    LikedSongs,
+    Playlist(Playlist),
+    Album(Album),
+    Artist(Artist),
+    Show(Show),
+    Track(Track),
+    Episode(Episode),
+}
+
+impl HomeShortcut {
+    pub fn uri(&self) -> Option<&str> {
+        match self {
+            Self::LikedSongs => None,
+            Self::Playlist(playlist) => Some(&playlist.uri),
+            Self::Album(album) => Some(&album.uri),
+            Self::Artist(artist) => Some(&artist.uri),
+            Self::Show(show) => Some(&show.uri),
+            Self::Track(track) => Some(&track.uri),
+            Self::Episode(episode) => Some(&episode.uri),
+        }
+    }
+
+    /// Whether the shortcut belongs under the Podcasts chip.
+    pub fn podcast(&self) -> bool {
+        matches!(self, Self::Show(_) | Self::Episode(_))
+    }
+}
+
+/// Spotify's Home shortcuts for each chip, and their reads.
+#[derive(Default)]
+pub struct HomeShortcuts {
+    /// By [`HomeFacet::index`].
+    pub facets: [Loadable<Vec<HomeShortcut>>; 3],
+    /// A read on its way, by facet.
+    pub in_flight: [bool; 3],
+    /// The Home generation each facet was last asked for in, so a refresh
+    /// asks again and a failed read waits for the next one.
+    pub asked: [u64; 3],
+}
+
+impl HomeShortcuts {
+    pub fn get(&self, facet: HomeFacet) -> Option<&Vec<HomeShortcut>> {
+        self.facets[facet.index()].get()
+    }
+
+    /// Whether a chip's shortcuts are still to be asked for in this Home
+    /// generation.
+    pub fn due(&self, facet: HomeFacet, generation: u64) -> bool {
+        let index = facet.index();
+        !self.in_flight[index] && self.asked[index] != generation
+    }
+}
+
 #[derive(Default)]
 pub struct HomeData {
     pub recently_played: Loadable<Vec<PlayHistory>>,
+    /// Spotify's own shortcuts for the grid at the top of Home, read over
+    /// the playback session. The grid falls back to `recently_played`
+    /// without them.
+    pub shortcuts: HomeShortcuts,
     pub top_artists: Loadable<Vec<Artist>>,
     /// Active period selected for top songs.
     pub top_period: TopPeriod,
@@ -773,6 +865,9 @@ pub struct HomeSnapshot {
     /// `None` for a shelf Spotify had not answered for, so it loads again
     /// at the next start instead of showing as empty.
     pub recently_played: Option<Vec<PlayHistory>>,
+    /// Spotify's own Home shortcuts under the All chip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shortcuts: Option<Vec<HomeShortcut>>,
     pub top_artists: Option<Vec<Artist>>,
     /// Last 4 weeks top tracks preview (retained for backward compatibility).
     pub top_tracks: Option<Vec<Track>>,
@@ -1273,6 +1368,8 @@ pub struct Toast {
 #[derive(Clone, Debug)]
 pub enum Action {
     Open(Page),
+    /// Reads Spotify's own Home shortcuts for a chip, when they are due.
+    LoadHomeShortcuts(HomeFacet),
     /// Opens the radio of a song shown in a list, after caching the row's
     /// song so the page has its name and cover (#644).
     OpenSongRadio {

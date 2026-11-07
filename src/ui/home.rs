@@ -10,7 +10,7 @@ use egui::{Color32, CornerRadius, Id, Rect, Sense, Ui, UiBuilder, Vec2, pos2, ve
 use crate::api::models::{Album, Episode, PlayableItem, Playlist, Show, pick_image};
 use crate::app::App;
 use crate::i18n::{Locale, gettext};
-use crate::model::{Action, Loadable, Page, RowContext, TopPeriod};
+use crate::model::{Action, HomeFacet, HomeShortcut, Loadable, Page, RowContext, TopPeriod};
 use crate::theme::{self, Icon, Palette};
 
 use super::widgets::{self, CardResponse, TrackRow};
@@ -26,6 +26,15 @@ pub(crate) enum Filter {
 }
 
 impl Filter {
+    /// The facet Spotify's Home reads this chip's shortcuts with.
+    fn facet(self) -> HomeFacet {
+        match self {
+            Self::All => HomeFacet::All,
+            Self::Music => HomeFacet::Music,
+            Self::Podcasts => HomeFacet::Podcasts,
+        }
+    }
+
     /// Whether a shortcut or shelf for a podcast belongs under this chip.
     fn admits(self, podcast: bool) -> bool {
         match self {
@@ -227,9 +236,9 @@ struct Tile {
     uri: Option<String>,
     liked: bool,
     owned_playlist: Option<Playlist>,
-    /// A song played on its own, which the tile plays and whose menu it
-    /// offers, rather than a playlist, album or artist.
-    song: Option<crate::api::models::Track>,
+    /// A song or an episode on its own, which the tile plays and whose
+    /// menu it offers, rather than a playlist, album or artist.
+    song: Option<PlayableItem>,
 }
 
 impl Tile {
@@ -245,13 +254,16 @@ const TILE_GAP: f32 = 8.0;
 /// How many quick-access tiles Home shows, as Spotify does.
 const TILES: usize = 8;
 
-/// What was played most recently, as Spotify's Home shows it: the playlists,
-/// albums, artists and podcasts songs were played from, Liked Songs, and
-/// songs played on their own, newest first (#942). Until Spotify's play
+/// Spotify's own Home shortcuts, in its order: the playlists, mixes,
+/// albums, artists, podcasts and Liked Songs it picks for the account.
+/// Until they come, or when they cannot be read, what was played most
+/// recently: the playlists, albums, artists and podcasts songs were played
+/// from, Liked Songs, and songs played on their own, newest first (#942),
+/// never a song where it was played from is known. Until Spotify's play
 /// history arrives, or when it holds fewer, Liked Songs and the first
 /// playlists in the Library fill the rest. Under the Podcasts chip only
 /// podcasts are shortcuts, and saved ones fill the rest; under Music, no
-/// podcast is.
+/// podcast is. A chip whose own shortcuts have not come starts from All's.
 fn quick_access_tiles(app: &App, filter: Filter) -> Vec<Tile> {
     let tile_art = app.art_px(TILE_HEIGHT);
     let collection = app
@@ -281,6 +293,98 @@ fn quick_access_tiles(app: &App, filter: Filter) -> Vec<Tile> {
     };
     let mut tiles: Vec<Tile> = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    // Spotify's own shortcuts, as its Home shows them. A chip whose own
+    // have not come takes those of All that belong under it.
+    let own = app
+        .home
+        .shortcuts
+        .get(filter.facet())
+        .filter(|shortcuts| !shortcuts.is_empty());
+    let spotify = own.or_else(|| {
+        app.home.shortcuts.get(HomeFacet::All).filter(|shortcuts| {
+            shortcuts
+                .iter()
+                .any(|shortcut| filter.admits(shortcut.podcast()))
+        })
+    });
+    if let Some(shortcuts) = spotify {
+        for shortcut in shortcuts {
+            if tiles.len() == TILES {
+                break;
+            }
+            let tile = match shortcut {
+                HomeShortcut::LikedSongs => Some(liked_tile()),
+                HomeShortcut::Playlist(playlist) => Some(playlist_tile(
+                    app.known_playlist(&playlist.id).unwrap_or(playlist),
+                )),
+                HomeShortcut::Album(album) => Some(Tile {
+                    image: pick_image(&album.images, tile_art).map(str::to_string),
+                    name: album.name.clone(),
+                    page: Page::Album(album.id.clone()),
+                    uri: Some(album.uri.clone()),
+                    liked: false,
+                    owned_playlist: None,
+                    song: None,
+                }),
+                HomeShortcut::Artist(artist) => Some(Tile {
+                    image: pick_image(&artist.images, tile_art).map(str::to_string),
+                    name: artist.name.clone(),
+                    page: Page::Artist(artist.id.clone()),
+                    uri: Some(artist.uri.clone()),
+                    liked: false,
+                    owned_playlist: None,
+                    song: None,
+                }),
+                HomeShortcut::Show(show) => Some(Tile {
+                    image: pick_image(&show.images, tile_art).map(str::to_string),
+                    name: show.name.clone(),
+                    page: Page::Show(show.id.clone()),
+                    uri: Some(show.uri.clone()),
+                    liked: false,
+                    owned_playlist: None,
+                    song: None,
+                }),
+                HomeShortcut::Track(track) => track
+                    .album
+                    .as_ref()
+                    .filter(|album| !album.id.is_empty())
+                    .map(|album| Tile {
+                        image: track.image(tile_art).map(str::to_string),
+                        name: track.name.clone(),
+                        page: Page::Album(album.id.clone()),
+                        uri: Some(track.uri.clone()),
+                        liked: false,
+                        owned_playlist: None,
+                        song: Some(PlayableItem::Track(track.clone())),
+                    }),
+                HomeShortcut::Episode(episode) => episode
+                    .show
+                    .as_ref()
+                    .filter(|show| !show.id.is_empty())
+                    .map(|show| Tile {
+                        image: pick_image(&episode.images, tile_art)
+                            .or_else(|| pick_image(&show.images, tile_art))
+                            .map(str::to_string),
+                        name: episode.name.clone(),
+                        page: Page::Show(show.id.clone()),
+                        uri: Some(episode.uri.clone()),
+                        liked: false,
+                        owned_playlist: None,
+                        song: Some(PlayableItem::Episode(episode.clone())),
+                    }),
+            };
+            if let Some(tile) = tile
+                && filter.admits(tile.podcast())
+                && seen.insert(tile.page.clone())
+            {
+                tiles.push(tile);
+            }
+        }
+        // Spotify's own grid for this chip is the whole grid.
+        if own.is_some() {
+            return tiles;
+        }
+    }
     for play in app.home.recently_played.get().into_iter().flatten() {
         if tiles.len() == TILES {
             break;
@@ -326,8 +430,10 @@ fn quick_access_tiles(app: &App, filter: Filter) -> Vec<Tile> {
                     song: None,
                 })
             }
-            // A song played on its own, or from somewhere Home cannot name.
-            _ => track
+            // Somewhere Home cannot name: no song stands in for it.
+            Some(_) => None,
+            // A song played on its own.
+            None => track
                 .album
                 .as_ref()
                 .filter(|album| !album.id.is_empty())
@@ -338,7 +444,7 @@ fn quick_access_tiles(app: &App, filter: Filter) -> Vec<Tile> {
                     uri: Some(track.uri.clone()),
                     liked: false,
                     owned_playlist: None,
-                    song: Some(track.clone()),
+                    song: Some(PlayableItem::Track(track.clone())),
                 }),
         };
         if let Some(tile) = tile
@@ -433,6 +539,19 @@ fn hover_play(
 /// The shortcut grid; returns the colour of the hovered shortcut's art, for
 /// the wash behind it.
 fn quick_access(app: &mut App, ui: &mut Ui, filter: Filter) -> Option<Color32> {
+    // A chip's own shortcuts, and All's to stand in until they come.
+    if app.local_ready && app.network_reachable {
+        for facet in [HomeFacet::All, filter.facet()] {
+            if app.home.shortcuts.due(facet, app.home.generation)
+                && !app
+                    .actions
+                    .iter()
+                    .any(|action| matches!(action, Action::LoadHomeShortcuts(f) if *f == facet))
+            {
+                app.actions.push(Action::LoadHomeShortcuts(facet));
+            }
+        }
+    }
     let tiles = quick_access_tiles(app, filter);
     let available = ui.available_width();
     let columns = shortcut_columns(available);
@@ -584,8 +703,8 @@ fn shortcut(
             .id(ui.make_persistent_id(("quick-access-menu", uri)))
             .frame(widgets::menu_frame(&palette))
             .show(|ui| match song {
-                Some(track) => {
-                    widgets::item_menu(ui, app, &PlayableItem::Track(track.clone()), None, None);
+                Some(item) => {
+                    widgets::item_menu(ui, app, item, None, None);
                 }
                 None => widgets::context_menu_items(ui, app, uri, name, owned_playlist.as_ref()),
             });
@@ -1892,6 +2011,7 @@ mod tests {
         );
         crate::demo::populate(&mut app);
         // Only the Library's playlists, so the second tile is the first one.
+        app.home.shortcuts = Default::default();
         app.home.recently_played = Loadable::Loaded(Vec::new());
         let first = app.library.playlists.get().unwrap()[0].images.clone();
         let width = |url: Option<&str>| {
@@ -1938,6 +2058,8 @@ mod tests {
             },
         );
         crate::demo::populate(&mut app);
+        // Without Spotify's own shortcuts.
+        app.home.shortcuts = Default::default();
         let history = app.home.recently_played.get().unwrap().clone();
         let tiles = quick_access_tiles(&app, Filter::All);
         assert_eq!(tiles.len(), TILES);
@@ -2026,6 +2148,90 @@ mod tests {
             }
         }
         text
+    }
+
+    /// The grid is Spotify's own shortcuts, in its order, when they came:
+    /// Liked Songs, mixes, playlists, an album, an artist and a podcast.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn home_shortcuts_fill_the_grid_in_spotifys_order() {
+        let (mut app, root) = demo_app("home-spotify-shortcuts");
+        let tiles = quick_access_tiles(&app, Filter::All);
+        let pages: Vec<_> = tiles.iter().map(|tile| tile.page.clone()).collect();
+        assert_eq!(
+            pages,
+            [
+                Page::LikedSongs,
+                Page::Playlist("mix0".into()),
+                Page::Playlist("pl1".into()),
+                Page::Album("alb2".into()),
+                Page::Artist("art1".into()),
+                Page::Show("sh0".into()),
+                Page::Playlist("pl0".into()),
+                Page::Playlist("pl5".into()),
+            ]
+        );
+        assert!(tiles.iter().all(|tile| tile.song.is_none()));
+        assert_eq!(tiles[1].name, "Downtempo Mix");
+        assert_eq!(tiles[1].uri.as_deref(), Some("spotify:playlist:mix0"));
+
+        // A chip's own answer is its whole grid.
+        app.home.shortcuts.facets[HomeFacet::Podcasts.index()] =
+            Loadable::Loaded(vec![HomeShortcut::Show(crate::api::models::Show {
+                id: "sh3".into(),
+                uri: "spotify:show:sh3".into(),
+                name: "Darknet Diaries".into(),
+                ..Default::default()
+            })]);
+        let podcasts = quick_access_tiles(&app, Filter::Podcasts);
+        assert_eq!(podcasts.len(), 1);
+        assert_eq!(podcasts[0].page, Page::Show("sh3".into()));
+        app.backend.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Until a chip's own shortcuts come, it starts from All's that belong
+    /// under it, and the rest fill as before.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn home_chips_start_from_alls_shortcuts() {
+        let (mut app, root) = demo_app("home-chip-standin");
+        let music = quick_access_tiles(&app, Filter::Music);
+        assert_eq!(music[0].page, Page::LikedSongs);
+        assert_eq!(music[1].page, Page::Playlist("mix0".into()));
+        assert!(music.iter().all(|tile| !tile.podcast()));
+        let podcasts = quick_access_tiles(&app, Filter::Podcasts);
+        assert_eq!(podcasts[0].page, Page::Show("sh0".into()));
+        assert!(podcasts.len() > 1, "saved podcasts fill the rest");
+        assert!(podcasts.iter().all(Tile::podcast));
+        app.backend.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// When Spotify's shortcuts cannot be read, the grid is the one the
+    /// play history makes, and a song played from somewhere Home cannot
+    /// name does not stand in for it.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn home_shortcuts_fall_back_to_what_was_played() {
+        let (mut app, root) = demo_app("home-shortcuts-fallback");
+        app.home.shortcuts.facets[HomeFacet::All.index()] = Loadable::Failed("refused".into());
+        let tiles = quick_access_tiles(&app, Filter::All);
+        assert_eq!(tiles[0].page, Page::Playlist("pl1".into()));
+        assert_eq!(tiles.len(), TILES);
+
+        if let Loadable::Loaded(history) = &mut app.home.recently_played {
+            history.truncate(1);
+            history[0].context = Some(crate::api::models::Context {
+                kind: "station".into(),
+                uri: "spotify:station:somewhere".into(),
+            });
+        }
+        let tiles = quick_access_tiles(&app, Filter::All);
+        assert!(tiles.iter().all(|tile| tile.song.is_none()));
+        assert_eq!(tiles[0].page, Page::LikedSongs);
+        app.backend.shutdown();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The chips sort the shortcuts as Spotify's do: Music leaves podcasts

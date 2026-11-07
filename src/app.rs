@@ -5863,6 +5863,13 @@ impl App {
         {
             home.recently_played = Loadable::Loaded(recent);
         }
+        if let Some(shortcuts) = cached.shortcuts
+            && home.shortcuts.facets[HomeFacet::All.index()]
+                .get()
+                .is_none()
+        {
+            home.shortcuts.facets[HomeFacet::All.index()] = Loadable::Loaded(shortcuts);
+        }
         if let Some(artists) = cached.top_artists
             && home.top_artists.get().is_none()
         {
@@ -5966,6 +5973,7 @@ impl App {
         let home = &self.home;
         let snapshot = HomeSnapshot {
             recently_played: home.recently_played.get().cloned(),
+            shortcuts: home.shortcuts.get(HomeFacet::All).cloned(),
             top_artists: home.top_artists.get().cloned(),
             top_tracks: home.top_tracks_by_period[0].get().cloned().or_else(|| {
                 (home.top_period == TopPeriod::ShortTerm)
@@ -6384,6 +6392,25 @@ impl App {
             generation: self.home.made_for_you_generation,
             force,
         });
+    }
+
+    /// Reads Spotify's own Home shortcuts for a chip once per Home refresh,
+    /// over the playback session: until it is ready, or when the read
+    /// fails, the grid shows the play history instead.
+    fn load_home_shortcuts(&mut self, facet: HomeFacet) {
+        let index = facet.index();
+        let generation = self.home.generation;
+        let shortcuts = &mut self.home.shortcuts;
+        if !self.network_reachable || !self.local_ready || !shortcuts.due(facet, generation) {
+            return;
+        }
+        shortcuts.asked[index] = generation;
+        shortcuts.in_flight[index] = true;
+        if shortcuts.facets[index].get().is_none() {
+            shortcuts.facets[index] = Loadable::Loading;
+        }
+        self.backend
+            .api(ApiRequest::HomeShortcuts { facet, generation });
     }
 
     /// Asks for the newest episodes of the most recently saved podcasts,
@@ -8328,6 +8355,26 @@ impl App {
                     self.request_contains(uris);
                 }
                 self.home.new_release_tracks.refresh(result);
+            }
+            ApiResponse::HomeShortcuts {
+                facet,
+                generation,
+                result,
+            } => {
+                let index = facet.index();
+                let shortcuts = &mut self.home.shortcuts;
+                if generation == shortcuts.asked[index] {
+                    shortcuts.in_flight[index] = false;
+                }
+                if let Err(error) = &result {
+                    log::debug!("Home shortcuts read failed facet={facet:?}: {error}");
+                }
+                let changed = facet == HomeFacet::All && result.is_ok();
+                // Shortcuts on show stay when a refresh fails.
+                shortcuts.facets[index].refresh(result);
+                if changed {
+                    self.store_home_cache();
+                }
             }
             ApiResponse::BrowseAll(result) => {
                 self.search.browse = match result {
@@ -12195,6 +12242,7 @@ impl App {
         match action {
             Action::Open(page) => self.open(page),
             Action::OpenSongRadio { uri, track } => self.open_song_radio(&uri, &track),
+            Action::LoadHomeShortcuts(facet) => self.load_home_shortcuts(facet),
             Action::PrepareTint(url) => {
                 if self.settings.accent_from_art {
                     self.tint_for(Some(&url));
@@ -22944,6 +22992,82 @@ mod tests {
             assert_eq!(app.selected_device.is_some(), id == "speaker");
             assert_eq!(app.remote_poll_seq, seq + u64::from(id == "soloist"));
         }
+    }
+
+    /// Spotify's own Home shortcuts are read once per Home refresh for each
+    /// chip, only over the playback session, and a failed refresh keeps
+    /// what they showed.
+    #[test]
+    fn home_shortcuts_are_read_once_per_refresh_over_the_session() {
+        let mut app = test_app("home-shortcuts");
+        app.network_reachable = true;
+        app.home.generation = 4;
+        app.load_home_shortcuts(HomeFacet::All);
+        assert!(
+            !app.home.shortcuts.in_flight[0],
+            "nothing is asked before the playback session is ready"
+        );
+        app.local_ready = true;
+        app.load_home_shortcuts(HomeFacet::All);
+        assert!(app.home.shortcuts.in_flight[0]);
+        assert!(app.home.shortcuts.facets[0].is_loading());
+        assert_eq!(app.home.shortcuts.asked[0], 4);
+        app.handle_api(ApiResponse::HomeShortcuts {
+            facet: HomeFacet::All,
+            generation: 4,
+            result: Ok(vec![HomeShortcut::LikedSongs]),
+        });
+        assert!(!app.home.shortcuts.in_flight[0]);
+        assert_eq!(
+            app.home.shortcuts.get(HomeFacet::All),
+            Some(&vec![HomeShortcut::LikedSongs])
+        );
+        app.load_home_shortcuts(HomeFacet::All);
+        assert!(!app.home.shortcuts.in_flight[0], "asked once a refresh");
+        assert!(!app.home.shortcuts.in_flight[2], "chips are asked apart");
+
+        app.home.generation = 5;
+        app.load_home_shortcuts(HomeFacet::All);
+        assert!(app.home.shortcuts.in_flight[0], "a refresh asks again");
+        app.handle_api(ApiResponse::HomeShortcuts {
+            facet: HomeFacet::All,
+            generation: 5,
+            result: Err(crate::api::ApiError::Network("offline".into())),
+        });
+        assert_eq!(
+            app.home.shortcuts.get(HomeFacet::All),
+            Some(&vec![HomeShortcut::LikedSongs]),
+            "a failed refresh keeps the shortcuts on show"
+        );
+        app.load_home_shortcuts(HomeFacet::All);
+        assert!(
+            !app.home.shortcuts.in_flight[0],
+            "a failed read waits for the next refresh"
+        );
+        app.backend.shutdown();
+    }
+
+    /// The All chip's shortcuts are kept with Home's cache, and a cache
+    /// written before them still reads.
+    #[test]
+    fn home_cache_keeps_spotifys_shortcuts() {
+        let snapshot = HomeSnapshot {
+            shortcuts: Some(vec![HomeShortcut::LikedSongs]),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let read: HomeSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(read.shortcuts, Some(vec![HomeShortcut::LikedSongs]));
+        let old: HomeSnapshot = serde_json::from_str(r#"{"recently_played":[]}"#).unwrap();
+        assert_eq!(old.shortcuts, None);
+
+        let mut app = test_app("home-shortcuts-cache");
+        app.restore_home(read);
+        assert_eq!(
+            app.home.shortcuts.get(HomeFacet::All),
+            Some(&vec![HomeShortcut::LikedSongs])
+        );
+        app.backend.shutdown();
     }
 
     fn test_app(name: &str) -> App {

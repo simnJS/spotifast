@@ -598,6 +598,14 @@ pub fn populate(app: &mut App) {
         Some("spotify:album:alb0".to_string()),
         Some("spotify:playlist:pl6".to_string()),
     ];
+    // Spotify's own Home shortcuts, read from a sample answer shaped as its
+    // web player's `home` query returns them.
+    app.home.shortcuts.facets[HomeFacet::All.index()] =
+        Loadable::from_result(crate::session_reads::home_shortcuts_from(
+            &serde_json::from_str(include_str!("demo/home-shortcuts.json")).unwrap(),
+        ));
+    // Nothing to ask the demo's absent session for.
+    app.home.shortcuts.asked = [app.home.generation; 3];
     app.home.recently_played = Loadable::Loaded(
         tracks
             .iter()
@@ -2540,6 +2548,8 @@ mod tests {
     fn by_you_sidebar_filter_can_be_toggled_and_survives_shelf_switches() {
         use egui::accesskit::{Action as AccessibleAction, Role};
         let (ctx, mut app) = accessible_app("by-you");
+        // Home's own Discover Weekly shortcut would share the row's label.
+        app.home.shortcuts = Default::default();
         app.settings.art_expanded = false;
         accessible_frame(&ctx, &mut app, vec![]);
         let tree = accessible_frame(&ctx, &mut app, vec![]);
@@ -3629,6 +3639,8 @@ mod tests {
     fn library_grid_highlights_a_song_drop_target_during_drag() {
         use egui::accesskit::Role;
         let (ctx, mut app) = accessible_app("library-grid-drop-highlight");
+        // Home's own Liked Songs shortcut would share the card's label.
+        app.home.shortcuts = Default::default();
         app.settings.sidebar_grid = true;
         let tree = accessible_frame(&ctx, &mut app, vec![]);
         let liked = tree

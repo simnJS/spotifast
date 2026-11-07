@@ -1,0 +1,389 @@
+{
+ "data": {
+  "home": {
+   "__typename": "HomeResponsePayload",
+   "greeting": {
+    "transformedLabel": "Good evening"
+   },
+   "homeChips": [
+    {
+     "id": "music-chip",
+     "label": {
+      "transformedLabel": "Music"
+     },
+     "subChips": []
+    },
+    {
+     "id": "podcasts-chip",
+     "label": {
+      "transformedLabel": "Podcasts"
+     },
+     "subChips": []
+    }
+   ],
+   "sectionContainer": {
+    "sections": {
+     "totalCount": 2,
+     "items": [
+      {
+       "uri": "spotify:section:0JQ5DAnM3wGh0gz1MXnu7S",
+       "data": {
+        "__typename": "HomeShortsSectionData"
+       },
+       "sectionItems": {
+        "totalCount": 10,
+        "items": [
+         {
+          "uri": "spotify:user:demo:collection",
+          "content": {
+           "__typename": "PlaylistResponseWrapper",
+           "data": {
+            "__typename": "Playlist",
+            "uri": "spotify:user:demo:collection",
+            "name": "Liked Songs",
+            "images": {
+             "items": []
+            }
+           }
+          }
+         },
+         {
+          "uri": "spotify:playlist:mix0",
+          "content": {
+           "__typename": "PlaylistResponseWrapper",
+           "data": {
+            "__typename": "Playlist",
+            "uri": "spotify:playlist:mix0",
+            "name": "Downtempo Mix",
+            "description": "Bonobo, Khruangbin and Floating Points",
+            "images": {
+             "items": [
+              {
+               "sources": [
+                {
+                 "url": "https://picsum.photos/seed/spotifast600/640/640",
+                 "width": 640,
+                 "height": 640
+                },
+                {
+                 "url": "https://picsum.photos/seed/spotifast600/300/300",
+                 "width": 300,
+                 "height": 300
+                },
+                {
+                 "url": "https://picsum.photos/seed/spotifast600/64/64",
+                 "width": 64,
+                 "height": 64
+                }
+               ],
+               "extractedColors": {
+                "colorDark": {
+                 "hex": "#535353"
+                }
+               }
+              }
+             ]
+            },
+            "ownerV2": {
+             "data": {
+              "__typename": "User",
+              "uri": "spotify:user:spotify",
+              "name": "Spotify"
+             }
+            },
+            "attributes": []
+           }
+          }
+         },
+         {
+          "uri": "spotify:playlist:pl1",
+          "content": {
+           "__typename": "PlaylistResponseWrapper",
+           "data": {
+            "__typename": "Playlist",
+            "uri": "spotify:playlist:pl1",
+            "name": "Late night focus",
+            "images": {
+             "items": [
+              {
+               "sources": [
+                {
+                 "url": "https://picsum.photos/seed/spotifast301/640/640",
+                 "width": 640,
+                 "height": 640
+                },
+                {
+                 "url": "https://picsum.photos/seed/spotifast301/300/300",
+                 "width": 300,
+                 "height": 300
+                },
+                {
+                 "url": "https://picsum.photos/seed/spotifast301/64/64",
+                 "width": 64,
+                 "height": 64
+                }
+               ]
+              }
+             ]
+            },
+            "ownerV2": {
+             "data": {
+              "__typename": "User",
+              "uri": "spotify:user:demo",
+              "name": "Carmine"
+             }
+            }
+           }
+          }
+         },
+         {
+          "uri": "spotify:album:alb2",
+          "content": {
+           "__typename": "AlbumResponseWrapper",
+           "data": {
+            "__typename": "Album",
+            "uri": "spotify:album:alb2",
+            "name": "All Melody",
+            "coverArt": {
+             "sources": [
+              {
+               "url": "https://picsum.photos/seed/spotifast202/640/640",
+               "width": 640,
+               "height": 640
+              },
+              {
+               "url": "https://picsum.photos/seed/spotifast202/300/300",
+               "width": 300,
+               "height": 300
+              },
+              {
+               "url": "https://picsum.photos/seed/spotifast202/64/64",
+               "width": 64,
+               "height": 64
+              }
+             ]
+            },
+            "artists": {
+             "items": [
+              {
+               "uri": "spotify:artist:art2",
+               "profile": {
+                "name": "Nils Frahm"
+               }
+              }
+             ]
+            }
+           }
+          }
+         },
+         {
+          "uri": "spotify:artist:art1",
+          "content": {
+           "__typename": "ArtistResponseWrapper",
+           "data": {
+            "__typename": "Artist",
+            "uri": "spotify:artist:art1",
+            "profile": {
+             "name": "Khruangbin"
+            },
+            "visuals": {
+             "avatarImage": {
+              "sources": [
+               {
+                "url": "https://picsum.photos/seed/spotifast101/640/640",
+                "width": 640,
+                "height": 640
+               },
+               {
+                "url": "https://picsum.photos/seed/spotifast101/300/300",
+                "width": 300,
+                "height": 300
+               },
+               {
+                "url": "https://picsum.photos/seed/spotifast101/64/64",
+                "width": 64,
+                "height": 64
+               }
+              ]
+             }
+            }
+           }
+          }
+         },
+         {
+          "uri": "spotify:show:sh0",
+          "content": {
+           "__typename": "PodcastResponseWrapper",
+           "data": {
+            "__typename": "Podcast",
+            "uri": "spotify:show:sh0",
+            "name": "Rework",
+            "publisher": {
+             "name": "37signals"
+            },
+            "coverArt": {
+             "sources": [
+              {
+               "url": "https://picsum.photos/seed/spotifast500/640/640",
+               "width": 640,
+               "height": 640
+              },
+              {
+               "url": "https://picsum.photos/seed/spotifast500/300/300",
+               "width": 300,
+               "height": 300
+              },
+              {
+               "url": "https://picsum.photos/seed/spotifast500/64/64",
+               "width": 64,
+               "height": 64
+              }
+             ]
+            }
+           }
+          }
+         },
+         {
+          "uri": "spotify:audiobook:ab0",
+          "content": {
+           "__typename": "PodcastOrAudiobookResponseWrapper",
+           "data": {
+            "__typename": "Audiobook",
+            "uri": "spotify:audiobook:ab0",
+            "name": "An audiobook",
+            "coverArt": {
+             "sources": [
+              {
+               "url": "https://picsum.photos/seed/spotifast700/640/640",
+               "width": 640,
+               "height": 640
+              },
+              {
+               "url": "https://picsum.photos/seed/spotifast700/300/300",
+               "width": 300,
+               "height": 300
+              },
+              {
+               "url": "https://picsum.photos/seed/spotifast700/64/64",
+               "width": 64,
+               "height": 64
+              }
+             ]
+            }
+           }
+          }
+         },
+         {
+          "uri": "spotify:playlist:pl0",
+          "content": {
+           "__typename": "PlaylistResponseWrapper",
+           "data": {
+            "__typename": "Playlist",
+            "uri": "spotify:playlist:pl0",
+            "name": "Discover Weekly",
+            "images": {
+             "items": [
+              {
+               "sources": [
+                {
+                 "url": "https://picsum.photos/seed/spotifast300/640/640",
+                 "width": 640,
+                 "height": 640
+                },
+                {
+                 "url": "https://picsum.photos/seed/spotifast300/300/300",
+                 "width": 300,
+                 "height": 300
+                },
+                {
+                 "url": "https://picsum.photos/seed/spotifast300/64/64",
+                 "width": 64,
+                 "height": 64
+                }
+               ]
+              }
+             ]
+            },
+            "ownerV2": {
+             "data": {
+              "__typename": "User",
+              "uri": "spotify:user:spotify",
+              "name": "Spotify"
+             }
+            }
+           }
+          }
+         },
+         {
+          "uri": "spotify:playlist:gone",
+          "content": {
+           "__typename": "PlaylistResponseWrapper",
+           "data": {
+            "__typename": "NotFound"
+           }
+          }
+         },
+         {
+          "uri": "spotify:playlist:pl5",
+          "content": {
+           "__typename": "PlaylistResponseWrapper",
+           "data": {
+            "__typename": "Playlist",
+            "uri": "spotify:playlist:pl5",
+            "name": "Berlin nights",
+            "images": {
+             "items": [
+              {
+               "sources": [
+                {
+                 "url": "https://picsum.photos/seed/spotifast305/640/640",
+                 "width": 640,
+                 "height": 640
+                },
+                {
+                 "url": "https://picsum.photos/seed/spotifast305/300/300",
+                 "width": 300,
+                 "height": 300
+                },
+                {
+                 "url": "https://picsum.photos/seed/spotifast305/64/64",
+                 "width": 64,
+                 "height": 64
+                }
+               ]
+              }
+             ]
+            },
+            "ownerV2": {
+             "data": {
+              "__typename": "User",
+              "uri": "spotify:user:demo",
+              "name": "Carmine"
+             }
+            }
+           }
+          }
+         }
+        ]
+       }
+      },
+      {
+       "uri": "spotify:section:0JQ5DAqbMKFHCcUVe5tWVA",
+       "data": {
+        "__typename": "HomeGenericSectionData",
+        "title": {
+         "transformedLabel": "Made For Demo"
+        }
+       },
+       "sectionItems": {
+        "totalCount": 0,
+        "items": []
+       }
+      }
+     ]
+    }
+   }
+  }
+ },
+ "extensions": {}
+}

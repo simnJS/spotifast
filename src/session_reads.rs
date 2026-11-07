@@ -371,6 +371,208 @@ fn json_images(sources: Option<&serde_json::Value>) -> Vec<Image> {
         .collect()
 }
 
+/// Spotify's own Home reads its feed, shortcuts first, with this persisted
+/// query (the web player's `home`, which `homeSection` shares).
+const HOME_HASH: &str = "5fb7da7a03ee2776c0670856609cb85a189a3cecc36cc160b91cde79063b9cf1";
+/// The items Spotify's Home asks of each section.
+const HOME_SECTION_ITEMS: u32 = 10;
+/// The sections a chip's feed opens with in place of a shortcuts section,
+/// which Spotify's own Home shows as its shortcuts: the Podcasts chip's.
+const HOME_SHORTCUT_SECTIONS: [&str; 1] = ["spotify:section:0JQ5DAnM3wGh0gz1MXnu3N"];
+
+/// Spotify's own Home shortcuts for one chip, in its order.
+pub async fn home_shortcuts(
+    session: &Session,
+    web: &crate::api::ApiClient,
+    facet: crate::model::HomeFacet,
+    context_token: &str,
+) -> Result<Vec<crate::model::HomeShortcut>, ApiError> {
+    let timezone = jiff::tz::TimeZone::system();
+    let query = home_query(facet, timezone.iana_name().unwrap_or("UTC"), context_token);
+    home_shortcuts_from(&pathfinder(session, web, &query).await?)
+}
+
+fn home_query(
+    facet: crate::model::HomeFacet,
+    timezone: &str,
+    context_token: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "operationName": "home",
+        "variables": {
+            "homeEndUserIntegration": BROWSE_INTEGRATION,
+            "timeZone": timezone,
+            "sp_t": context_token,
+            "facet": facet.id(),
+            "sectionItemsLimit": HOME_SECTION_ITEMS,
+            "includeEpisodeContentRatingsV2": false,
+            "includeHomeChapterVideoCards": false
+        },
+        "extensions": {"persistedQuery": {"version": 1, "sha256Hash": HOME_HASH}}
+    })
+}
+
+fn home_error() -> ApiError {
+    ApiError::Decode("Spotify's Home shortcuts are unavailable. Try again later.".into())
+}
+
+/// The shortcuts of a `home` answer: its shortcuts section, the first, in
+/// Spotify's order. What Spotifast cannot open (an audiobook, a profile, a
+/// card Spotify could not fill) is left out, and as Spotify's own grid does,
+/// an odd count short of eight drops its last tile so the rows stay full.
+pub(crate) fn home_shortcuts_from(
+    body: &serde_json::Value,
+) -> Result<Vec<crate::model::HomeShortcut>, ApiError> {
+    if pathfinder_errors(body) {
+        return Err(home_error());
+    }
+    let sections = body
+        .pointer("/data/home/sectionContainer/sections/items")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(home_error)?;
+    let first = sections.first().ok_or_else(home_error)?;
+    let shortcuts = json_text(first, "/data/__typename").as_deref()
+        == Some("HomeShortsSectionData")
+        || json_text(first, "/uri")
+            .is_some_and(|uri| HOME_SHORTCUT_SECTIONS.contains(&uri.as_str()));
+    if !shortcuts {
+        return Err(home_error());
+    }
+    let mut found: Vec<crate::model::HomeShortcut> = first
+        .pointer("/sectionItems/items")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(home_shortcut)
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    found.retain(|shortcut| seen.insert(shortcut.uri().map(str::to_owned)));
+    if found.len() < 8 && found.len() % 2 == 1 {
+        found.pop();
+    }
+    Ok(found)
+}
+
+fn home_artists(data: &serde_json::Value) -> Vec<ArtistRef> {
+    data.pointer("/artists/items")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|artist| {
+            let uri = json_text(artist, "/uri");
+            Some(ArtistRef {
+                id: uri
+                    .as_deref()
+                    .and_then(|uri| uri.strip_prefix("spotify:artist:"))
+                    .map(str::to_owned),
+                name: json_text(artist, "/profile/name")?,
+                uri,
+            })
+        })
+        .collect()
+}
+
+/// The base-62 ID of a `spotify:<kind>:<id>` URI.
+fn uri_id(uri: &str, kind: &str) -> Option<String> {
+    uri.strip_prefix("spotify:")?
+        .strip_prefix(kind)?
+        .strip_prefix(':')
+        .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        .map(str::to_owned)
+}
+
+fn home_album(data: &serde_json::Value) -> Option<Album> {
+    let uri = json_text(data, "/uri")?;
+    Some(Album {
+        id: uri_id(&uri, "album")?,
+        name: json_text(data, "/name")?,
+        images: json_images(data.pointer("/coverArt/sources")),
+        artists: home_artists(data),
+        uri,
+        ..Default::default()
+    })
+}
+
+fn home_show(data: &serde_json::Value) -> Option<Show> {
+    let uri = json_text(data, "/uri")?;
+    Some(Show {
+        id: uri_id(&uri, "show")?,
+        name: json_text(data, "/name")?,
+        publisher: json_text(data, "/publisher/name").unwrap_or_default(),
+        images: json_images(data.pointer("/coverArt/sources")),
+        uri,
+        ..Default::default()
+    })
+}
+
+fn home_shortcut(item: &serde_json::Value) -> Option<crate::model::HomeShortcut> {
+    use crate::model::HomeShortcut;
+    let data = item.pointer("/content/data")?;
+    let uri = json_text(data, "/uri").or_else(|| json_text(item, "/uri"))?;
+    if uri.ends_with(":collection") || uri == "spotify:collection:tracks" {
+        return Some(HomeShortcut::LikedSongs);
+    }
+    match json_text(data, "/__typename")?.as_str() {
+        "Playlist" => {
+            let owner = data.pointer("/ownerV2/data");
+            let owner_uri = owner.and_then(|owner| json_text(owner, "/uri"));
+            Some(HomeShortcut::Playlist(Playlist {
+                id: uri_id(&uri, "playlist")?,
+                name: json_text(data, "/name")?,
+                description: json_text(data, "/description"),
+                images: json_images(data.pointer("/images/items/0/sources")),
+                owner: Owner {
+                    id: owner_uri
+                        .as_deref()
+                        .and_then(|uri| uri.strip_prefix("spotify:user:"))
+                        .map(str::to_owned),
+                    display_name: owner.and_then(|owner| json_text(owner, "/name")),
+                    uri: owner_uri,
+                },
+                uri,
+                ..Default::default()
+            }))
+        }
+        "Album" => home_album(data).map(HomeShortcut::Album),
+        "Artist" => Some(HomeShortcut::Artist(Artist {
+            id: uri_id(&uri, "artist")?,
+            name: json_text(data, "/profile/name")?,
+            images: json_images(data.pointer("/visuals/avatarImage/sources")),
+            uri,
+            ..Default::default()
+        })),
+        "Podcast" => home_show(data).map(HomeShortcut::Show),
+        "Track" => Some(HomeShortcut::Track(Track {
+            id: Some(uri_id(&uri, "track")?),
+            name: json_text(data, "/name")?,
+            duration_ms: data
+                .pointer("/duration/totalMilliseconds")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|ms| u32::try_from(ms).ok())
+                .unwrap_or(0),
+            artists: home_artists(data),
+            album: data.get("albumOfTrack").and_then(home_album),
+            uri,
+            ..Default::default()
+        })),
+        "Episode" => Some(HomeShortcut::Episode(Episode {
+            id: uri_id(&uri, "episode")?,
+            name: json_text(data, "/name")?,
+            images: json_images(data.pointer("/coverArt/sources")),
+            duration_ms: data
+                .pointer("/duration/totalMilliseconds")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|ms| u32::try_from(ms).ok())
+                .unwrap_or(0),
+            show: data.pointer("/podcastV2/data").and_then(home_show),
+            uri,
+            ..Default::default()
+        })),
+        // Audiobooks, chapters, profiles and cards Spotify could not fill.
+        _ => None,
+    }
+}
+
 /// Popular tracks in the playback account's market, retaining Spotify's ranking.
 pub async fn artist_top_tracks(session: &Session, id: &str) -> Result<Vec<Track>, Failure> {
     use librespot_metadata::Metadata as _;
@@ -4458,5 +4660,142 @@ mod tests {
         );
         assert_eq!(Page::decode("category:short"), None);
         assert_eq!(Page::from_uri("spotify:page:short"), None);
+    }
+
+    fn home_sample() -> serde_json::Value {
+        serde_json::from_str(include_str!("demo/home-shortcuts.json")).unwrap()
+    }
+
+    #[test]
+    fn home_shortcuts_keep_spotifys_order_and_kinds() {
+        use crate::model::HomeShortcut;
+        let shortcuts = super::home_shortcuts_from(&home_sample()).unwrap();
+        let uris: Vec<_> = shortcuts.iter().map(HomeShortcut::uri).collect();
+        // The audiobook and the card Spotify could not fill are left out.
+        assert_eq!(
+            uris,
+            [
+                None,
+                Some("spotify:playlist:mix0"),
+                Some("spotify:playlist:pl1"),
+                Some("spotify:album:alb2"),
+                Some("spotify:artist:art1"),
+                Some("spotify:show:sh0"),
+                Some("spotify:playlist:pl0"),
+                Some("spotify:playlist:pl5"),
+            ]
+        );
+        assert_eq!(shortcuts[0], HomeShortcut::LikedSongs);
+        let HomeShortcut::Playlist(mix) = &shortcuts[1] else {
+            panic!("a mix is a playlist");
+        };
+        assert_eq!(mix.id, "mix0");
+        assert_eq!(mix.name, "Downtempo Mix");
+        assert_eq!(mix.owner.id.as_deref(), Some("spotify"));
+        assert_eq!(mix.images.len(), 3);
+        let HomeShortcut::Album(album) = &shortcuts[3] else {
+            panic!("an album");
+        };
+        assert_eq!(album.name, "All Melody");
+        assert_eq!(album.artists[0].name, "Nils Frahm");
+        let HomeShortcut::Artist(artist) = &shortcuts[4] else {
+            panic!("an artist");
+        };
+        assert_eq!(artist.name, "Khruangbin");
+        assert!(!artist.images.is_empty());
+        let HomeShortcut::Show(show) = &shortcuts[5] else {
+            panic!("a podcast");
+        };
+        assert_eq!(
+            (show.id.as_str(), show.publisher.as_str()),
+            ("sh0", "37signals")
+        );
+        assert!(shortcuts[5].podcast());
+    }
+
+    #[test]
+    fn home_shortcuts_read_songs_and_episodes_with_what_opens_them() {
+        use crate::model::HomeShortcut;
+        let body = serde_json::json!({"data":{"home":{"sectionContainer":{"sections":{"items":[
+            {"data":{"__typename":"HomeShortsSectionData"},"sectionItems":{"items":[
+                {"content":{"data":{"__typename":"Track","uri":"spotify:track:t1","name":"Argent Sale",
+                    "duration":{"totalMilliseconds":201000},
+                    "artists":{"items":[{"uri":"spotify:artist:a1","profile":{"name":"Someone"}}]},
+                    "albumOfTrack":{"uri":"spotify:album:b1","name":"A COLORS SHOW","coverArt":{"sources":[{"url":"https://i.scdn.co/image/x","width":64}]}}}}},
+                {"content":{"data":{"__typename":"Episode","uri":"spotify:episode:e1","name":"Episode one",
+                    "coverArt":{"sources":[]},
+                    "podcastV2":{"data":{"__typename":"Podcast","uri":"spotify:show:s1","name":"A show"}}}}}
+            ]}}
+        ]}}}}});
+        let shortcuts = super::home_shortcuts_from(&body).unwrap();
+        let HomeShortcut::Track(track) = &shortcuts[0] else {
+            panic!("a song");
+        };
+        assert_eq!(track.duration_ms, 201_000);
+        assert_eq!(
+            track.album.as_ref().map(|album| album.id.as_str()),
+            Some("b1")
+        );
+        assert_eq!(track.artists[0].id.as_deref(), Some("a1"));
+        let HomeShortcut::Episode(episode) = &shortcuts[1] else {
+            panic!("an episode");
+        };
+        assert_eq!(
+            episode.show.as_ref().map(|show| show.id.as_str()),
+            Some("s1")
+        );
+    }
+
+    #[test]
+    fn home_shortcuts_drop_an_odd_last_tile_short_of_eight() {
+        let item = |id: &str| serde_json::json!({"content":{"data":{"__typename":"Artist","uri":format!("spotify:artist:{id}"),"profile":{"name":id}}}});
+        let body = |count: usize| {
+            let items: Vec<_> = (0..count).map(|index| item(&format!("a{index}"))).collect();
+            serde_json::json!({"data":{"home":{"sectionContainer":{"sections":{"items":[
+                {"data":{"__typename":"HomeShortsSectionData"},"sectionItems":{"items":items}}
+            ]}}}}})
+        };
+        assert_eq!(super::home_shortcuts_from(&body(5)).unwrap().len(), 4);
+        assert_eq!(super::home_shortcuts_from(&body(6)).unwrap().len(), 6);
+        assert_eq!(super::home_shortcuts_from(&body(9)).unwrap().len(), 9);
+    }
+
+    #[test]
+    fn home_shortcuts_fail_without_a_shortcuts_section() {
+        assert!(
+            super::home_shortcuts_from(&serde_json::json!({"errors":[{"message":"no"}]})).is_err()
+        );
+        assert!(super::home_shortcuts_from(&serde_json::json!({"data":{"home":null}})).is_err());
+        let shelf_first = serde_json::json!({"data":{"home":{"sectionContainer":{"sections":{"items":[
+            {"uri":"spotify:section:x","data":{"__typename":"HomeGenericSectionData"},"sectionItems":{"items":[]}}
+        ]}}}}});
+        assert!(super::home_shortcuts_from(&shelf_first).is_err());
+        // The Podcasts chip's feed opens with its shortcuts under another name.
+        let podcasts = serde_json::json!({"data":{"home":{"sectionContainer":{"sections":{"items":[
+            {"uri":"spotify:section:0JQ5DAnM3wGh0gz1MXnu3N","data":{"__typename":"HomeGenericSectionData"},"sectionItems":{"items":[]}}
+        ]}}}}});
+        assert!(super::home_shortcuts_from(&podcasts).unwrap().is_empty());
+    }
+
+    #[test]
+    fn home_query_asks_for_the_chips_facet() {
+        use crate::model::HomeFacet;
+        let query = super::home_query(HomeFacet::Podcasts, "Europe/Paris", "token");
+        assert_eq!(query["operationName"], "home");
+        assert_eq!(query["variables"]["facet"], "podcasts-chip");
+        assert_eq!(query["variables"]["timeZone"], "Europe/Paris");
+        assert_eq!(query["variables"]["sp_t"], "token");
+        assert_eq!(
+            query["extensions"]["persistedQuery"]["sha256Hash"],
+            super::HOME_HASH
+        );
+        assert_eq!(
+            super::home_query(HomeFacet::All, "UTC", "")["variables"]["facet"],
+            ""
+        );
+        assert_eq!(
+            super::home_query(HomeFacet::Music, "UTC", "")["variables"]["facet"],
+            "music-chip"
+        );
     }
 }

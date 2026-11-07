@@ -203,6 +203,11 @@ pub enum ApiRequest {
     },
     /// Spotify's Browse all grid for Search, over the playback session.
     BrowseAll,
+    /// Spotify's own Home shortcuts for one chip, over the playback session.
+    HomeShortcuts {
+        facet: crate::model::HomeFacet,
+        generation: u64,
+    },
     /// The browse page behind a Browse all tile, by its page ID.
     BrowsePage {
         id: String,
@@ -479,6 +484,11 @@ pub enum ApiResponse {
         result: ApiResult<Vec<(String, String)>>,
     },
     BrowseAll(ApiResult<Vec<crate::model::BrowseSection>>),
+    HomeShortcuts {
+        facet: crate::model::HomeFacet,
+        generation: u64,
+        result: ApiResult<Vec<crate::model::HomeShortcut>>,
+    },
     BrowsePage {
         id: String,
         result: ApiResult<crate::model::CategoryPage>,
@@ -5249,6 +5259,7 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
             Operation::UserData
         }
         ApiRequest::BrowseAll | ApiRequest::BrowsePage { .. } => Operation::Catalog,
+        ApiRequest::HomeShortcuts { .. } => Operation::UserData,
         ApiRequest::SearchCatalogue { .. } => Operation::CatalogSearch,
         ApiRequest::Search { .. } => Operation::PlaylistSearch,
         ApiRequest::PlaySearch { kind, .. } if kind == "playlist" => Operation::PlaylistSearch,
@@ -5559,6 +5570,37 @@ async fn read_browse(
     }
 }
 
+/// Spotify's own Home shortcuts over the playback session's Pathfinder, as
+/// its Home reads them. The Web API has no such list, so there is no
+/// stand-in here: Home falls back to the play history.
+async fn read_home_shortcuts(
+    api: &ApiGateway,
+    engine: Option<&Engine>,
+    background_session: &tokio::sync::Semaphore,
+    facet: crate::model::HomeFacet,
+) -> ApiResult<Vec<crate::model::HomeShortcut>> {
+    let engine = engine
+        .filter(|engine| same_account(&engine.session().username(), api.account().as_ref()))
+        .ok_or_else(|| ApiError::Status {
+            status: 503,
+            message: "Spotify's Home shortcuts need the playback session.".into(),
+        })?;
+    let web = api
+        .prerelease_http_client()
+        .ok_or_else(|| ApiError::Status {
+            status: 503,
+            message: "Spotify's Home shortcuts need the playback session.".into(),
+        })?;
+    let _permit = background_session.acquire().await.ok();
+    let session = engine.session();
+    // Spotify's Home is personal to the signed-in grant, as Made for you's.
+    let context_token = api
+        .home_context_token(&session.username())
+        .await
+        .unwrap_or_default();
+    crate::session_reads::home_shortcuts(session, &web, facet, &context_token).await
+}
+
 async fn shared_made_for_you(api: &ApiGateway) -> ApiResult<Vec<Playlist>> {
     let client = api.client_for(Operation::PlaylistSearch).await?;
     let _background_permit = client.background_permit().await;
@@ -5729,6 +5771,17 @@ async fn handle(
     ) {
         return (read_browse(api, engine, request).await, Vec::new());
     }
+    if let ApiRequest::HomeShortcuts { facet, generation } = request {
+        let result = read_home_shortcuts(api, engine, background_session, facet).await;
+        return (
+            ApiResponse::HomeShortcuts {
+                facet,
+                generation,
+                result,
+            },
+            Vec::new(),
+        );
+    }
     if let ApiRequest::SetHiddenInPlaylist {
         playlist_uri,
         track_uri,
@@ -5869,6 +5922,7 @@ async fn handle(
         | ApiRequest::HiddenSongs { .. }
         | ApiRequest::BrowseAll
         | ApiRequest::BrowsePage { .. }
+        | ApiRequest::HomeShortcuts { .. }
         | ApiRequest::SetHiddenInPlaylist { .. } => unreachable!("handled before Web API routing"),
         ApiRequest::MyPlaylists { offset, generation } => ApiResponse::MyPlaylists {
             offset,
