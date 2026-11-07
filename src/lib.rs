@@ -49,6 +49,7 @@ pub mod prerelease;
 pub mod resample;
 pub mod session_reads;
 pub mod settings;
+pub mod share_card;
 pub mod single_instance;
 pub mod sink;
 pub mod soloist;

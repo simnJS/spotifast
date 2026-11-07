@@ -132,6 +132,8 @@ pub enum Page {
     Category(String),
     Queue,
     Settings,
+    /// The listening stats kept on this computer: tops, totals and charts.
+    Stats,
 }
 
 impl Page {
@@ -155,6 +157,7 @@ impl Page {
             Page::Category(id) => format!("category:{id}"),
             Page::Queue => "queue".into(),
             Page::Settings => "settings".into(),
+            Page::Stats => "stats".into(),
         }
     }
 
@@ -172,6 +175,7 @@ impl Page {
             "episodes" => Page::Episodes,
             "queue" => Page::Queue,
             "settings" => Page::Settings,
+            "stats" => Page::Stats,
             other => {
                 let (kind, id) = other.split_once(':')?;
                 match kind {

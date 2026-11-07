@@ -1,6 +1,6 @@
 //! The Stats page's work that must not wait on the UI thread: reading a
-//! range's summary from a large log, the native file dialogs, and drawing
-//! and saving the share card. Each runs on a thread of its own and leaves
+//! range's summary from a large log, and drawing and saving the share
+//! card. Each runs on a thread of its own and leaves
 //! its answer in a [`Pending`] the page takes on a later frame.
 
 use std::path::PathBuf;
@@ -25,7 +25,11 @@ impl<T> Clone for Pending<T> {
 impl<T: Send + 'static> Pending<T> {
     /// Runs `work` on a thread of its own, and asks for a frame once it
     /// has answered.
-    pub fn spawn(ctx: &egui::Context, name: &str, work: impl FnOnce() -> T + Send + 'static) -> Self {
+    pub fn spawn(
+        ctx: &egui::Context,
+        name: &str,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Self {
         let slot = Arc::new(Mutex::new(None));
         let answer = Arc::clone(&slot);
         let ctx = ctx.clone();
@@ -33,7 +37,9 @@ impl<T: Send + 'static> Pending<T> {
             .name(name.to_owned())
             .spawn(move || {
                 let value = work();
-                *answer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(value);
+                *answer
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(value);
                 ctx.request_repaint();
             });
         if let Err(error) = started {
@@ -52,7 +58,12 @@ impl<T: Send + 'static> Pending<T> {
 }
 
 /// Reads `span`'s summary from `index` off the UI thread.
-pub fn summarize(ctx: &egui::Context, index: Arc<Index>, span: Span, now_ms: i64) -> Pending<Summary> {
+pub fn summarize(
+    ctx: &egui::Context,
+    index: Arc<Index>,
+    span: Span,
+    now_ms: i64,
+) -> Pending<Summary> {
     Pending::spawn(ctx, "stats-summary", move || {
         summary::summarize(&index, span, now_ms, &jiff::tz::TimeZone::system())
     })
@@ -72,20 +83,6 @@ fn wait<F: std::future::Future>(future: F) -> Option<F::Output> {
             None
         }
     }
-}
-
-/// Asks for a streaming history: Spotify's ZIP or one of its JSON files.
-/// Built on the UI thread, answered on another.
-pub fn pick_history(ctx: &egui::Context, title: &str) -> Pending<Option<PathBuf>> {
-    let dialog = rfd::AsyncFileDialog::new()
-        .set_title(title)
-        .add_filter("Spotify streaming history", &["zip", "json"])
-        .pick_file();
-    Pending::spawn(ctx, "stats-pick", move || {
-        wait(dialog)
-            .flatten()
-            .map(|handle| handle.path().to_path_buf())
-    })
 }
 
 /// How a share ended.
@@ -113,7 +110,10 @@ fn covers(art: &ArtLoader, urls: &[Option<String>]) -> Vec<Option<Cover>> {
             let Some(url) = url.as_deref().filter(|_| !*settled) else {
                 continue;
             };
-            if let Some(bytes) = art.cached_file(url).and_then(|path| std::fs::read(path).ok()) {
+            if let Some(bytes) = art
+                .cached_file(url)
+                .and_then(|path| std::fs::read(path).ok())
+            {
                 *cover = Cover::decode(&bytes, 320);
                 *settled = true;
             } else if art.is_coverless(url) {

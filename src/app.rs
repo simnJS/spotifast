@@ -3689,7 +3689,7 @@ impl App {
                     self.refresh_queue(true);
                 }
             }
-            Page::Settings => {}
+            Page::Settings | Page::Stats => {}
         }
     }
 
@@ -6205,6 +6205,11 @@ impl App {
                 }
             }
             Page::Settings => self.refresh_autostart(),
+            Page::Stats => {
+                if self.stats.index.get().is_none() && !self.stats.index.is_loading() {
+                    self.refresh_stats();
+                }
+            }
         }
     }
 

@@ -1098,6 +1098,109 @@ fn play_here(app: &mut App) {
     app.local.position_ms = now.as_ref().map_or(0, |now| now.position_ms);
 }
 
+/// A year and a half of plausible listening for the Stats page: a dozen
+/// artists, four songs each, mostly in the evening, the favourites
+/// changing over time so ranks move.
+pub fn stats_index(now_ms: i64) -> crate::stats::Index {
+    use crate::stats::metadata::{AlbumMeta, ArtistMeta, Metadata, TrackMeta};
+    use crate::stats::{ArtistName, PlayRecord, Source};
+    const ARTISTS: [(&str, &str); 12] = [
+        ("Velvetroot Drift", "dream pop"),
+        ("Paper Moon Static", "indie rock"),
+        ("Harbor Lights", "synthwave"),
+        ("Mono Garden", "lo-fi"),
+        ("Cinder & Sage", "folk"),
+        ("Neon Orchard", "electropop"),
+        ("The Quiet Hours", "ambient"),
+        ("Glasshouse Choir", "indie pop"),
+        ("Low Tide Radio", "chillwave"),
+        ("Saffron Avenue", "neo soul"),
+        ("Northbound Trains", "post-rock"),
+        ("Copper Lanterns", "folk"),
+    ];
+    const SONGS: [&str; 4] = ["Afterglow", "Small Hours", "Satellite", "Golden Static"];
+    let mut metadata = Metadata::default();
+    for (index, (name, genre)) in ARTISTS.iter().enumerate() {
+        metadata.artists.insert(
+            format!("demoartist{index}"),
+            ArtistMeta {
+                name: (*name).into(),
+                genres: vec![(*genre).into(), "indie".into()],
+                image: Some(format!(
+                    "https://picsum.photos/seed/spotifastartist{index}/640/640"
+                )),
+            },
+        );
+    }
+    let mut seed: u64 = 0x5eed;
+    let mut next = move |below: u64| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) % below.max(1)
+    };
+    const DAY: i64 = 24 * 60 * 60 * 1000;
+    let mut records = Vec::new();
+    for day in 0..540i64 {
+        let plays = 4 + next(14) as i64;
+        for _ in 0..plays {
+            // Favourites drift: the artists first in the list rise lately.
+            let shift = (day / 90) as u64;
+            let artist = ((next(6) * next(6) / 3 + shift) % ARTISTS.len() as u64) as usize;
+            let song = next(SONGS.len() as u64) as usize;
+            let hour = [7, 8, 12, 13, 17, 18, 19, 20, 21, 21, 22, 22, 23, 1][next(14) as usize];
+            let at =
+                now_ms - day * DAY - (now_ms % DAY) + hour * 3_600_000 + next(3_600_000) as i64;
+            if at > now_ms {
+                continue;
+            }
+            let id = format!("demotrack{artist}x{song}");
+            let uri = format!("spotify:track:{id}");
+            let album_id = format!("demoalbum{artist}");
+            let duration = 150_000 + (artist as u32 * 7 + song as u32 * 13) % 9 * 10_000;
+            metadata
+                .tracks
+                .entry(uri.clone())
+                .or_insert_with(|| TrackMeta {
+                    name: SONGS[song].into(),
+                    duration_ms: duration,
+                    artists: vec![ArtistName {
+                        id: Some(format!("demoartist{artist}")),
+                        name: ARTISTS[artist].0.into(),
+                    }],
+                    album: Some(AlbumMeta {
+                        id: album_id.clone(),
+                        name: format!("{} Sessions", ARTISTS[artist].0),
+                        image: Some(format!(
+                            "https://picsum.photos/seed/spotifastalbum{artist}/640/640"
+                        )),
+                    }),
+                });
+            // One play in eight is a skip.
+            let ms_played = if next(8) == 0 { 12_000 } else { duration };
+            records.push(PlayRecord {
+                at_ms: at,
+                ms_played,
+                estimated: false,
+                source: Source::Extended,
+                uri: Some(uri),
+                track: SONGS[song].into(),
+                artists: vec![ArtistName {
+                    id: Some(format!("demoartist{artist}")),
+                    name: ARTISTS[artist].0.into(),
+                }],
+                album: Some(format!("{} Sessions", ARTISTS[artist].0)),
+                album_id: Some(album_id),
+                duration_ms: Some(duration),
+                skipped: None,
+                shuffle: None,
+            });
+        }
+    }
+    records.sort_by_key(|record| record.at_ms);
+    crate::stats::Index::build(&records, &metadata)
+}
+
 /// A Client ID of the right shape that Spotify never issued.
 #[cfg(feature = "demo")]
 const DEMO_CLIENT_ID: &str = "0123456789abcdef0123456789abcdef";
@@ -1168,6 +1271,11 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
             app.local_ready = true;
             app.open(Page::Album(id));
         }
+    }
+    if page == Some("stats") {
+        app.stats.index = Loadable::Loaded(std::sync::Arc::new(stats_index(
+            Timestamp::now().as_millisecond(),
+        )));
     }
     if let Some(page) = page.and_then(Page::decode) {
         app.open(page);

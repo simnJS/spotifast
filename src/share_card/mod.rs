@@ -231,8 +231,18 @@ fn shapes(card: &Card, fonts: &mut egui::epaint::text::Fonts) -> (Vec<Shape>, Ve
             ((covers.len() - 1) as u64, cover.size)
         })
     };
-    let artists: Vec<_> = card.artists.iter().take(TOP).map(|a| texture(&a.cover)).collect();
-    let tracks: Vec<_> = card.tracks.iter().take(TOP).map(|t| texture(&t.cover)).collect();
+    let artists: Vec<_> = card
+        .artists
+        .iter()
+        .take(TOP)
+        .map(|a| texture(&a.cover))
+        .collect();
+    let tracks: Vec<_> = card
+        .tracks
+        .iter()
+        .take(TOP)
+        .map(|t| texture(&t.cover))
+        .collect();
 
     let mut layout = Layout {
         fonts: fonts.with_pixels_per_point(1.0),
@@ -287,7 +297,10 @@ fn shapes(card: &Card, fonts: &mut egui::epaint::text::Fonts) -> (Vec<Shape>, Ve
     );
     layout.rect(pill, 24.0, Color32::from_white_alpha(36));
     layout.shapes.push(Shape::galley(
-        pos2(pill.left() + 20.0, pill.center().y - pill_text.size().y / 2.0),
+        pos2(
+            pill.left() + 20.0,
+            pill.center().y - pill_text.size().y / 2.0,
+        ),
         pill_text,
         Color32::WHITE,
     ));
@@ -338,7 +351,8 @@ fn shapes(card: &Card, fonts: &mut egui::epaint::text::Fonts) -> (Vec<Shape>, Ve
         let left = MARGIN + (photo + gap) * index as f32;
         let rect = Rect::from_min_size(pos2(left, 508.0), Vec2::splat(photo));
         layout.image(rect, photo / 2.0, *texture);
-        let badge = Rect::from_center_size(rect.left_bottom() + vec2(22.0, -22.0), Vec2::splat(44.0));
+        let badge =
+            Rect::from_center_size(rect.left_bottom() + vec2(22.0, -22.0), Vec2::splat(44.0));
         layout.rect(badge, 22.0, if index == 0 { GREEN } else { Color32::WHITE });
         layout.text(
             &(index + 1).to_string(),
@@ -353,7 +367,7 @@ fn shapes(card: &Card, fonts: &mut egui::epaint::text::Fonts) -> (Vec<Shape>, Ve
             crate::theme::semibold(25.0),
             Color32::WHITE,
             pos2(rect.center().x, rect.bottom() + 16.0),
-            photo + gap - 8.0,
+            photo + 16.0,
             Align::Center,
         );
         layout.text(
@@ -361,7 +375,7 @@ fn shapes(card: &Card, fonts: &mut egui::epaint::text::Fonts) -> (Vec<Shape>, Ve
             crate::theme::regular(21.0),
             SUBDUED,
             pos2(rect.center().x, name.bottom() + 2.0),
-            photo + gap - 8.0,
+            photo + 16.0,
             Align::Center,
         );
     }
@@ -564,7 +578,11 @@ mod tests {
         let [r, g, b, _] = pixel(&image, (MARGIN + 80.0) as usize, 588);
         assert_eq!((r, g, b), (200, 0, 40));
         // The middle of the second track's cover.
-        let [r, g, b, _] = pixel(&image, (MARGIN + 86.0) as usize, (840.0 + 86.0 + 34.0) as usize);
+        let [r, g, b, _] = pixel(
+            &image,
+            (MARGIN + 86.0) as usize,
+            (840.0 + 86.0 + 34.0) as usize,
+        );
         assert_eq!((r, g, b), (200, 30, 40));
         // The title row holds white glyph pixels.
         let bright = (150..250)
@@ -590,7 +608,10 @@ mod tests {
         let png = png(&image).unwrap();
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         let decoded = image::load_from_memory(&png).unwrap();
-        assert_eq!((decoded.width(), decoded.height()), (WIDTH as u32, HEIGHT as u32));
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (WIDTH as u32, HEIGHT as u32)
+        );
     }
 
     #[test]

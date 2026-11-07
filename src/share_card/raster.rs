@@ -90,9 +90,8 @@ impl Canvas {
         if !clip.is_positive() {
             return;
         }
-        for triangle in mesh.indices.chunks_exact(3) {
-            let [a, b, c] = [triangle[0], triangle[1], triangle[2]]
-                .map(|index| mesh.vertices[index as usize]);
+        for triangle in mesh.indices.as_chunks::<3>().0 {
+            let [a, b, c] = triangle.map(|index| mesh.vertices[index as usize]);
             self.triangle(a, b, c, clip, texture);
         }
     }
@@ -147,7 +146,12 @@ impl Canvas {
                 let c = if a > 0.0 { c / a } else { 0.0 };
                 (c.clamp(0.0, 1.0) * 255.0).round() as u8
             };
-            out.extend([straight(r), straight(g), straight(b), (a * 255.0).round() as u8]);
+            out.extend([
+                straight(r),
+                straight(g),
+                straight(b),
+                (a * 255.0).round() as u8,
+            ]);
         }
         out
     }

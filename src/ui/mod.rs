@@ -24,6 +24,7 @@ pub mod settings;
 pub mod show;
 pub mod sidebar;
 mod soloist;
+pub mod stats;
 pub mod topbar;
 mod update;
 pub mod whats_new;
@@ -250,7 +251,7 @@ where
     }
 }
 
-fn page_tint(app: &mut App) -> Option<Color32> {
+fn page_tint(app: &mut App, ctx: &Context) -> Option<Color32> {
     let page = app.page().clone();
     let image = match &page {
         Page::Playlist(id) => app
@@ -282,6 +283,8 @@ fn page_tint(app: &mut App) -> Option<Color32> {
             .and_then(|show| pick_image(&show.images, 64))
             .map(str::to_string),
         Page::Radio(seed) => pick_image(&app.radio_images(seed), 64).map(str::to_string),
+        // The top artist of the range on show.
+        Page::Stats => stats::hero_image(ctx),
         Page::LikedSongs => {
             return app
                 .settings
@@ -301,7 +304,7 @@ fn page_tint(app: &mut App) -> Option<Color32> {
 
 fn central(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
-    let tint = page_tint(app);
+    let tint = page_tint(app, ui.ctx());
     // The main view is the middle of the three cards. A panel beside it
     // keeps the gap between them; without one, the card keeps the window's
     // margin itself.
@@ -394,6 +397,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                             Page::Category(id) => search::category(app, ui, &id),
                             Page::Queue => queue::page(app, ui),
                             Page::Settings => settings::show(app, ui),
+                            Page::Stats => stats::page(app, ui),
                         }
                     });
                 if app.dialog.is_none() && !app.show_devices {

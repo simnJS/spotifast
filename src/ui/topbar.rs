@@ -728,6 +728,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         if super::widgets::menu_item(
                             ui,
                             &palette,
+                            Some(Icon::TrendingUp),
+                            &gettext(locale, "Your stats"),
+                        ) {
+                            app.actions.push(Action::Open(Page::Stats));
+                        }
+                        if super::widgets::menu_item(
+                            ui,
+                            &palette,
                             Some(Icon::Settings),
                             &gettext(locale, "Settings"),
                         ) {
@@ -899,6 +907,14 @@ fn app_menu(app: &mut App, ui: &mut egui::Ui) {
                 app.actions.push(Action::Open(Page::WhatsNew));
             }
             super::widgets::menu_separator(ui, &palette);
+            if super::widgets::menu_item(
+                ui,
+                &palette,
+                Some(Icon::TrendingUp),
+                &gettext(locale, "Your stats"),
+            ) {
+                app.actions.push(Action::Open(Page::Stats));
+            }
             if super::widgets::menu_item(
                 ui,
                 &palette,

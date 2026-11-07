@@ -4,11 +4,11 @@
 
 use egui::{Align2, CornerRadius, Rect, Sense, Ui, pos2, vec2};
 
-use crate::i18n::{Locale, gettext};
+use crate::i18n::Locale;
 use crate::stats::query::Count;
 use crate::theme::{self, Palette};
 
-use super::summary::{self, played};
+use super::summary::{self, played, tr};
 
 /// The room the value axis takes on the left.
 const AXIS: f32 = 36.0;
@@ -69,7 +69,11 @@ fn bars(ui: &mut Ui, palette: &Palette, height: f32, bars: &[Bar], label: &str) 
         );
     }
     let slot = plot.width() / bars.len() as f32;
-    let gap = if slot >= 6.0 { (slot * 0.25).min(6.0) } else { 0.0 };
+    let gap = if slot >= 6.0 {
+        (slot * 0.25).min(6.0)
+    } else {
+        0.0
+    };
     let pointer = response.hover_pos();
     let mut hovered = None;
     for (index, bar) in bars.iter().enumerate() {
@@ -124,12 +128,7 @@ fn date(date: jiff::civil::Date) -> String {
 
 /// Streams per day across the range, or per week (and longer) when the
 /// days would be too thin to point at.
-pub fn per_day(
-    ui: &mut Ui,
-    palette: &Palette,
-    locale: Locale,
-    days: &[crate::stats::query::Day],
-) {
+pub fn per_day(ui: &mut Ui, palette: &Palette, locale: Locale, days: &[crate::stats::query::Day]) {
     let most = ((ui.available_width() - AXIS) / 5.0).clamp(12.0, 120.0) as usize;
     let buckets = summary::buckets(days, most);
     let every = buckets.len().div_ceil(6).max(1);
@@ -149,13 +148,7 @@ pub fn per_day(
             }
         })
         .collect();
-    self::bars(
-        ui,
-        palette,
-        170.0,
-        &bars,
-        &gettext(locale, "Streams per day"),
-    );
+    self::bars(ui, palette, 170.0, &bars, &tr(locale, "Streams per day"));
 }
 
 /// Streams by hour of day, midnight first.
@@ -178,7 +171,7 @@ pub fn per_hour(ui: &mut Ui, palette: &Palette, locale: Locale, hours: &[Count; 
         palette,
         150.0,
         &bars,
-        &gettext(locale, "Listening by hour of day"),
+        &tr(locale, "Listening by hour of day"),
     );
 }
 
@@ -212,12 +205,18 @@ mod tests {
             })
             .collect();
         for width in [80.0, 360.0, 1400.0] {
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                 ui.set_max_width(width);
                 per_day(ui, &Palette::dark(), Locale::default(), &days);
                 per_day(ui, &Palette::light(), Locale::default(), &[]);
-                per_hour(ui, &Palette::dark(), Locale::default(), &[Count::default(); 24]);
+                per_hour(
+                    ui,
+                    &Palette::dark(),
+                    Locale::default(),
+                    &[Count::default(); 24],
+                );
             });
+            output.textures_delta.clear();
         }
     }
 }

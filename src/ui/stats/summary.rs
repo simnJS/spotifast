@@ -4,9 +4,14 @@
 
 use std::sync::Arc;
 
-use crate::i18n::{Locale, gettext};
+use crate::i18n::Locale;
 use crate::stats::Index;
 use crate::stats::query::{self, Count, Day, Delta, Item, Kind, Totals};
+
+/// The translation of `text`, owned.
+pub fn tr(locale: Locale, text: &'static str) -> String {
+    crate::i18n::gettext(locale, text).into_owned()
+}
 
 /// How many of each the page shows.
 pub const ARTISTS: usize = 10;
@@ -39,20 +44,20 @@ impl Span {
     /// The chip's label.
     pub fn chip(self, locale: Locale) -> String {
         match self {
-            Span::Weeks4 => gettext(locale, "4 weeks"),
-            Span::Months6 => gettext(locale, "6 months"),
-            Span::Months12 => gettext(locale, "12 months"),
-            Span::AllTime => gettext(locale, "All time"),
+            Span::Weeks4 => tr(locale, "4 weeks"),
+            Span::Months6 => tr(locale, "6 months"),
+            Span::Months12 => tr(locale, "12 months"),
+            Span::AllTime => tr(locale, "All time"),
         }
     }
 
     /// The range in a sentence or on the share card.
     pub fn label(self, locale: Locale) -> String {
         match self {
-            Span::Weeks4 => gettext(locale, "Last 4 weeks"),
-            Span::Months6 => gettext(locale, "Last 6 months"),
-            Span::Months12 => gettext(locale, "Last 12 months"),
-            Span::AllTime => gettext(locale, "All time"),
+            Span::Weeks4 => tr(locale, "Last 4 weeks"),
+            Span::Months6 => tr(locale, "Last 6 months"),
+            Span::Months12 => tr(locale, "Last 12 months"),
+            Span::AllTime => tr(locale, "All time"),
         }
     }
 }
@@ -275,16 +280,16 @@ pub fn count(value: u64) -> String {
 /// "1 stream" or "12 streams".
 pub fn streams(locale: Locale, streams: u32) -> String {
     let template = if streams == 1 {
-        gettext(locale, "{count} stream")
+        tr(locale, "{count} stream")
     } else {
-        gettext(locale, "{count} streams")
+        tr(locale, "{count} streams")
     };
     template.replace("{count}", &count(u64::from(streams)))
 }
 
 /// "12 min" or "1,234 min".
 pub fn minutes(locale: Locale, minutes: u64) -> String {
-    gettext(locale, "{minutes} min").replace("{minutes}", &count(minutes))
+    tr(locale, "{minutes} min").replace("{minutes}", &count(minutes))
 }
 
 /// "42 streams · 120 min".
@@ -311,7 +316,7 @@ pub fn movement(locale: Locale, delta: Delta) -> Move {
         Delta::Up(places) => Move::Up(places.to_string()),
         Delta::Down(places) => Move::Down(places.to_string()),
         // Translators: A song or artist new to the person's top, shown as a small badge.
-        Delta::New => Move::New(gettext(locale, "NEW")),
+        Delta::New => Move::New(tr(locale, "NEW")),
         Delta::Same | Delta::None => Move::Still,
     }
 }
@@ -320,11 +325,11 @@ pub fn movement(locale: Locale, delta: Delta) -> Move {
 pub fn updated(locale: Locale, ago_ms: i64) -> String {
     let minutes = ago_ms.max(0) / 60_000;
     if minutes < 1 {
-        gettext(locale, "Updated just now")
+        tr(locale, "Updated just now")
     } else if minutes < 60 {
-        gettext(locale, "Updated {minutes} min ago").replace("{minutes}", &minutes.to_string())
+        tr(locale, "Updated {minutes} min ago").replace("{minutes}", &minutes.to_string())
     } else {
-        gettext(locale, "Updated {hours} h ago").replace("{hours}", &(minutes / 60).to_string())
+        tr(locale, "Updated {hours} h ago").replace("{hours}", &(minutes / 60).to_string())
     }
 }
 
@@ -404,7 +409,10 @@ mod tests {
         ]);
         let utc = jiff::tz::TimeZone::UTC;
         let summary = summarize(&index, Span::Weeks4, NOW, &utc);
-        assert_eq!(summary.totals, query::totals(&index, query::Range::Weeks4, NOW));
+        assert_eq!(
+            summary.totals,
+            query::totals(&index, query::Range::Weeks4, NOW)
+        );
         assert_eq!(summary.totals.streams, 3);
         assert!(summary.any_streams);
         assert_eq!(
@@ -422,16 +430,18 @@ mod tests {
         assert_eq!(summary.hero_image(), Some("https://i.scdn.co/image/x"));
         assert_eq!(summary.albums.len(), 2);
         // x is rock and pop; y has no genres.
-        assert_eq!(
-            summary
-                .genres
-                .iter()
-                .map(|genre| (genre.name.as_str(), genre.share))
-                .collect::<Vec<_>>(),
-            vec![("pop", 1.0), ("rock", 1.0)]
-        );
+        let mut genres: Vec<(&str, f32)> = summary
+            .genres
+            .iter()
+            .map(|genre| (genre.name.as_str(), genre.share))
+            .collect();
+        genres.sort_by(|a, b| a.0.cmp(b.0));
+        assert_eq!(genres, vec![("pop", 1.0), ("rock", 1.0)]);
         assert!((28..=29).contains(&summary.days.len()));
-        assert_eq!(summary.hours.iter().map(|hour| hour.streams).sum::<u32>(), 3);
+        assert_eq!(
+            summary.hours.iter().map(|hour| hour.streams).sum::<u32>(),
+            3
+        );
 
         let all = summarize(&index, Span::AllTime, NOW, &utc);
         assert_eq!(all.totals.streams, 4);
@@ -440,7 +450,12 @@ mod tests {
 
     #[test]
     fn an_empty_log_summarizes_to_nothing() {
-        let summary = summarize(&Index::default(), Span::Months6, NOW, &jiff::tz::TimeZone::UTC);
+        let summary = summarize(
+            &Index::default(),
+            Span::Months6,
+            NOW,
+            &jiff::tz::TimeZone::UTC,
+        );
         assert!(!summary.any_streams);
         assert_eq!(summary.totals, Totals::default());
         assert!(summary.tracks.is_empty() && summary.artists.is_empty());
@@ -449,7 +464,11 @@ mod tests {
 
     #[test]
     fn a_double_click_plays_the_tracks_that_have_a_uri() {
-        let index = index(&[play(1, "a", "x", 60_000), play(2, "b", "y", 60_000)]);
+        let index = index(&[
+            play(1, "a", "x", 60_000),
+            play(3, "a", "x", 60_000),
+            play(2, "b", "y", 60_000),
+        ]);
         let mut summary = summarize(&index, Span::Weeks4, NOW, &jiff::tz::TimeZone::UTC);
         summary.tracks[0].uri = None;
         let (uris, positions) = summary.playable();
@@ -465,7 +484,13 @@ mod tests {
         assert_eq!(streams(locale, 1_200), "1,200 streams");
         assert_eq!(minutes(locale, 12_345), "12,345 min");
         assert_eq!(
-            played(locale, Count { streams: 3, ms: 185_000 }),
+            played(
+                locale,
+                Count {
+                    streams: 3,
+                    ms: 185_000
+                }
+            ),
             "3 streams · 3 min"
         );
         assert_eq!(movement(locale, Delta::Up(2)), Move::Up("2".into()));
@@ -512,6 +537,9 @@ mod tests {
         assert_eq!(key, Key::new(&index, Span::Weeks4, NOW + 1));
         assert_ne!(key, Key::new(&index, Span::AllTime, NOW));
         assert_ne!(key, Key::new(&index, Span::Weeks4, NOW + Key::TICK_MS));
-        assert_ne!(key, Key::new(&Arc::new(Index::default()), Span::Weeks4, NOW));
+        assert_ne!(
+            key,
+            Key::new(&Arc::new(Index::default()), Span::Weeks4, NOW)
+        );
     }
 }
