@@ -1,5 +1,7 @@
 //! Only commands documented by Spotify's Soloist WebSocket API. Context
-//! loads retain their offsets through Spotifast's existing Spotify API path.
+//! loads retain their offsets through Spotifast's existing Spotify API path;
+//! a lone song starts as its own context through Soloist's `play`, as
+//! Spotify's apps start one, so autoplay follows it from that song.
 use crate::{
     api::{client::ApiError, models::*},
     backend::{ApiRequest, ApiResponse, RemoteAction},
@@ -172,7 +174,7 @@ impl Client {
             ApiRequest::Remote {
                 action, device_id, ..
             } if device_id.is_some() && device_id == &device.id => {
-                let commands = commands(request)?;
+                let commands = commands(request, active)?;
                 let result = async {
                     let _guard = self.serial.lock().await;
                     for command in commands {
@@ -231,7 +233,33 @@ fn failure(error: anyhow::Error) -> ApiError {
     ApiError::Network(error.to_string())
 }
 
-fn commands(request: &ApiRequest) -> Option<Vec<Value>> {
+/// The song a play request starts on its own, with no list or context
+/// around it and from its beginning. Spotify's apps play such a song with
+/// the song itself as the context (`play({uri: track})`), and autoplay
+/// then carries on from it; the Web API refuses a track as `context_uri`
+/// and can only send it as a one-song `uris` list, which Spotify's player
+/// does not treat as that song's context.
+fn lone_song(play: &crate::api::PlayRequest) -> Option<&str> {
+    let uri = match (play.context_uri.as_deref(), play.uris.as_slice()) {
+        (None, [uri])
+            if play
+                .offset_uri
+                .as_deref()
+                .is_none_or(|offset| offset == uri.as_str()) =>
+        {
+            uri.as_str()
+        }
+        // A resume can name a later song than its context: that one plays.
+        (Some(context), _) if crate::util::uri_kind(context) == Some("track") => {
+            play.offset_uri.as_deref().unwrap_or(context)
+        }
+        _ => return None,
+    };
+    let from_start = play.position_ms == 0 && play.offset_position.unwrap_or(0) == 0;
+    (from_start && crate::util::uri_kind(uri) == Some("track")).then_some(uri)
+}
+
+fn commands(request: &ApiRequest, active: bool) -> Option<Vec<Value>> {
     let ApiRequest::Remote {
         action,
         play,
@@ -246,7 +274,13 @@ fn commands(request: &ApiRequest) -> Option<Vec<Value>> {
     };
     let command = match action {
         RemoteAction::Play if play.is_none() => json!({"command":"play"}),
-        RemoteAction::Play => return None, // Preserve context, ordering and selected occurrence.
+        // An active Soloist starts a lone song as its own context. Taking
+        // the device over stays with the Web API, which documents it.
+        RemoteAction::Play => match play.as_ref().and_then(lone_song) {
+            Some(uri) if active => json!({"command":"play", "uri":uri}),
+            // Preserve context, ordering and selected occurrence.
+            _ => return None,
+        },
         RemoteAction::Pause => json!({"command":"pause"}),
         RemoteAction::Next => json!({"command":"skip_next"}),
         RemoteAction::Previous => json!({"command":"skip_prev"}),
@@ -598,6 +632,52 @@ mod tests {
         }
         assert!(client.dispatch(&other).await.is_none());
     }
+    /// A lone song starts as its own context, the way Spotify's apps play
+    /// one from search, so Spotify's autoplay follows that song. Lists,
+    /// contexts, episodes, resumes partway in and a Soloist that is not
+    /// yet the active device keep the Web API route.
+    #[test]
+    fn a_lone_song_plays_as_its_own_context() {
+        let play = |request: crate::api::PlayRequest, active: bool| {
+            let mut remote = remote(RemoteAction::Play);
+            if let ApiRequest::Remote { play, .. } = &mut remote {
+                *play = Some(request);
+            }
+            commands(&remote, active)
+        };
+        let song = || crate::api::PlayRequest::tracks(vec!["spotify:track:a".into()]);
+        let expected = Some(vec![json!({"command":"play", "uri":"spotify:track:a"})]);
+        assert_eq!(play(song(), true), expected);
+        assert_eq!(play(song().starting_at_index(0), true), expected);
+        assert_eq!(
+            play(crate::api::PlayRequest::context("spotify:track:a"), true),
+            expected
+        );
+        // A resume names the later song its context had moved on to.
+        assert_eq!(
+            play(
+                crate::api::PlayRequest::context("spotify:track:old")
+                    .starting_at_uri("spotify:track:a"),
+                true
+            ),
+            expected
+        );
+
+        assert_eq!(play(song(), false), None);
+        let mut partway = song();
+        partway.position_ms = 30_000;
+        assert_eq!(play(partway, true), None);
+        let list = crate::api::PlayRequest::tracks(vec![
+            "spotify:track:a".into(),
+            "spotify:track:b".into(),
+        ]);
+        assert_eq!(play(list.starting_at_index(1), true), None);
+        let episode = crate::api::PlayRequest::tracks(vec!["spotify:episode:e".into()]);
+        assert_eq!(play(episode, true), None);
+        let playlist = crate::api::PlayRequest::context("spotify:playlist:p")
+            .starting_at_uri("spotify:track:a");
+        assert_eq!(play(playlist, true), None);
+    }
     #[test]
     fn repeat_track_does_not_also_enable_context_repeat() {
         let mut request = remote(RemoteAction::Repeat);
@@ -605,7 +685,7 @@ mod tests {
             *repeat = "track".into();
         }
         assert_eq!(
-            commands(&request).unwrap(),
+            commands(&request, true).unwrap(),
             vec![
                 json!({"command":"set_repeat_context","enabled":false}),
                 json!({"command":"set_repeat_track","enabled":true})

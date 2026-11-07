@@ -181,8 +181,11 @@ It supplies Spotify's own playback implementation on Linux, Apple Silicon
 macOS and x86_64 Windows. Each listener supplies a personal Soloist key and
 pairs once in the official Spotify app. Spotifast renews expiring builds
 from Spotify's download server and retains its existing library connections.
-Basic controls and state use Soloist's loopback API; collection offsets use
-the existing Spotify playback requests. Full queue editing and audio access
+Basic controls and state use Soloist's loopback API; a song started on its
+own plays through Soloist's `play` as its own context, as Spotify's apps play
+it, and collection offsets use the existing Spotify playback requests.
+Soloist's API has no autoplay command or setting: what follows a list is
+Spotify's choice. Full queue editing and audio access
 remain unavailable through Soloist's documented API. On Linux with PipeWire,
 Spotifast processes its owned Soloist output through the operating system for
 EQ; it does not capture the system mix.

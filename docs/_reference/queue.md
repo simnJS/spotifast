@@ -51,6 +51,18 @@ Liked Songs view
 plays its matching songs in displayed order, including duplicates. An empty or entirely
 unplayable view disables Play instead of starting the unfiltered context.
 
+With Autoplay on, what plays after the last song comes from Spotify's
+recommendations for what was playing, as in Spotify's own apps. A playlist,
+album, artist or Liked Songs started from a row, with Shuffle on or off,
+plays as that context at the chosen song, so Spotify carries on from the
+whole context when it ends. A song started on its own, as a search result
+is, plays as its own context, and Spotify carries on from that song; this
+holds for the built-in player and for Soloist. A sorted or filtered view
+plays its shown rows as a plain list. On this computer's built-in player,
+Spotifast follows the end of such a list with Spotify's recommendations for
+its last song. Soloist has no command to choose what follows a list, so
+there Spotify picks it.
+
 Since 0.9.0, starting another song on this computer keeps the
 selected Repeat mode, with Shuffle on or off. Loading a playlist no longer
 silently disables repeat in the playback engine.
