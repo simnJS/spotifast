@@ -5627,7 +5627,7 @@ pub(crate) mod your_stats {
                 .map(|(value, label)| format!("{value} {label}"))
                 .collect();
             assert_eq!(labels.len(), 5);
-            assert_eq!(labels[2].split(' ').last(), Some("listened"));
+            assert_eq!(labels[2].split(' ').next_back(), Some("listened"));
             assert_eq!(labels[3], "#3 Your top artists, all time");
             assert_eq!(labels[4], "#1 Your top artists, last 4 weeks");
         }
