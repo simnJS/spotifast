@@ -9,7 +9,7 @@
 //! theme fade. Maximized and full screen windows keep square corners.
 //!
 //! On Windows the desktop rounds the frameless window itself (see
-//! [`crate::window::round_corners`]).
+//! `crate::window::round_corners`, Windows only).
 
 use egui::{Context, CornerRadius, Id, LayerId, Order, Stroke, StrokeKind};
 
