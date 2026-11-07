@@ -23,6 +23,15 @@ Starting and resuming are separate actions. With Shuffle off, a playlist's
 Double-clicking a row starts there, including with Shuffle on. **Play** in
 the player bar resumes the current song at its paused position.
 
+With Shuffle on, a playlist's, album's, podcast's or Liked Songs' **Play**
+starts at a random song, wherever it is pressed: on its page, a Home tile or
+card, or the library sidebar. When its songs are not loaded yet and another
+device such as Soloist plays, Spotifast first reads how many songs it holds,
+then starts at a random position within it; the play shows as starting
+meanwhile, and the length is remembered for the next time. If that read
+fails, the play still starts, and Spotify chooses where. An artist has no
+position to start at, so Spotify shuffles it on its own.
+
 Since 0.10.0, the Shuffle button on a collection page changes the
 global playback mode without starting that collection. It can be selected
 before a playback device is active; the next **Play** uses the selection.

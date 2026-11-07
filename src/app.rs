@@ -136,6 +136,12 @@ struct PushedVolume {
     poll_seq: u64,
 }
 
+/// A shuffled play held until its context's length is read.
+struct ShuffleLengthWait {
+    serial: u64,
+    request: PlayRequest,
+}
+
 /// A context shown as playing before Spotify confirms it.
 struct AssumedContext {
     uri: String,
@@ -722,6 +728,13 @@ pub struct App {
     /// A play request made while the local engine was still connecting; it
     /// starts the moment the engine reports ready.
     queued_play: Option<PlayRequest>,
+    /// A shuffled play waiting for its context's length, so it can start
+    /// at a random position: Spotify's Web API starts at song one otherwise.
+    shuffle_length_wait: Option<ShuffleLengthWait>,
+    shuffle_length_serial: u64,
+    /// Context lengths read for a shuffled start, for contexts the library
+    /// does not list.
+    context_lengths: HashMap<String, u32>,
     /// Last list sent to local playback. Used for autoplay because librespot
     /// cannot continue a list without a context URI.
     local_list: Option<Vec<String>>,
@@ -1419,6 +1432,9 @@ impl App {
             pending_play_keys: Vec::new(),
             pending_play_at: None,
             queued_play: None,
+            shuffle_length_wait: None,
+            shuffle_length_serial: 0,
+            context_lengths: HashMap::new(),
             local_list: None,
             pending_transfer_to: None,
             remote_recheck_at: None,
@@ -3715,6 +3731,8 @@ impl App {
         };
         self.playlist_pages.clear();
         self.album_pages.clear();
+        self.context_lengths.clear();
+        self.shuffle_length_wait = None;
         self.hidden_songs.clear();
         self.hidden_songs_revision = self.hidden_songs_revision.wrapping_add(1);
         self.hidden_songs_requested = false;
@@ -7873,6 +7891,30 @@ impl App {
             _ => {}
         }
         match response {
+            ApiResponse::ContextLength {
+                context_uri,
+                serial,
+                result,
+            } => {
+                match result {
+                    Ok(length) => {
+                        self.context_lengths.insert(context_uri, length);
+                    }
+                    Err(error) => {
+                        log::debug!(
+                            "context length unavailable: {error}; starting without an offset"
+                        );
+                    }
+                }
+                // Started again now its length is known: at a random
+                // position within it, or, unread, where Spotify chooses.
+                if let Some(wait) = self
+                    .shuffle_length_wait
+                    .take_if(|wait| wait.serial == serial)
+                {
+                    self.start_play_with(wait.request, false, false);
+                }
+            }
             ApiResponse::Me(result) => match result {
                 Ok(user) => {
                     // Spotify only takes playback commands from Premium
@@ -10227,9 +10269,15 @@ impl App {
         Some(uris[rand::random_range(0..uris.len())].clone())
     }
 
-    /// Last known context length from the library.
-    /// Used to choose a random shuffle offset before rows are loaded.
+    /// Last known context length: the library's, else one read for an
+    /// earlier shuffled start. Used to choose a random shuffle offset
+    /// before rows are loaded.
     fn context_len(&self, context_uri: &str) -> Option<u32> {
+        self.library_context_len(context_uri)
+            .or_else(|| self.context_lengths.get(context_uri).copied())
+    }
+
+    fn library_context_len(&self, context_uri: &str) -> Option<u32> {
         if context_uri.ends_with(":collection") {
             return self.library.liked.total;
         }
@@ -10268,9 +10316,10 @@ impl App {
     /// Where a shuffled play of `context_uri` begins, as an offset by
     /// track URI or by position: a random one of the rows the app holds,
     /// or, when it holds none, a random position within the length the
-    /// library knows. Neither, and the play carries no offset at all:
-    /// librespot then picks its own random track, and only the Web API,
-    /// which would start at track one, needs telling where to go.
+    /// app knows. Neither, and the play carries no offset at all:
+    /// librespot then picks its own random track; the Web API, which
+    /// would start at track one, first has the length read (see
+    /// [`Self::start_play_with`]).
     fn shuffle_start(&self, context_uri: &str) -> (Option<String>, Option<u32>) {
         if let Some(uri) = self.random_track_in(context_uri) {
             return (Some(uri), None);
@@ -10342,6 +10391,15 @@ impl App {
     }
 
     fn start_play(&mut self, request: PlayRequest, shuffle_first: bool) {
+        self.start_play_with(request, shuffle_first, true);
+    }
+
+    /// With `read_length`, a shuffled play of a context whose length is
+    /// unknown, sent to another device, first reads that length so it can
+    /// start at a random position. The play shows as starting meanwhile.
+    fn start_play_with(&mut self, request: PlayRequest, shuffle_first: bool, read_length: bool) {
+        // Whatever starts now outranks a play still waiting for a length.
+        self.shuffle_length_wait = None;
         if self.soloist_waiting() && !self.soloist_recovering() {
             self.clear_play_pending();
             return;
@@ -10444,7 +10502,24 @@ impl App {
             }
             Target::Remote(Some(device_id)) => {
                 self.queued_play = None;
-                if shuffle {
+                if shuffle
+                    && read_length
+                    && request.offset_uri.is_none()
+                    && request.offset_position.is_none()
+                    && request.uris.is_empty()
+                    && let Some(context) = request
+                        .context_uri
+                        .clone()
+                        .filter(|context| crate::backend::measures_length(context))
+                {
+                    self.shuffle_length_serial = self.shuffle_length_serial.wrapping_add(1);
+                    let serial = self.shuffle_length_serial;
+                    self.backend.api(ApiRequest::ContextLength {
+                        context_uri: context,
+                        serial,
+                    });
+                    self.shuffle_length_wait = Some(ShuffleLengthWait { serial, request });
+                } else if shuffle {
                     self.backend.api(ApiRequest::ShufflePlay {
                         device_id: Some(device_id),
                         play: request,
@@ -11219,6 +11294,7 @@ impl App {
                 self.local_list = None;
                 self.resume_queue.clear();
                 self.queued_play = None;
+                self.shuffle_length_wait = None;
                 self.intent_track = None;
                 self.assumed_context = None;
                 self.optimistic_playing = None;
@@ -13389,6 +13465,7 @@ impl App {
                 }
                 self.clear_soloist_target();
                 self.queued_play = None;
+                self.shuffle_length_wait = None;
                 self.clear_play_pending();
                 self.supersede_play_search();
                 self.settings.soloist_enabled = enabled;
@@ -31416,6 +31493,186 @@ mod tests {
             [ApiRequest::ShufflePlay { device_id: Some(device), play }]
                 if device == "remote1" && play.context_uri.as_deref() == Some("spotify:playlist:pl0")
         ));
+        app.backend.shutdown();
+    }
+
+    /// A shuffled Play on another device for a playlist never opened (from
+    /// Home, say) reads its length first and starts at a random position
+    /// within it, as Spotify does; it shows as starting meanwhile.
+    #[test]
+    fn shuffled_play_of_an_unloaded_playlist_reads_its_length_then_starts_at_random() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.selected_device = Some("speaker".into());
+        app.shuffle_wanted = true;
+        let context = "spotify:playlist:unopened";
+        let play = Action::PlayContext {
+            uri: context.into(),
+            offset_uri: None,
+            offset_index: None,
+        };
+        app.apply(play.clone(), &ctx);
+        let requests = app.backend.take_remote_play_requests();
+        let serial = match requests.as_slice() {
+            [
+                ApiRequest::ContextLength {
+                    context_uri,
+                    serial,
+                },
+            ] if context_uri == context => *serial,
+            other => panic!("expected a length read first, got {other:?}"),
+        };
+        assert!(
+            app.play_pending(context),
+            "the play shows as starting while its length is read"
+        );
+        assert_eq!(
+            app.assumed_context
+                .as_ref()
+                .map(|assumed| assumed.uri.as_str()),
+            Some(context)
+        );
+
+        app.handle_api(ApiResponse::ContextLength {
+            context_uri: context.into(),
+            serial,
+            result: Ok(40),
+        });
+        let requests = app.backend.take_remote_play_requests();
+        let position = match requests.as_slice() {
+            [
+                ApiRequest::ShufflePlay {
+                    device_id: Some(device),
+                    play,
+                },
+            ] if device == "speaker" && play.context_uri.as_deref() == Some(context) => {
+                assert_eq!(play.offset_uri, None);
+                play.offset_position.expect("a random starting position")
+            }
+            other => panic!("expected a shuffled play, got {other:?}"),
+        };
+        assert!(position < 40, "the start lies within the playlist");
+        assert!(app.play_pending(context), "still starting, no flicker");
+
+        // The length is kept: the next shuffled Play starts at once.
+        app.apply(play, &ctx);
+        let requests = app.backend.take_remote_play_requests();
+        assert!(
+            matches!(
+                requests.as_slice(),
+                [ApiRequest::ShufflePlay { play, .. }]
+                    if play.offset_position.is_some_and(|position| position < 40)
+            ),
+            "a known length needs no second read: {requests:?}"
+        );
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn shuffled_play_still_starts_when_its_length_cannot_be_read() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.selected_device = Some("speaker".into());
+        app.shuffle_wanted = true;
+        let context = "spotify:album:unopened";
+        app.apply(
+            Action::PlayContext {
+                uri: context.into(),
+                offset_uri: None,
+                offset_index: None,
+            },
+            &ctx,
+        );
+        let requests = app.backend.take_remote_play_requests();
+        let [ApiRequest::ContextLength { serial, .. }] = requests.as_slice() else {
+            panic!("expected a length read first, got {requests:?}");
+        };
+        app.handle_api(ApiResponse::ContextLength {
+            context_uri: context.into(),
+            serial: *serial,
+            result: Err(crate::api::ApiError::Network("offline".into())),
+        });
+        let requests = app.backend.take_remote_play_requests();
+        assert!(
+            matches!(
+                requests.as_slice(),
+                [ApiRequest::ShufflePlay { device_id: Some(device), play }]
+                    if device == "speaker"
+                        && play.context_uri.as_deref() == Some(context)
+                        && play.offset_uri.is_none()
+                        && play.offset_position.is_none()
+            ),
+            "a failed read still plays, where Spotify chooses: {requests:?}"
+        );
+        app.backend.shutdown();
+    }
+
+    /// A play made while a length is read outranks it: the late answer
+    /// starts nothing.
+    #[test]
+    fn a_newer_play_supersedes_one_waiting_for_its_length() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.selected_device = Some("speaker".into());
+        app.shuffle_wanted = true;
+        app.apply(
+            Action::PlayContext {
+                uri: "spotify:playlist:first".into(),
+                offset_uri: None,
+                offset_index: None,
+            },
+            &ctx,
+        );
+        let requests = app.backend.take_remote_play_requests();
+        let [ApiRequest::ContextLength { serial, .. }] = requests.as_slice() else {
+            panic!("expected a length read first, got {requests:?}");
+        };
+        app.apply(
+            Action::PlayUris {
+                uris: vec!["spotify:track:other".into()],
+                index: 0,
+            },
+            &ctx,
+        );
+        assert_eq!(app.backend.take_remote_play_requests().len(), 1);
+        app.handle_api(ApiResponse::ContextLength {
+            context_uri: "spotify:playlist:first".into(),
+            serial: *serial,
+            result: Ok(12),
+        });
+        assert!(
+            app.backend.take_remote_play_requests().is_empty(),
+            "the superseded play does not start"
+        );
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn unshuffled_play_of_an_unloaded_playlist_starts_at_its_beginning_at_once() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.selected_device = Some("speaker".into());
+        app.shuffle_wanted = false;
+        app.apply(
+            Action::PlayContext {
+                uri: "spotify:playlist:unopened".into(),
+                offset_uri: None,
+                offset_index: None,
+            },
+            &ctx,
+        );
+        let requests = app.backend.take_remote_play_requests();
+        assert!(
+            matches!(
+                requests.as_slice(),
+                [ApiRequest::Remote {
+                    action: RemoteAction::Play,
+                    play: Some(play),
+                    ..
+                }] if play.offset_position == Some(0) && play.offset_uri.is_none()
+            ),
+            "no length read without Shuffle: {requests:?}"
+        );
         app.backend.shutdown();
     }
 

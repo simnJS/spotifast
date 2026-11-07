@@ -393,6 +393,12 @@ pub enum ApiRequest {
         device_id: Option<String>,
         play: PlayRequest,
     },
+    /// How many rows a playlist, album, show, or Liked Songs holds, read
+    /// for a shuffled start before any of its rows are loaded.
+    ContextLength {
+        context_uri: String,
+        serial: u64,
+    },
     AddToQueue {
         uri: String,
         device_id: Option<String>,
@@ -521,6 +527,11 @@ pub enum ApiResponse {
         result: ApiResult<Page<PlaylistItem>>,
     },
     PlaylistCreated(ApiResult<Playlist>),
+    ContextLength {
+        context_uri: String,
+        serial: u64,
+        result: ApiResult<u32>,
+    },
     PlaylistCoverUploaded {
         id: String,
         request: u64,
@@ -1481,6 +1492,7 @@ impl Backend {
                 action: RemoteAction::Play,
                 ..
             } | ApiRequest::ShufflePlay { .. }
+                | ApiRequest::ContextLength { .. }
         ) {
             self.remote_play_requests
                 .lock()
@@ -5282,6 +5294,8 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         }
         ApiRequest::ArtistTopTracks { .. } => Operation::ArtistTopTracks,
         ApiRequest::RelatedArtists { .. } => Operation::RelatedArtists,
+        ApiRequest::ContextLength { context_uri, .. } => context_length_read(context_uri)
+            .map_or(Operation::Catalog, |read| operation_for(api, &read)),
         ApiRequest::Recommendations { .. } => Operation::UnsupportedDevelopmentMode,
         ApiRequest::Artist { .. }
         | ApiRequest::ArtistAlbums { .. }
@@ -5293,6 +5307,55 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         | ApiRequest::HomeEpisodes { .. }
         | ApiRequest::Track { .. }
         | ApiRequest::Episode { .. } => Operation::Catalog,
+    }
+}
+
+/// The read that tells how many rows a context holds: a playlist's or a
+/// show's header, an album, or the first page of Liked Songs. An artist
+/// has no position to start at, so Spotify shuffles it on its own.
+fn context_length_read(context_uri: &str) -> Option<ApiRequest> {
+    if context_uri.ends_with(":collection") {
+        return Some(ApiRequest::SavedTracks {
+            offset: 0,
+            generation: 0,
+        });
+    }
+    let id = |prefix: &str| context_uri.strip_prefix(prefix).map(str::to_string);
+    if let Some(id) = id("spotify:playlist:") {
+        return Some(ApiRequest::Playlist { id, generation: 0 });
+    }
+    if let Some(id) = id("spotify:album:") {
+        return Some(ApiRequest::Album { id });
+    }
+    id("spotify:show:").map(|id| ApiRequest::Show { id })
+}
+
+/// Whether [`ApiRequest::ContextLength`] can measure this context.
+pub fn measures_length(context_uri: &str) -> bool {
+    context_length_read(context_uri).is_some()
+}
+
+/// The length a [`context_length_read`] answered with. A header that
+/// names no length is a failure: the play then starts without an offset.
+fn context_length_of(answer: ApiResponse) -> ApiResult<u32> {
+    let unknown = || ApiError::Network("the context's length is unknown".into());
+    match answer {
+        ApiResponse::Playlist { result, .. } => result.and_then(|playlist| {
+            playlist
+                .items_count
+                .as_ref()
+                .or(playlist.tracks.as_ref())
+                .map(|count| count.total)
+                .ok_or_else(unknown)
+        }),
+        ApiResponse::Album { result, .. } => {
+            result.and_then(|album| album.total_tracks.ok_or_else(unknown))
+        }
+        ApiResponse::Show { result, .. } => {
+            result.and_then(|show| show.total_episodes.ok_or_else(unknown))
+        }
+        ApiResponse::SavedTracks { result, .. } => result.map(|page| page.total),
+        _ => Err(unknown()),
     }
 }
 
@@ -5715,6 +5778,42 @@ async fn handle(
             expired,
         );
     }
+    if let ApiRequest::ContextLength {
+        context_uri,
+        serial,
+    } = request
+    {
+        let Some(read) = context_length_read(&context_uri) else {
+            return (
+                ApiResponse::ContextLength {
+                    context_uri,
+                    serial,
+                    result: Err(ApiError::Network("no length for this context".into())),
+                },
+                Vec::new(),
+            );
+        };
+        // The same read a page makes, so the session or the Web API
+        // answers it by the same route.
+        let (answer, expired) = Box::pin(handle(
+            api,
+            made_for_you,
+            new_releases,
+            connect,
+            engine,
+            background_session,
+            read,
+        ))
+        .await;
+        return (
+            ApiResponse::ContextLength {
+                context_uri,
+                serial,
+                result: context_length_of(answer),
+            },
+            expired,
+        );
+    }
     let session_engine =
         engine.filter(|engine| same_account(&engine.session().username(), api.account().as_ref()));
     if let ApiRequest::NewReleases { generation } = request {
@@ -5923,7 +6022,8 @@ async fn handle(
         | ApiRequest::BrowseAll
         | ApiRequest::BrowsePage { .. }
         | ApiRequest::HomeShortcuts { .. }
-        | ApiRequest::SetHiddenInPlaylist { .. } => unreachable!("handled before Web API routing"),
+        | ApiRequest::SetHiddenInPlaylist { .. }
+        | ApiRequest::ContextLength { .. } => unreachable!("handled before Web API routing"),
         ApiRequest::MyPlaylists { offset, generation } => ApiResponse::MyPlaylists {
             offset,
             generation,
@@ -9873,6 +9973,51 @@ fn playback_account_matches(credentials: &Credentials, account: Option<AccountId
 mod session_tests {
     use super::*;
     use crate::session_reads::Failure;
+
+    /// A shuffled start's length comes from the read a page would make,
+    /// and only a length Spotify named counts as one.
+    #[test]
+    fn context_length_reads_the_header_each_context_names() {
+        assert!(matches!(
+            context_length_read("spotify:playlist:p"),
+            Some(ApiRequest::Playlist { id, .. }) if id == "p"
+        ));
+        assert!(matches!(
+            context_length_read("spotify:album:a"),
+            Some(ApiRequest::Album { id }) if id == "a"
+        ));
+        assert!(matches!(
+            context_length_read("spotify:show:s"),
+            Some(ApiRequest::Show { id }) if id == "s"
+        ));
+        assert!(matches!(
+            context_length_read("spotify:user:me:collection"),
+            Some(ApiRequest::SavedTracks { offset: 0, .. })
+        ));
+        assert!(!measures_length("spotify:artist:x"));
+
+        let playlist = Playlist {
+            items_count: Some(crate::api::models::TrackCount { total: 7 }),
+            ..Default::default()
+        };
+        let answer = ApiResponse::Playlist {
+            id: "p".into(),
+            generation: 0,
+            result: Ok(playlist),
+        };
+        assert_eq!(context_length_of(answer).ok(), Some(7));
+        let unnamed = ApiResponse::Playlist {
+            id: "p".into(),
+            generation: 0,
+            result: Ok(Playlist::default()),
+        };
+        assert!(context_length_of(unnamed).is_err());
+        let refused = ApiResponse::Album {
+            id: "a".into(),
+            result: Err(ApiError::Network("offline".into())),
+        };
+        assert!(context_length_of(refused).is_err());
+    }
 
     /// Queued Shared and session work must not delay a Personal background read.
     #[tokio::test]
