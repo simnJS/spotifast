@@ -33,16 +33,12 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
         .default_size(app.settings.queue_width)
         .size_range(fit.range.clone())
         .show_separator_line(false)
-        .frame(
-            Frame::new()
-                .fill(palette.panel)
-                .inner_margin(Margin::symmetric(12, 12)),
-        );
+        .frame(super::card_frame(
+            &palette,
+            super::RIGHT_PANEL_MARGIN,
+            super::RIGHT_PANEL_INNER,
+        ));
     let response = panel.show(ui, |ui| {
-        // The panel sits where the Queue would, under the same controls.
-        let window_controls =
-            super::window_controls_reservation(ui.ctx(), true, false, ui.available_width());
-        ui.add_space(window_controls.queue_top);
         let mut close = false;
         egui::Sides::new().shrink_left().show(
             ui,
@@ -51,7 +47,7 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
                 theme::text(
                     ui,
                     gettext(locale, "Listening activity"),
-                    theme::bold(16.0),
+                    theme::bold(super::RIGHT_PANEL_TITLE),
                     palette.text,
                 );
             },
@@ -74,6 +70,7 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
             .id_salt("friends-panel-scroll")
             .auto_shrink([false, false])
+            .content_margin(super::RIGHT_PANEL_SCROLL)
             .show(ui, |ui| contents(app, ui));
     });
     // The Listening activity panel shares the Queue panel's width, so switching

@@ -47,17 +47,12 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
         .default_size(app.settings.queue_width)
         .size_range(fit.range.clone())
         .show_separator_line(false)
-        .frame(Frame::new().fill(palette.panel).inner_margin(Margin {
-            left: 12,
-            right: 4,
-            top: 12,
-            bottom: 0,
-        }));
+        .frame(super::card_frame(
+            &palette,
+            super::RIGHT_PANEL_MARGIN,
+            super::RIGHT_PANEL_INNER,
+        ));
     let response = panel.show(ui, |ui| {
-        // The panel sits where the Queue would, under the same controls.
-        let window_controls =
-            super::window_controls_reservation(ui.ctx(), true, false, ui.available_width());
-        ui.add_space(window_controls.queue_top);
         header(app, ui, &now);
         let header_bottom = ui.cursor().top();
         ui.add_space(4.0);
@@ -74,12 +69,7 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
         let mut scroll = egui::ScrollArea::vertical()
             .id_salt("now-playing-panel-scroll")
             .auto_shrink([false, false])
-            .content_margin(Margin {
-                left: 0,
-                right: 8,
-                top: 0,
-                bottom: 16,
-            });
+            .content_margin(super::RIGHT_PANEL_SCROLL);
         if changed {
             scroll = scroll.vertical_scroll_offset(0.0);
         }
@@ -114,12 +104,24 @@ fn header(app: &mut App, ui: &mut egui::Ui, now: &NowPlaying) {
                     name,
                     page: Some(page),
                 }) => {
-                    if theme::link(ui, name, theme::bold(16.0), palette.text).clicked() {
+                    if theme::link(
+                        ui,
+                        name,
+                        theme::bold(super::RIGHT_PANEL_TITLE),
+                        palette.text,
+                    )
+                    .clicked()
+                    {
                         open = Some(page);
                     }
                 }
                 Some(from) => {
-                    theme::text(ui, from.name, theme::bold(16.0), palette.text);
+                    theme::text(
+                        ui,
+                        from.name,
+                        theme::bold(super::RIGHT_PANEL_TITLE),
+                        palette.text,
+                    );
                 }
                 None => {
                     let title = if now.album_name.is_empty() {
@@ -127,7 +129,12 @@ fn header(app: &mut App, ui: &mut egui::Ui, now: &NowPlaying) {
                     } else {
                         now.album_name.clone()
                     };
-                    theme::text(ui, title, theme::bold(16.0), palette.text);
+                    theme::text(
+                        ui,
+                        title,
+                        theme::bold(super::RIGHT_PANEL_TITLE),
+                        palette.text,
+                    );
                 }
             }
         },

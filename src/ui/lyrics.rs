@@ -1,6 +1,6 @@
 //! The words of the playing track, in a side panel that follows the song.
 
-use egui::{Align, Color32, Frame, Layout, Margin, Rect, Sense, UiBuilder, pos2, vec2};
+use egui::{Align, Color32, Frame, Layout, Rect, Sense, UiBuilder, pos2, vec2};
 
 use crate::app::App;
 use crate::i18n::{gettext, pgettext};
@@ -50,25 +50,18 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
         .default_size(app.settings.lyrics_width)
         .size_range(fit.range.clone())
         .show_separator_line(false)
-        .frame(
-            Frame::new()
-                .fill(palette.panel)
-                .inner_margin(Margin::symmetric(12, 12)),
-        );
+        .frame(super::card_frame(
+            &palette,
+            super::RIGHT_PANEL_MARGIN,
+            super::RIGHT_PANEL_INNER,
+        ));
     let response = panel.show(ui, |ui| {
-        let window_controls = super::window_controls_reservation(
-            ui.ctx(),
-            app.show_queue_panel,
-            app.show_lyrics_panel,
-            ui.available_width(),
-        );
-        ui.add_space(window_controls.lyrics_top);
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             theme::text(
                 ui,
                 gettext(app.locale, "Lyrics"),
-                theme::bold(18.0),
+                theme::bold(super::RIGHT_PANEL_TITLE),
                 palette.text,
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -216,7 +209,8 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
         ui,
         egui::ScrollArea::vertical()
             .id_salt("lyrics-scroll")
-            .auto_shrink([false, false]),
+            .auto_shrink([false, false])
+            .content_margin(super::RIGHT_PANEL_SCROLL),
         egui::Vec2b::new(false, true),
         |ui| {
             // Before the first line there is nothing to highlight, so the

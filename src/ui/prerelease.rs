@@ -52,7 +52,7 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui, data: &Prerelease) {
     let cover_size = if wide { 232.0 } else { 160.0 };
     let background = ui.painter().add(egui::Shape::Noop);
     let body_background = ui.painter().add(egui::Shape::Noop);
-    let hero_top = ui.cursor().top() - 4.0;
+    let hero_top = ui.cursor().top() - widgets::PAGE_TOP;
     let bounds = ui.max_rect().expand2(vec2(widgets::PAGE_PADDING, 0.0));
     ui.add_space(48.0);
     let stacked = ui.available_width() < 480.0;

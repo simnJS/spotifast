@@ -45,7 +45,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
             let colour = cover_colour(app, &show.images);
             chrome.actions_done(ui, &palette, colour);
             if !show.description.is_empty() {
-                theme::section_title(ui, &palette, &gettext(locale, "About"));
+                widgets::section_title(ui, &palette, &gettext(locale, "About"));
                 ui.add_space(4.0);
                 let description = util::strip_html(&show.description);
                 let galley = crate::bidi::layout(
@@ -60,7 +60,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
                 ui.add(egui::Label::new(galley));
                 ui.add_space(16.0);
             }
-            theme::section_title(ui, &palette, &gettext(locale, "All episodes"));
+            widgets::section_title(ui, &palette, &gettext(locale, "All episodes"));
             ui.add_space(6.0);
             let episodes = page.episodes.items.clone();
             let show_image = pick_image(&show.images, app.art_px(EPISODE_ART)).map(str::to_string);

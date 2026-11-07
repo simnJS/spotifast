@@ -650,9 +650,7 @@ fn permute<T>(entries: &mut [T], order: &[usize]) {
     }
 }
 
-/// The gap between the window's rounded panels, and their corner radius.
-const PANEL_GAP: f32 = 8.0;
-const PANEL_RADIUS: u8 = 8;
+use super::{PANEL_GAP, PANEL_RADIUS};
 /// The collapsed sidebar: a column of 48px covers in Spotify's 72px card.
 const COLLAPSED_CARD_WIDTH: f32 = 72.0;
 const COLLAPSED_WIDTH: f32 = COLLAPSED_CARD_WIDTH + 2.0 * PANEL_GAP;
@@ -700,11 +698,6 @@ fn restore_width(ctx: &egui::Context) -> f32 {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let expanded_art = has_expanded_art(app);
-    // The traffic lights float over the top-left of the sidebar now, so the
-    // first nav row has to start below them.
-    let top = PANEL_GAP as i8
-        + theme::titlebar_inset(ui.ctx()) as i8
-        + super::linux_left_controls_inset(ui.ctx()) as i8;
     let beside = if app.right_panel_open() {
         theme::SIDE_PANEL_MIN_WIDTH
     } else {
@@ -733,18 +726,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .frame(Frame::new().fill(palette.window).inner_margin(Margin {
             left: PANEL_GAP as i8,
             right: PANEL_GAP as i8,
-            top,
+            top: 0,
             bottom: PANEL_GAP as i8,
         }));
     let chosen = app.settings.sidebar_width;
     let response = panel.show(ui, |ui| {
         let collapsed = is_collapsed_width(ui.max_rect().width() + 2.0 * PANEL_GAP);
-        nav_card(app, ui, collapsed);
-        ui.add_space(PANEL_GAP);
-        let card = Rect::from_min_max(
-            pos2(ui.max_rect().left(), ui.cursor().top()),
-            ui.max_rect().max,
-        );
+        // Home and Search live in the top bar, as in Spotify, so Your
+        // Library takes the whole column under it.
+        let card = ui.max_rect();
+        // The card is the panel's whole width, or the panel would measure
+        // only the list inset inside it and narrow a little every frame.
+        ui.expand_to_include_rect(card);
         ui.painter()
             .rect_filled(card, CornerRadius::same(PANEL_RADIUS), palette.panel);
         // The list scrolls right to the card's bottom edge, so a drag held
@@ -798,53 +791,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.actions.push(Action::SettingsChanged);
     }
 }
-
-/// Home and Search, in their own rounded card above Your Library. The
-/// collapsed sidebar keeps only their icons.
-fn nav_card(app: &mut App, ui: &mut egui::Ui, collapsed: bool) {
-    let palette = app.palette;
-    let locale = app.locale;
-    let page = app.page().clone();
-    let height = 2.0 * NAV_ROW_HEIGHT + 2.0 * NAV_CARD_PADDING;
-    let card = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), height));
-    ui.painter()
-        .rect_filled(card, CornerRadius::same(PANEL_RADIUS), palette.panel);
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(card.shrink2(vec2(if collapsed { 0.0 } else { 12.0 }, NAV_CARD_PADDING))),
-        |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            if nav_row(
-                ui,
-                &palette,
-                Icon::House,
-                &gettext(locale, "Home"),
-                page == Page::Home,
-                collapsed,
-            )
-            .clicked()
-            {
-                app.actions.push(Action::Open(Page::Home));
-            }
-            if nav_row(
-                ui,
-                &palette,
-                Icon::Search,
-                &gettext(locale, "Search"),
-                page == Page::Search,
-                collapsed,
-            )
-            .clicked()
-            {
-                app.actions.push(Action::FocusSearch);
-            }
-        },
-    );
-    ui.advance_cursor_after_rect(card);
-}
-
-const NAV_ROW_HEIGHT: f32 = 40.0;
-const NAV_CARD_PADDING: f32 = 8.0;
 
 fn expanded_art_rect(ui: &egui::Ui) -> Rect {
     let side = expanded_art_side(ui);
@@ -1301,52 +1247,6 @@ fn playlist_entry(
     }
 }
 
-fn nav_row(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    icon: Icon,
-    label: &str,
-    active: bool,
-    collapsed: bool,
-) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), NAV_ROW_HEIGHT), Sense::click());
-    if ui.is_rect_visible(rect) {
-        let color = if active || response.hovered() {
-            palette.text
-        } else {
-            palette.secondary
-        };
-        let icon_x = if collapsed {
-            rect.center().x
-        } else {
-            rect.left() + 12.0
-        };
-        let icon_rect = Rect::from_center_size(pos2(icon_x, rect.center().y), Vec2::splat(24.0));
-        icon.image(color, 24.0).paint_at(ui, icon_rect);
-        if !collapsed {
-            crate::bidi::paint_line(
-                &ui.painter().with_clip_rect(rect),
-                rect.left() + 44.0,
-                rect.right(),
-                rect.center().y,
-                label,
-                theme::bold(15.0),
-                color,
-            );
-        }
-    }
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), active, label)
-    });
-    theme::focus_ring(ui, &response);
-    if collapsed {
-        response.on_hover_text(label)
-    } else {
-        response
-    }
-}
-
 /// The state of the shelf controls that lives only for this session.
 struct ShelfState {
     filter: Filter,
@@ -1571,7 +1471,6 @@ fn ordered_listing(app: &App, state: &ShelfState, sort: LibrarySort) -> Listing 
 }
 
 /// A pill button in Spotify's library style: the filter chips and Create.
-/// Selected chips turn white with dark text.
 fn pill(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -1580,66 +1479,10 @@ fn pill(
     label: &str,
     selected: bool,
 ) -> egui::Response {
-    let font = if icon.is_some() {
-        theme::bold(14.0)
-    } else {
-        theme::regular(14.0)
-    };
-    let color = if selected {
-        palette.window
-    } else {
-        palette.text
-    };
-    let galley = crate::bidi::layout_line(ui.painter(), text, font, color);
-    let icon_size = 16.0;
-    let icon_width = if icon.is_some() { icon_size + 8.0 } else { 0.0 };
-    let padding = if icon.is_some() { 16.0 } else { 12.0 };
-    let width = if text.is_empty() {
-        PILL_HEIGHT
-    } else {
-        galley.size().x + icon_width + 2.0 * padding
-    };
-    let (rect, response) = ui.allocate_exact_size(vec2(width, PILL_HEIGHT), Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
-    });
-    if ui.is_rect_visible(rect) {
-        let fill = match (selected, response.hovered()) {
-            (true, false) => palette.text,
-            (true, true) => palette.text.gamma_multiply(0.9),
-            (false, false) => palette.surface,
-            (false, true) => palette.surface_hover,
-        };
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(127), fill);
-        let mut left = rect.left() + padding;
-        if let Some(icon) = icon {
-            let center = if text.is_empty() {
-                rect.center()
-            } else {
-                pos2(left + icon_size / 2.0, rect.center().y)
-            };
-            icon.image(color, icon_size)
-                .paint_at(ui, Rect::from_center_size(center, Vec2::splat(icon_size)));
-            left += icon_width;
-        }
-        if !text.is_empty() {
-            ui.painter().galley(
-                pos2(left, rect.center().y - galley.size().y / 2.0),
-                galley,
-                color,
-            );
-        }
-    }
-    theme::focus_ring(ui, &response);
-    if text.is_empty() || text != label {
-        response.on_hover_text(label)
-    } else {
-        response
-    }
+    super::widgets::chip(ui, palette, icon, text, label, selected)
 }
 
-const PILL_HEIGHT: f32 = 32.0;
+const PILL_HEIGHT: f32 = super::widgets::CHIP_HEIGHT;
 
 /// A round icon button that lights up under the pointer, as Spotify's
 /// library header buttons do.

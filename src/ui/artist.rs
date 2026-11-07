@@ -159,7 +159,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
 
 /// A section's title, Spotify's 24-point bold heading.
 fn heading(ui: &mut egui::Ui, palette: &Palette, label: &str) -> egui::Response {
-    theme::text(ui, label, theme::bold(24.0), palette.text)
+    widgets::section_title(ui, palette, label)
 }
 
 /// A bold grey text button that brightens under the pointer, as Spotify's
@@ -235,7 +235,10 @@ fn artist_banner(
         ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
     // The banner bleeds to the page's edges, over its padding.
     let rect = Rect::from_min_max(
-        pos2(viewport.left().min(content.left()), content.top() - 4.0),
+        pos2(
+            viewport.left().min(content.left()),
+            content.top() - widgets::PAGE_TOP,
+        ),
         pos2(viewport.right().max(content.right()), content.bottom()),
     );
     let images = hero_images(

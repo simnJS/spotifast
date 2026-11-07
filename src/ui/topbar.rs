@@ -270,8 +270,9 @@ fn search_pill(
 ) -> (egui::Response, bool) {
     let (_, rect) = ui.allocate_space(vec2(width, height));
     // The pill's own id, so the bar's checks can find its full extent; the
-    // field inside reports only the words' part of it.
-    let back = ui.interact(rect, pill_id(), Sense::click());
+    // field inside reports only the words' part of it. Only a click: the
+    // field is the one stop Tab makes here, not a nameless pill around it.
+    let back = ui.interact(rect, pill_id(), Sense::CLICK);
     let has_focus = ui.memory(|memory| memory.has_focus(id));
     let hovered = back.hovered() || ui.rect_contains_pointer(rect);
     let radius = height / 2.0;
@@ -421,32 +422,37 @@ fn centred_start(bar_center: f32, group: f32, least: f32, most: f32) -> f32 {
     (bar_center - group / 2.0).min(most).max(least)
 }
 
+/// The bar's height across a window `width` wide: its controls with the
+/// panel gap under them, the room macOS's traffic lights take above, and
+/// the caption row when the window is too narrow to share it.
+pub fn height(ctx: &egui::Context, width: f32) -> f32 {
+    super::window_controls_reservation(ctx, width).top + content_height(ctx)
+}
+
+/// The bar's own row: Spotify's 48-point pill with 8 points above and
+/// below it, which is also the gap down to the panels.
+fn content_height(ctx: &egui::Context) -> f32 {
+    theme::top_bar_height() + super::PANEL_GAP + theme::titlebar_inset(ctx)
+}
+
+/// Spotify's global navigation bar across the top of the window: the menu,
+/// Back and Forward, Home and the search pill in the middle, then the bell
+/// and the account, beside the window's own buttons.
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let locale = app.locale;
     let width = ui.available_width();
     let bar_left = ui.cursor().min.x;
-    let mut window_controls = super::window_controls_reservation(
-        ui.ctx(),
-        app.show_queue_panel || app.show_friends_panel || app.now_playing_panel_shown(),
-        app.show_lyrics_panel,
-        width,
-    );
-    if !app.settings.sidebar_visible {
-        window_controls.topbar_top = window_controls
-            .topbar_top
-            .max(super::linux_left_controls_inset(ui.ctx()));
-    }
+    let window_controls = super::window_controls_reservation(ui.ctx(), width);
     // Where the titlebar used to be: the bar grows upwards into that space and
     // its empty parts drag the window.
-    let inset = theme::titlebar_inset(ui.ctx());
-    let content_height = theme::top_bar_height() + inset;
+    let content_height = content_height(ui.ctx());
     if fastframe_titlebar::enabled() {
         fastframe_titlebar::drag(
             ui,
             egui::Rect::from_min_size(
                 ui.cursor().min,
-                vec2(width, content_height + window_controls.topbar_top),
+                vec2(width, content_height + window_controls.top),
             ),
         );
     }
@@ -459,12 +465,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     };
     // The Home disc and the pill fill the bar's height, up to Spotify's 48.
     let pill_height = (theme::top_bar_height() - top_padding - 8.0).clamp(32.0, PILL_HEIGHT);
-    ui.add_space(window_controls.topbar_top + top_padding);
+    ui.add_space(window_controls.top + top_padding);
     ui.allocate_ui_with_layout(
         vec2(width, content_height - top_padding),
         Layout::left_to_right(Align::Center),
         |ui| {
-            ui.add_space(super::widgets::PAGE_PADDING);
+            ui.add_space(window_controls.left + super::widgets::PAGE_PADDING);
             ui.spacing_mut().item_spacing.x = ITEM_SPACING;
             if !app.settings.sidebar_visible {
                 if nav_button(
@@ -546,12 +552,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 };
 
             // Home comes before the field, so the field divides what is left.
-            let search_room =
-                (ui.available_width() - window_controls.topbar_width - HOME_WIDTH).max(0.0);
+            let search_room = (ui.available_width() - window_controls.right - HOME_WIDTH).max(0.0);
             // What sits before the field: the page padding, the navigation
             // buttons, Home, and any window buttons. The panels beside the
             // page keep room for it (`least_width`).
-            let lead = width - ui.available_width() + window_controls.topbar_width + HOME_WIDTH;
+            let lead = width - ui.available_width() + window_controls.right + HOME_WIDTH;
             ui.ctx().data_mut(|data| data.insert_temp(lead_id(), lead));
             let fit = topbar_fit(search_room, controls, badges(true), badges(false));
             let search_width = fit.search;
@@ -559,11 +564,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             // either side allow.
             let group = HOME_WIDTH + search_width;
             let least = ui.cursor().min.x;
-            let most = bar_left + width
-                - window_controls.topbar_width
-                - controls
-                - badges(fit.labels)
-                - group;
+            let most =
+                bar_left + width - window_controls.right - controls - badges(fit.labels) - group;
             let start = centred_start(bar_left + width / 2.0, group, least, most.max(least));
             ui.add_space(start - least);
             if home_button(
@@ -625,7 +627,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_space(window_controls.topbar_width);
+                ui.add_space(window_controls.right);
                 ui.add_space(super::widgets::PAGE_PADDING);
                 // Account.
                 let (name, avatar) = app

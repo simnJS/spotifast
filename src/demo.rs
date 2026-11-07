@@ -2613,23 +2613,14 @@ mod tests {
             app.locale = locale;
             accessible_frame(&ctx, &mut app, vec![]);
             let tree = accessible_frame(&ctx, &mut app, vec![]);
-            // The top bar has its own Home button and search pill, as in
-            // Spotify; the sidebar's pair is the leftmost of each.
-            let leftmost = |label: &str| {
-                tree.nodes
-                    .iter()
-                    .filter(|(_, node)| node.label() == Some(label) && node.role() == Role::Button)
-                    .min_by(|(_, a), (_, b)| {
-                        let x = |node: &egui::accesskit::Node| {
-                            node.bounds().map_or(f64::MAX, |rect| rect.x0)
-                        };
-                        x(a).total_cmp(&x(b))
-                    })
-                    .unwrap_or_else(|| panic!("missing {label:?}"))
-                    .0
-            };
-            let home = leftmost(&gettext(locale, "Home"));
-            let search = leftmost(&gettext(locale, "Search"));
+            // Home and search live only in the top bar now, as in Spotify:
+            // Tab goes from Home straight into the search field.
+            let home = accessible_node(&tree, &gettext(locale, "Home"), Role::Button);
+            let search = accessible_node(
+                &tree,
+                &gettext(locale, "What do you want to play?"),
+                Role::TextInput,
+            );
             accessible_node(&tree, &gettext(locale, "Create a playlist"), Role::Button);
             accessible_node(&tree, &gettext(locale, "Albums"), Role::Button);
             accessible_node(&tree, &gettext(locale, "Artists"), Role::Button);
@@ -2737,9 +2728,16 @@ mod tests {
             // requested remote pause would keep the pending spinner visible.
             app.remote.as_mut().unwrap().state.is_playing = false;
             let tree = accessible_frame(&ctx, &mut app, vec![]);
+            // A shelf on the page has a Play button of its own, so the
+            // player's is found by the node it has always been.
+            let control = tree
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == pause)
+                .map(|(_, node)| (node.label(), node.role()));
             assert_eq!(
-                accessible_node(&tree, &gettext(locale, "Play"), Role::Button),
-                pause
+                control,
+                Some((Some(gettext(locale, "Play").as_ref()), Role::Button))
             );
             app.remote.as_mut().unwrap().state.is_playing = true;
             let tree = accessible_frame(&ctx, &mut app, vec![]);
@@ -12200,7 +12198,7 @@ mod tests {
     }
 
     #[test]
-    fn side_panels_keep_their_full_height_beside_the_page_toolbar() {
+    fn side_panels_keep_their_full_height_under_the_top_bar() {
         for theme in ["dark", "light"] {
             let (ctx, mut app) = accessible_app(&format!("full-height-panels-{theme}"));
             app.open(Page::Playlist("pl1".into()));
@@ -12235,11 +12233,17 @@ mod tests {
                     let side = rect(&format!("{panel}-panel"));
                     let library = rect("sidebar");
                     let player = rect("player-bar");
+                    let bar = rect("top-bar");
+                    // Spotify's shell: one bar across the whole window, then
+                    // the panels side by side under it, all as tall.
                     assert_eq!(side.top(), library.top(), "{panel} at {width} in {theme}");
-                    assert_eq!(side.top(), 0.0, "{panel} must start at the window top");
+                    assert_eq!(side.bottom(), library.bottom());
+                    assert_eq!(bar.top(), 0.0, "only the top bar reaches the window top");
+                    assert_eq!((bar.left(), bar.right()), (0.0, width));
+                    assert_eq!(side.top(), bar.bottom(), "{panel} starts under the top bar");
                     assert_eq!(side.bottom(), player.top());
                     let search = ctx.read_response(egui::Id::new("global-search")).unwrap();
-                    assert!(side.top() < search.rect.top());
+                    assert!(search.rect.bottom() <= side.top());
                 }
             }
             app.backend.shutdown();

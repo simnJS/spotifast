@@ -12,11 +12,36 @@ use crate::model::{Action, Dialog, DragEntry, DragTrack, Page, RowContext, RowPi
 use crate::theme::{self, Icon, Palette};
 use crate::util;
 
-pub const CARD_WIDTH: f32 = 172.0;
-/// The cover inside a card, within its 12 point padding.
-pub const CARD_ART: f32 = CARD_WIDTH - 24.0;
+/// Every page's cards share one size and padding: Home's shelves, Search,
+/// an artist's releases and the library grids.
+pub const CARD_WIDTH: f32 = CARD_ART + 2.0 * CARD_PAD;
+/// The cover inside a card, within its padding.
+pub const CARD_ART: f32 = 160.0;
+/// The padding around a card's cover and text, which its hover fills.
+pub const CARD_PAD: f32 = 12.0;
+/// The space between a card's cover and its title.
+pub const CARD_TITLE_GAP: f32 = 8.0;
+/// A card's title and its subtitle, which may take two lines.
+pub fn card_title_font() -> egui::FontId {
+    theme::regular(15.0)
+}
+pub fn card_subtitle_font() -> egui::FontId {
+    theme::regular(13.5)
+}
+/// The corner radius of a card's cover.
+pub const CARD_COVER_RADIUS: f32 = 6.0;
+
+/// The background a card shows under the pointer, Spotify's tinted
+/// highlight, the same on every page.
+pub fn paint_card_hover(ui: &Ui, palette: &Palette, rect: Rect) {
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(theme::RADIUS), palette.surface);
+}
 pub const CARD_GAP: f32 = 14.0;
 pub const PAGE_PADDING: f32 = 24.0;
+/// The space above a page's first row inside the main view's card. A hero
+/// that bleeds to the card's top edge reaches up over it.
+pub const PAGE_TOP: f32 = 12.0;
 
 /// Draws an image (or a placeholder) in a square.
 pub fn cover(
@@ -2629,21 +2654,23 @@ impl CardCover {
 
 /// Fixed height of a [`card`] row for virtualised grids.
 pub fn card_row_height(ui: &mut Ui) -> f32 {
-    const PAD: f32 = 12.0;
-    const TITLE_GAP: f32 = 10.0;
-    const SUBTITLE_GAP: f32 = 2.0;
-    const BOTTOM_PAD: f32 = 8.0;
-    let image_size = CARD_ART;
-    let title_font = theme::semibold(14.0);
-    let subtitle_font = theme::regular(12.5);
     let (title_row, subtitle_row) = ui.fonts_mut(|fonts| {
         (
-            fonts.row_height(&title_font),
-            fonts.row_height(&subtitle_font),
+            fonts.row_height(&card_title_font()),
+            fonts.row_height(&card_subtitle_font()),
         )
     });
-    PAD + image_size + TITLE_GAP + title_row + SUBTITLE_GAP + 2.0 * subtitle_row + BOTTOM_PAD
+    CARD_PAD
+        + CARD_ART
+        + CARD_TITLE_GAP
+        + title_row
+        + CARD_SUBTITLE_GAP
+        + 2.0 * subtitle_row
+        + CARD_PAD
 }
+
+/// The space between a card's title and its subtitle.
+pub const CARD_SUBTITLE_GAP: f32 = 2.0;
 
 /// A cover-and-title card for grids and shelves.
 pub fn card(
@@ -2660,14 +2687,14 @@ pub fn card(
         playing,
     } = cover;
     let palette = app.palette;
-    const PAD: f32 = 12.0;
-    const TITLE_GAP: f32 = 10.0;
-    const SUBTITLE_GAP: f32 = 2.0;
-    const BOTTOM_PAD: f32 = 8.0;
+    const PAD: f32 = CARD_PAD;
+    const TITLE_GAP: f32 = CARD_TITLE_GAP;
+    const SUBTITLE_GAP: f32 = CARD_SUBTITLE_GAP;
+    const BOTTOM_PAD: f32 = CARD_PAD;
     let image_size = CARD_ART;
     let text_width = image_size;
-    let title_font = theme::semibold(14.0);
-    let subtitle_font = theme::regular(12.5);
+    let title_font = card_title_font();
+    let subtitle_font = card_subtitle_font();
     // Every card reserves the title row and two subtitle rows, whatever its
     // own subtitle needs: a two-line subtitle then sits inside the hover
     // background, and a shelf that mixes one- and two-line subtitles keeps
@@ -2695,16 +2722,14 @@ pub fn card(
     if ui.is_rect_visible(rect) {
         let hovered = ui.rect_contains_pointer(rect);
         if hovered {
-            ui.painter().rect_filled(
-                rect,
-                CornerRadius::same(theme::RADIUS),
-                palette
-                    .surface_hover
-                    .gamma_multiply(if palette.dark { 0.8 } else { 1.0 }),
-            );
+            paint_card_hover(ui, &palette, rect);
         }
         let image_rect = Rect::from_min_size(rect.min + vec2(PAD, PAD), Vec2::splat(image_size));
-        let radius = if circular { image_size / 2.0 } else { 6.0 };
+        let radius = if circular {
+            image_size / 2.0
+        } else {
+            CARD_COVER_RADIUS
+        };
         paint_shadow(ui, &palette, image_rect, radius);
         paint_cover(
             ui,
@@ -2782,6 +2807,15 @@ pub fn card(
     }
 }
 
+/// The size of a section's title in the main view: Spotify's
+/// `title-medium`, the same on Home, Search, an artist, a show and an album.
+pub const SECTION_TITLE: f32 = 24.0;
+
+/// A section's title in the main view.
+pub fn section_title(ui: &mut Ui, palette: &Palette, label: &str) -> egui::Response {
+    theme::text(ui, label, theme::bold(SECTION_TITLE), palette.text)
+}
+
 /// A horizontal shelf of cards with a title.
 pub fn shelf(
     ui: &mut Ui,
@@ -2791,7 +2825,7 @@ pub fn shelf(
     add_contents: impl FnOnce(&mut Ui),
 ) {
     ui.add_space(8.0);
-    theme::section_title(ui, palette, title);
+    section_title(ui, palette, title);
     shelf_cards(ui, id, add_contents);
 }
 
@@ -2805,7 +2839,7 @@ pub fn linked_shelf(
     add_contents: impl FnOnce(&mut Ui),
 ) -> bool {
     ui.add_space(8.0);
-    let clicked = theme::link(ui, title, theme::bold(17.0), palette.text).clicked();
+    let clicked = theme::link(ui, title, theme::bold(SECTION_TITLE), palette.text).clicked();
     shelf_cards(ui, id, add_contents);
     clicked
 }
@@ -2836,7 +2870,7 @@ pub fn grid(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui)) {
 
 /// The colour of a skeleton's shapes: the surface a loaded row or card
 /// draws on, so the page keeps its look while it loads.
-fn skeleton_fill(palette: &Palette) -> egui::Color32 {
+pub(crate) fn skeleton_fill(palette: &Palette) -> egui::Color32 {
     palette
         .surface_hover
         .gamma_multiply(if palette.dark { 0.9 } else { 1.0 })
@@ -2889,8 +2923,7 @@ pub fn skeleton_rows(ui: &mut Ui, palette: &Palette, locale: Locale, count: usiz
 /// Placeholder cards for a shelf that is loading, the size of the cards it
 /// will show, round for artists. Like [`skeleton_rows`], they do not move.
 pub fn skeleton_cards(ui: &mut Ui, palette: &Palette, locale: Locale, count: usize, round: bool) {
-    const PAD: f32 = 12.0;
-    let height = PAD + CARD_ART + 10.0 + 14.0 + 6.0 + 10.0 + PAD;
+    let height = card_row_height(ui);
     skeleton_cards_sized(ui, palette, locale, count, round, height);
 }
 
@@ -2925,7 +2958,7 @@ fn skeleton_cards_sized(
     height: f32,
 ) {
     let fill = skeleton_fill(palette);
-    const PAD: f32 = 12.0;
+    const PAD: f32 = CARD_PAD;
     for index in 0..count {
         let (rect, response) = ui.allocate_exact_size(vec2(CARD_WIDTH, height), Sense::hover());
         if index == 0 {
@@ -2942,7 +2975,11 @@ fn skeleton_cards_sized(
         }
         let painter = ui.painter();
         let art = Rect::from_min_size(rect.min + vec2(PAD, PAD), Vec2::splat(CARD_ART));
-        let radius = if round { CARD_ART / 2.0 } else { 6.0 };
+        let radius = if round {
+            CARD_ART / 2.0
+        } else {
+            CARD_COVER_RADIUS
+        };
         painter.rect_filled(art, CornerRadius::same(radius as u8), fill);
         let title = Rect::from_min_size(
             pos2(art.left(), art.bottom() + 12.0),
@@ -3182,6 +3219,81 @@ pub fn thin_slider(
     event
 }
 
+/// The height of a [`chip`].
+pub const CHIP_HEIGHT: f32 = 32.0;
+
+/// Spotify's chip, the one style for every row of filters and tabs: 32
+/// points tall, 14-point text, in the surface colour, turning the text
+/// colour while selected. With an icon its text is bold, as Create's is;
+/// without text it is a round icon button. `label` names it for screen
+/// readers and, when it differs from what shows, as its tooltip.
+pub fn chip(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    icon: Option<Icon>,
+    text: &str,
+    label: &str,
+    selected: bool,
+) -> egui::Response {
+    let font = if icon.is_some() {
+        theme::bold(14.0)
+    } else {
+        theme::regular(14.0)
+    };
+    let color = if selected {
+        palette.window
+    } else {
+        palette.text
+    };
+    let galley = crate::bidi::layout_line(ui.painter(), text, font, color);
+    let icon_size = 16.0;
+    let icon_width = if icon.is_some() { icon_size + 8.0 } else { 0.0 };
+    let padding = if icon.is_some() { 16.0 } else { 12.0 };
+    let width = if text.is_empty() {
+        CHIP_HEIGHT
+    } else {
+        galley.size().x + icon_width + 2.0 * padding
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(width, CHIP_HEIGHT), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
+    });
+    if ui.is_rect_visible(rect) {
+        let fill = match (selected, response.hovered()) {
+            (true, false) => palette.text,
+            (true, true) => palette.text.gamma_multiply(0.9),
+            (false, false) => palette.surface,
+            (false, true) => palette.surface_hover,
+        };
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(127), fill);
+        let mut left = rect.left() + padding;
+        if let Some(icon) = icon {
+            let center = if text.is_empty() {
+                rect.center()
+            } else {
+                pos2(left + icon_size / 2.0, rect.center().y)
+            };
+            icon.image(color, icon_size)
+                .paint_at(ui, Rect::from_center_size(center, Vec2::splat(icon_size)));
+            left += icon_width;
+        }
+        if !text.is_empty() {
+            ui.painter().galley(
+                pos2(left, rect.center().y - galley.size().y / 2.0),
+                galley,
+                color,
+            );
+        }
+    }
+    theme::focus_ring(ui, &response);
+    if text.is_empty() || text != label {
+        response.on_hover_text(label)
+    } else {
+        response
+    }
+}
+
 /// A tab-like chip row: returns the newly selected index, if any.
 pub fn chips<T: PartialEq + Copy>(
     ui: &mut Ui,
@@ -3191,10 +3303,10 @@ pub fn chips<T: PartialEq + Copy>(
 ) -> Option<T> {
     let mut selected = None;
     let id = ui.next_auto_id();
-    chip_row(ui, id, palette.window, |ui| {
+    chip_row(ui, id, palette.panel, |ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         for (value, label) in options {
-            let chip = theme::soft_button(ui, palette, None, label, *value == current);
+            let chip = self::chip(ui, palette, None, label, label, *value == current);
             if chip.clicked() {
                 chip.scroll_to_me(None);
                 selected = Some(*value);
@@ -3216,7 +3328,7 @@ pub fn wrapped_chips<T: PartialEq + Copy>(
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         for (value, label) in options {
-            if theme::soft_button(ui, palette, None, label, *value == current).clicked() {
+            if self::chip(ui, palette, None, label, label, *value == current).clicked() {
                 selected = Some(*value);
             }
         }

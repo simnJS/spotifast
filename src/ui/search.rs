@@ -99,7 +99,7 @@ fn recent(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     if !app.settings.search_history.is_empty() {
-        theme::section_title(ui, &palette, &gettext(app.locale, "Recent searches"));
+        widgets::section_title(ui, &palette, &gettext(app.locale, "Recent searches"));
         ui.add_space(6.0);
         let history = app.settings.search_history.clone();
         ui.horizontal_wrapped(|ui| {
@@ -137,7 +137,7 @@ fn browse_all(app: &mut App, ui: &mut egui::Ui) {
                 } else {
                     section.title.clone()
                 };
-                theme::section_title(ui, &palette, &title);
+                widgets::section_title(ui, &palette, &title);
                 ui.add_space(4.0);
                 tile_grid(app, ui, &section.items);
                 ui.add_space(16.0);
@@ -152,7 +152,7 @@ fn browse_all(app: &mut App, ui: &mut egui::Ui) {
             widgets::error_row(ui, app, &error, Some(Page::Search));
         }
         Loadable::Loading | Loadable::NotLoaded if app.network_reachable => {
-            theme::section_title(ui, &palette, &gettext(locale, "Browse all"));
+            widgets::section_title(ui, &palette, &gettext(locale, "Browse all"));
             ui.add_space(4.0);
             skeleton_tiles(ui, &palette, locale, SKELETON_TILES);
         }
@@ -406,7 +406,7 @@ fn skeleton_tiles(
 ) {
     let (columns, width) = tile_layout(ui.available_width());
     let size = vec2(width, (width * TILE_ASPECT).round());
-    let fill = palette.surface_hover;
+    let fill = widgets::skeleton_fill(palette);
     let mut shown = 0;
     while shown < count {
         ui.horizontal(|ui| {
@@ -547,7 +547,7 @@ fn browse_section(
     let palette = app.palette;
     if section.is_grid() {
         if !section.title.is_empty() {
-            theme::section_title(ui, &palette, &section.title);
+            widgets::section_title(ui, &palette, &section.title);
             ui.add_space(4.0);
         }
         tile_grid(app, ui, &section.items);
@@ -597,7 +597,7 @@ fn all(app: &mut App, ui: &mut egui::Ui, results: &SearchResults) {
         };
         ui.vertical(|ui| {
             ui.set_width(top_width);
-            theme::section_title(ui, &palette, &gettext(locale, "Top result"));
+            widgets::section_title(ui, &palette, &gettext(locale, "Top result"));
             ui.add_space(4.0);
             if let Some(artist) = top_artist {
                 top_result(
@@ -732,7 +732,7 @@ fn all(app: &mut App, ui: &mut egui::Ui, results: &SearchResults) {
         .as_ref()
         .is_some_and(|page| !page.items.is_empty())
     {
-        theme::section_title(ui, &palette, &gettext(locale, "Episodes"));
+        widgets::section_title(ui, &palette, &gettext(locale, "Episodes"));
         ui.add_space(4.0);
         episodes(app, ui, results, 4);
     }
@@ -901,7 +901,7 @@ fn songs(app: &mut App, ui: &mut egui::Ui, results: &SearchResults, limit: usize
     if page.items.is_empty() {
         return;
     }
-    theme::section_title(ui, &palette, &gettext(app.locale, "Songs"));
+    widgets::section_title(ui, &palette, &gettext(app.locale, "Songs"));
     ui.add_space(4.0);
     let items: Vec<PlayableItem> = page
         .items

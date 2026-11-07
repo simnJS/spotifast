@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use egui::{Align, Frame, Layout, Margin, Rect, UiBuilder};
+use egui::{Align, Layout, Rect, UiBuilder};
 
 use crate::api::models::PlayableItem;
 use crate::app::App;
@@ -48,19 +48,12 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
         .default_size(app.settings.queue_width)
         .size_range(fit.range.clone())
         .show_separator_line(false)
-        .frame(
-            Frame::new()
-                .fill(palette.panel)
-                .inner_margin(Margin::symmetric(12, 12)),
-        );
+        .frame(super::card_frame(
+            &palette,
+            super::RIGHT_PANEL_MARGIN,
+            super::RIGHT_PANEL_INNER,
+        ));
     let response = panel.show(ui, |ui| {
-        let window_controls = super::window_controls_reservation(
-            ui.ctx(),
-            app.show_queue_panel,
-            app.show_lyrics_panel,
-            ui.available_width(),
-        );
-        ui.add_space(window_controls.queue_top);
         // Measure buttons first and give the remaining width to the chips.
         // Without `shrink_left`, wrapped chips can overlap the close button.
         let tab = app.queue_tab;
@@ -120,12 +113,7 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
                 .id_salt("queue-panel-scroll")
                 .auto_shrink([false, false])
                 // Keep rows and headings clear of the scroll bar.
-                .content_margin(egui::Margin {
-                    left: 0,
-                    right: 12,
-                    top: 0,
-                    bottom: 0,
-                }),
+                .content_margin(super::RIGHT_PANEL_SCROLL),
             egui::Vec2b::new(false, true),
             |ui| match app.queue_tab {
                 QueueTab::Queue => contents(app, ui, true),

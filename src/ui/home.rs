@@ -52,7 +52,7 @@ fn filter_id() -> Id {
 /// The space above each section, as Spotify's Home leaves between shelves.
 const SECTION_GAP: f32 = 24.0;
 /// The size of a section's title, Spotify's 24 point bold.
-const SECTION_TITLE: f32 = 24.0;
+const SECTION_TITLE: f32 = widgets::SECTION_TITLE;
 
 pub fn show(app: &mut App, ui: &mut Ui) {
     let palette = app.palette;
@@ -217,10 +217,10 @@ fn paint_wash(
     }
     let page = ui.max_rect();
     let rect = Rect::from_min_max(
-        pos2(page.left() - widgets::PAGE_PADDING, top - 4.0),
+        pos2(page.left() - widgets::PAGE_PADDING, top - widgets::PAGE_TOP),
         pos2(
             page.right() + widgets::PAGE_PADDING,
-            top - 4.0 + WASH_HEIGHT,
+            top - widgets::PAGE_TOP + WASH_HEIGHT,
         ),
     );
     ui.painter().set(
@@ -713,9 +713,7 @@ fn shortcut(
 }
 
 /// A Home card's cover, inside its 12 point padding, as Spotify's.
-const CARD_ART: f32 = 160.0;
-const CARD_PAD: f32 = 12.0;
-const CARD_WIDTH: f32 = CARD_ART + 2.0 * CARD_PAD;
+use widgets::{CARD_ART, CARD_PAD, CARD_WIDTH};
 /// The play control on a hovered card's cover.
 const CARD_PLAY: f32 = 48.0;
 
@@ -736,15 +734,15 @@ struct Card<'a> {
 /// button sliding up into the cover's corner.
 fn card(ui: &mut Ui, app: &mut App, card: &Card<'_>) -> CardResponse {
     let palette = app.palette;
-    let title_font = theme::regular(15.0);
-    let subtitle_font = theme::regular(13.5);
+    let title_font = widgets::card_title_font();
+    let subtitle_font = widgets::card_subtitle_font();
     let (title_row, subtitle_row) = ui.fonts_mut(|fonts| {
         (
             fonts.row_height(&title_font),
             fonts.row_height(&subtitle_font),
         )
     });
-    let height = CARD_PAD + CARD_ART + 8.0 + title_row + 2.0 + 2.0 * subtitle_row + CARD_PAD;
+    let height = widgets::card_row_height(ui);
     let (rect, response) = ui.allocate_exact_size(vec2(CARD_WIDTH, height), Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::labeled(
@@ -766,13 +764,13 @@ fn card(ui: &mut Ui, app: &mut App, card: &Card<'_>) -> CardResponse {
     let art = Rect::from_min_size(rect.min + Vec2::splat(CARD_PAD), Vec2::splat(CARD_ART));
     if ui.is_rect_visible(rect) {
         if hovered {
-            ui.painter().rect_filled(
-                rect,
-                CornerRadius::same(theme::RADIUS_SMALL + 2),
-                palette.surface,
-            );
+            widgets::paint_card_hover(ui, &palette, rect);
         }
-        let radius = if card.round { CARD_ART / 2.0 } else { 6.0 };
+        let radius = if card.round {
+            CARD_ART / 2.0
+        } else {
+            widgets::CARD_COVER_RADIUS
+        };
         widgets::paint_shadow(ui, &palette, art, radius);
         widgets::paint_cover(
             ui,
@@ -785,7 +783,7 @@ fn card(ui: &mut Ui, app: &mut App, card: &Card<'_>) -> CardResponse {
         );
         let title = widgets::ellipsized(ui, card.title, title_font, palette.text, CARD_ART, 1);
         let title_rect = Rect::from_min_size(
-            pos2(art.left(), art.bottom() + 8.0),
+            pos2(art.left(), art.bottom() + widgets::CARD_TITLE_GAP),
             vec2(CARD_ART, title_row),
         );
         paint_galley(ui, title_rect, title, palette.text);
@@ -798,7 +796,7 @@ fn card(ui: &mut Ui, app: &mut App, card: &Card<'_>) -> CardResponse {
             2,
         );
         let subtitle_rect = Rect::from_min_size(
-            pos2(art.left(), title_rect.bottom() + 2.0),
+            pos2(art.left(), title_rect.bottom() + widgets::CARD_SUBTITLE_GAP),
             vec2(CARD_ART, 2.0 * subtitle_row),
         );
         paint_galley(ui, subtitle_rect, subtitle, palette.secondary);

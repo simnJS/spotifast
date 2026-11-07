@@ -75,15 +75,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 ui.max_rect().min,
                 vec2(
                     ui.max_rect().width(),
-                    theme::top_bar_height() + theme::titlebar_inset(ui.ctx()),
+                    topbar::height(ui.ctx(), ui.max_rect().width()),
                 ),
             ),
         );
     }
+    // Spotify's shell: the window's own colour shows in the gaps between
+    // the rounded panels, around them, and under the top and player bars.
+    ui.painter()
+        .rect_filled(ui.max_rect(), CornerRadius::ZERO, app.palette.window);
     player_bar::show(app, ui);
     if app.lyrics_fullscreen.is_some() {
         lyrics::fullscreen(app, ui);
     } else {
+        top_bar(app, ui);
         if app.settings.sidebar_visible {
             sidebar::show(app, ui);
         }
@@ -297,8 +302,25 @@ fn page_tint(app: &mut App) -> Option<Color32> {
 fn central(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let tint = page_tint(app);
+    // The main view is the middle of the three cards. A panel beside it
+    // keeps the gap between them; without one, the card keeps the window's
+    // margin itself.
+    let margin = Margin {
+        left: if app.settings.sidebar_visible {
+            0
+        } else {
+            PANEL_GAP as i8
+        },
+        right: if app.right_panel_open() {
+            0
+        } else {
+            PANEL_GAP as i8
+        },
+        top: 0,
+        bottom: PANEL_GAP as i8,
+    };
     egui::CentralPanel::default()
-        .frame(Frame::new().fill(palette.window))
+        .frame(card_frame(&palette, margin, Margin::ZERO))
         .show(ui, |ui| {
             let rect = ui.max_rect();
             let page = app.page().clone();
@@ -326,7 +348,6 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
             // colour, which shows as a pale band over a cover's tint; the
             // page casts a shadow under the header instead.
             ui.spacing_mut().scroll.fade.strength = 0.0;
-            topbar::show(app, ui);
             // One banner at a time: a song that will not play matters more
             // than a slow app, which waits its turn.
             if app.dialog.is_none() && page != Page::Settings {
@@ -350,7 +371,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                     .inner_margin(Margin {
                         left: widgets::PAGE_PADDING as i8,
                         right: widgets::PAGE_PADDING as i8,
-                        top: 4,
+                        top: widgets::PAGE_TOP as i8,
                         bottom: 48,
                     })
                     .show(ui, |ui| {
@@ -383,7 +404,112 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
             ui.ctx()
                 .data_mut(|data| data.insert_temp(scrolled_id, scroll.state.offset.y));
             header_shadow(ui, scroll.inner_rect, scroll.state.offset.y, palette.dark);
+            // The wash, a full-bleed banner and the shadow reach the card's
+            // edges; its corners stay round over them.
+            round_card_corners(ui, rect, palette.window);
         });
+}
+
+/// The gap between the shell's rounded panels, and the margin they keep
+/// from the window's edges, as Spotify's `--panel-gap`.
+pub(crate) const PANEL_GAP: f32 = 8.0;
+/// The corner radius of the shell's panels.
+pub(crate) const PANEL_RADIUS: u8 = 8;
+
+/// The frame of one of the shell's panels: a card in the panel colour with
+/// rounded corners, `outer` away from its neighbours and the window's
+/// edges, holding its contents `inner` in from its own edges.
+pub(crate) fn card_frame(palette: &theme::Palette, outer: Margin, inner: Margin) -> Frame {
+    Frame::new()
+        .outer_margin(outer)
+        .fill(palette.panel)
+        .corner_radius(CornerRadius::same(PANEL_RADIUS))
+        .inner_margin(inner)
+}
+
+/// The outer margin of a panel on the right: the gap to the main view on
+/// its left, the window's margin on its right and under it.
+pub(crate) const RIGHT_PANEL_MARGIN: Margin = Margin {
+    left: PANEL_GAP as i8,
+    right: PANEL_GAP as i8,
+    top: 0,
+    bottom: PANEL_GAP as i8,
+};
+
+/// The padding inside a panel on the right: its scroll bar sits 4 points
+/// in from the card's edge, as the sidebar's does, and its rows keep
+/// `RIGHT_PANEL_SCROLL` clear of it.
+pub(crate) const RIGHT_PANEL_INNER: Margin = Margin {
+    left: 12,
+    right: 4,
+    top: 12,
+    bottom: 0,
+};
+/// The size of a right panel's title: Now Playing's context, Lyrics,
+/// Listening activity.
+pub(crate) const RIGHT_PANEL_TITLE: f32 = 16.0;
+/// The margin inside a right panel's scrolling list: clear of its scroll
+/// bar, and room after the last row.
+pub(crate) const RIGHT_PANEL_SCROLL: Margin = Margin {
+    left: 0,
+    right: 8,
+    top: 0,
+    bottom: 16,
+};
+
+/// Paints the window's colour over the four corners of the card `rect`,
+/// outside its rounded outline, so whatever the card's contents drew up to
+/// its edges is clipped to the round corners. egui clips to rectangles
+/// only.
+pub(crate) fn round_card_corners(ui: &egui::Ui, rect: Rect, window: Color32) {
+    let painter = ui.painter().with_clip_rect(rect);
+    for shape in corner_masks(rect, f32::from(PANEL_RADIUS), window) {
+        painter.add(shape);
+    }
+}
+
+/// The shapes `round_card_corners` paints: per corner, a fan from the
+/// rectangle's corner along the arc, then the arc's own line, whose
+/// feathered edge smooths the fan's.
+fn corner_masks(rect: Rect, radius: f32, color: Color32) -> Vec<egui::Shape> {
+    const STEPS: usize = 8;
+    let mut shapes = Vec::with_capacity(8);
+    // Each corner: the corner point, the arc's centre, and the arc's start
+    // angle; the arc sweeps a quarter turn.
+    let corners = [
+        (rect.left_top(), vec2(radius, radius), std::f32::consts::PI),
+        (
+            rect.right_top(),
+            vec2(-radius, radius),
+            1.5 * std::f32::consts::PI,
+        ),
+        (rect.right_bottom(), vec2(-radius, -radius), 0.0),
+        (
+            rect.left_bottom(),
+            vec2(radius, -radius),
+            0.5 * std::f32::consts::PI,
+        ),
+    ];
+    for (corner, offset, start) in corners {
+        let centre = corner + offset;
+        let arc: Vec<egui::Pos2> = (0..=STEPS)
+            .map(|step| {
+                let angle = start + step as f32 / STEPS as f32 * std::f32::consts::FRAC_PI_2;
+                centre + radius * vec2(angle.cos(), angle.sin())
+            })
+            .collect();
+        let mut mesh = egui::Mesh::default();
+        mesh.colored_vertex(corner, color);
+        for point in &arc {
+            mesh.colored_vertex(*point, color);
+        }
+        for index in 1..=STEPS as u32 {
+            mesh.add_triangle(0, index, index + 1);
+        }
+        shapes.push(egui::Shape::mesh(mesh));
+        shapes.push(egui::Shape::line(arc, Stroke::new(1.0, color)));
+    }
+    shapes
 }
 
 /// Where the "Why?" link of the slow-app banner leads.
@@ -391,7 +517,7 @@ const SLOW_BANNER_GUIDE: &str = "https://spotifast.rocks/troubleshooting/#rate-l
 /// Where the "Why?" link of the audio-key banner leads.
 pub const AUDIO_KEY_GUIDE: &str = "https://spotifast.rocks/troubleshooting/#audio-key";
 
-/// A strip under the top bar suggesting a personal app, after Spotify
+/// A strip at the top of the main view suggesting a personal app, after Spotify
 /// told the shared app, which only listeners signed in before 0.14.2 still
 /// use, that it sent too many requests. It stays put while the
 /// page scrolls, and goes when it is closed.
@@ -423,7 +549,7 @@ fn slow_banner(app: &mut App, ui: &mut egui::Ui) {
     );
 }
 
-/// A strip under the top bar after Spotify refused the key that decrypts a
+/// A strip at the top of the main view after Spotify refused the key that decrypts a
 /// song on this computer, offering another Spotify device, which fetches
 /// its own audio, and the guide's explanation.
 fn audio_key_banner(app: &mut App, ui: &mut egui::Ui) {
@@ -455,7 +581,7 @@ fn audio_key_banner(app: &mut App, ui: &mut egui::Ui) {
     );
 }
 
-/// A notice under the top bar: a bold line, with a spinner while `busy`, a
+/// A notice at the top of the main view: a bold line, with a spinner while `busy`, a
 /// sentence or two, its buttons with the main one first, and a close button
 /// unless the notice goes by itself.
 fn banner(
@@ -474,8 +600,8 @@ fn banner(
         .outer_margin(Margin {
             left: widgets::PAGE_PADDING as i8,
             right: widgets::PAGE_PADDING as i8,
-            top: 0,
-            bottom: 8,
+            top: widgets::PAGE_TOP as i8,
+            bottom: 0,
         })
         .fill(palette.surface)
         .stroke(Stroke::new(1.0, palette.outline))
@@ -541,9 +667,9 @@ fn banner(
 }
 
 /// The gradient behind a page's header, top to bottom: the art's colour
-/// blended into the window, stronger on a cover's own page than on an
+/// blended into the main view's card, stronger on a cover's own page than on an
 /// overview, or else the palette's `tint` fading out, whose alpha is its
-/// strength. `None` leaves the plain window.
+/// strength. `None` leaves the plain card.
 fn header_wash(
     palette: &theme::Palette,
     overview: bool,
@@ -551,7 +677,7 @@ fn header_wash(
 ) -> Option<(Color32, Color32)> {
     if let Some(art) = art {
         let strength = if overview { 0.45 } else { 0.85 };
-        return Some((blend(palette.window, art, strength), palette.window));
+        return Some((blend(palette.panel, art, strength), palette.panel));
     }
     (palette.tint.a() > 0).then_some((palette.tint, Color32::TRANSPARENT))
 }
@@ -583,79 +709,75 @@ fn header_shadow(ui: &egui::Ui, page: Rect, scrolled: f32, dark: bool) {
     );
 }
 
-/// Without a native title bar, the top of every panel drags the window, not
-/// only the page's top bar.
+/// Without a native title bar, the top bar's whole strip drags the window,
+/// not only the room between its controls.
 const fn titlebar_spans_window(on_macos: bool, own_titlebar: bool) -> bool {
     on_macos || own_titlebar
 }
 
-/// The room the top bar's own controls need beside the caption buttons: the
-/// 760-point minimum with the default 250-point sidebar leaves 510 points.
+/// The room the top bar's own controls need beside the caption buttons.
+/// The bar spans the window, whose 760-point minimum always holds both.
 const TOPBAR_MIN_CONTENT: f32 = 510.0;
 
+/// Where the window's own buttons sit in the top bar, which spans the
+/// whole window: beside its controls at either end, or above them when the
+/// window is too narrow for both.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct WindowControlsReservation {
-    pub topbar_width: f32,
-    pub topbar_top: f32,
-    pub queue_top: f32,
-    pub lyrics_top: f32,
+    /// The width left free at the bar's left end, for GNOME layouts that
+    /// put buttons there. macOS's traffic lights sit above the bar instead
+    /// (`theme::titlebar_inset`).
+    pub left: f32,
+    /// The width left free at the bar's right end.
+    pub right: f32,
+    /// How far the bar moves down, under the caption row.
+    pub top: f32,
 }
 
-/// The caption buttons on the right belong to the outermost header: the
-/// queue's or the lyrics' when either panel is open, otherwise the top bar,
-/// beside its controls or above them when the page is too narrow.
 fn controls_reservation(
     footprint: fastframe_titlebar::Footprint,
-    queue: bool,
-    lyrics: bool,
-    topbar_width: f32,
+    linux: bool,
+    width: f32,
 ) -> WindowControlsReservation {
-    let mut space = WindowControlsReservation {
-        topbar_width: 0.0,
-        topbar_top: 0.0,
-        queue_top: 0.0,
-        lyrics_top: 0.0,
-    };
-    if footprint.right <= 0.0 {
-        return space;
+    let reserve = footprint.reserve(width, TOPBAR_MIN_CONTENT);
+    let pushed = reserve.push_down > 0.0;
+    WindowControlsReservation {
+        left: if linux && footprint.left > 0.0 && !pushed {
+            footprint.left
+        } else {
+            0.0
+        },
+        right: reserve.inline_width,
+        top: reserve.push_down,
     }
-    if queue {
-        space.queue_top = footprint.height;
-    } else if lyrics {
-        space.lyrics_top = footprint.height;
-    } else {
-        let reserve = footprint.reserve(topbar_width, TOPBAR_MIN_CONTENT);
-        space.topbar_width = reserve.inline_width;
-        space.topbar_top = reserve.push_down;
-    }
-    space
 }
 
-/// Left-hand Linux controls sit above the sidebar's navigation rows.
-pub(super) fn linux_left_controls_inset(ctx: &egui::Context) -> f32 {
-    if !cfg!(target_os = "linux") {
-        return 0.0;
-    }
-    let footprint = fastframe_titlebar::footprint(ctx, theme::CUSTOM_TOP_BAR_HEIGHT);
-    if footprint.left > 0.0 {
-        footprint.height
-    } else {
-        0.0
-    }
+/// The caption row's height: the top bar's, with its gap under it.
+fn caption_header_height() -> f32 {
+    theme::CUSTOM_TOP_BAR_HEIGHT + PANEL_GAP
 }
 
 pub(super) fn window_controls_reservation(
     ctx: &egui::Context,
-    queue: bool,
-    lyrics: bool,
-    topbar_width: f32,
+    width: f32,
 ) -> WindowControlsReservation {
     controls_reservation(
-        fastframe_titlebar::footprint(ctx, theme::CUSTOM_TOP_BAR_HEIGHT),
-        queue,
-        lyrics,
-        topbar_width,
+        fastframe_titlebar::footprint(ctx, caption_header_height()),
+        cfg!(target_os = "linux"),
+        width,
     )
+}
+
+/// The top bar across the whole window, on the window's colour: nothing
+/// else reaches the window's top edge.
+fn top_bar(app: &mut App, ui: &mut egui::Ui) {
+    let height = topbar::height(ui.ctx(), ui.available_width());
+    egui::Panel::top("top-bar")
+        .exact_size(height)
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(Frame::new().fill(app.palette.window))
+        .show(ui, |ui| topbar::show(app, ui));
 }
 
 /// Draws the caption buttons over the window's top corners in the palette's
@@ -670,7 +792,7 @@ fn caption_buttons(ui: &mut egui::Ui, palette: &theme::Palette, locale: crate::i
             palette.secondary
         },
         button: palette.surface_hover,
-        header_height: theme::CUSTOM_TOP_BAR_HEIGHT,
+        header_height: caption_header_height(),
     };
     // Literal calls, so xgettext extracts each label.
     let minimize = gettext(locale, "Minimize");
@@ -764,50 +886,88 @@ mod window_chrome_tests {
     };
 
     #[test]
-    fn the_side_panels_drag_a_window_without_a_native_title_bar() {
+    fn the_top_strip_drags_a_window_without_a_native_title_bar() {
         assert!(titlebar_spans_window(true, false));
         assert!(titlebar_spans_window(false, true));
         assert!(!titlebar_spans_window(false, false));
     }
 
+    /// The bar spans the window, so the caption buttons always sit at its
+    /// right end, whatever panel is open beside the page.
     #[test]
-    fn caption_space_belongs_to_the_outermost_header() {
-        let values = |footprint, queue, lyrics| {
-            let space = controls_reservation(footprint, queue, lyrics, f32::INFINITY);
-            [
-                space.topbar_width,
-                space.topbar_top,
-                space.queue_top,
-                space.lyrics_top,
-            ]
-        };
-        let [width, height] = [BUTTONS.right, BUTTONS.height];
-        assert_eq!(values(BUTTONS, false, false), [width, 0.0, 0.0, 0.0]);
-        assert_eq!(values(BUTTONS, true, false), [0.0, 0.0, height, 0.0]);
-        assert_eq!(values(BUTTONS, false, true), [0.0, 0.0, 0.0, height]);
-        assert_eq!(values(BUTTONS, true, true), [0.0, 0.0, height, 0.0]);
-        // No buttons on the right: full screen, the native frame, macOS's
-        // traffic lights, or a GNOME layout with them all on the left.
-        let none = Footprint {
+    fn caption_space_belongs_to_the_top_bar() {
+        let space = controls_reservation(BUTTONS, false, 1240.0);
+        assert_eq!(
+            space,
+            WindowControlsReservation {
+                left: 0.0,
+                right: BUTTONS.right,
+                top: 0.0,
+            }
+        );
+        // No buttons on the right: full screen, the native frame, or
+        // macOS's traffic lights, which the bar leaves room above itself
+        // for.
+        let lights = Footprint {
             left: 50.0,
             ..Footprint::default()
         };
-        for (queue, lyrics) in [(false, false), (true, false), (false, true)] {
-            assert_eq!(values(none, queue, lyrics), [0.0; 4]);
-        }
+        assert_eq!(
+            controls_reservation(lights, false, 1240.0),
+            WindowControlsReservation {
+                left: 0.0,
+                right: 0.0,
+                top: 0.0,
+            }
+        );
+        // A GNOME layout with buttons at both ends keeps both ends free.
+        let gnome = Footprint {
+            left: 40.0,
+            right: 80.0,
+            height: 44.0,
+        };
+        let space = controls_reservation(gnome, true, 1240.0);
+        assert_eq!((space.left, space.right, space.top), (40.0, 80.0, 0.0));
     }
 
     #[test]
-    fn minimum_windows_window_stacks_caption_space_above_the_topbar() {
-        let available = 760.0 - 250.0;
-        let space = controls_reservation(BUTTONS, false, false, available);
-        assert_eq!(space.topbar_width, 0.0);
-        assert_eq!(space.topbar_top, BUTTONS.height);
+    fn a_window_too_narrow_for_both_stacks_caption_space_above_the_bar() {
+        let space = controls_reservation(BUTTONS, false, TOPBAR_MIN_CONTENT);
+        assert_eq!(space.right, 0.0);
+        assert_eq!(space.top, BUTTONS.height);
 
-        let inline =
-            controls_reservation(BUTTONS, false, false, TOPBAR_MIN_CONTENT + BUTTONS.right);
-        assert_eq!(inline.topbar_width, BUTTONS.right);
-        assert_eq!(inline.topbar_top, 0.0);
+        let inline = controls_reservation(BUTTONS, false, crate::window::MAIN_MIN_SIZE[0]);
+        assert_eq!(inline.right, BUTTONS.right);
+        assert_eq!(inline.top, 0.0);
+    }
+
+    /// Each card's corners are masked in the window's colour, outside the
+    /// rounded outline only: the card's middle and edges' middles stay
+    /// clear.
+    #[test]
+    fn card_corner_masks_stay_outside_the_rounded_outline() {
+        let rect = Rect::from_min_size(egui::pos2(10.0, 20.0), vec2(300.0, 200.0));
+        let radius = f32::from(PANEL_RADIUS);
+        let shapes = corner_masks(rect, radius, Color32::BLACK);
+        let meshes: Vec<_> = shapes
+            .iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Mesh(mesh) => Some(mesh),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(meshes.len(), 4, "one per corner");
+        for mesh in meshes {
+            for vertex in &mesh.vertices {
+                let near_x = (vertex.pos.x - rect.left())
+                    .abs()
+                    .min((vertex.pos.x - rect.right()).abs());
+                let near_y = (vertex.pos.y - rect.top())
+                    .abs()
+                    .min((vertex.pos.y - rect.bottom()).abs());
+                assert!(near_x <= radius + 0.01 && near_y <= radius + 0.01);
+            }
+        }
     }
 }
 
@@ -826,8 +986,8 @@ mod tests {
         let art = Color32::from_rgb(0x50, 0x38, 0xc8);
         let (page, _) = header_wash(&palette, false, Some(art)).unwrap();
         let (overview, _) = header_wash(&palette, true, Some(art)).unwrap();
-        assert_eq!(page, blend(palette.window, art, 0.85));
-        assert_eq!(overview, blend(palette.window, art, 0.45));
+        assert_eq!(page, blend(palette.panel, art, 0.85));
+        assert_eq!(overview, blend(palette.panel, art, 0.45));
 
         palette.tint = Color32::from_black_alpha(24);
         assert_eq!(
