@@ -6,7 +6,7 @@
 //! that saves the range's top as an image ([`crate::share_card`]).
 //!
 //! Every figure comes from [`crate::stats::query`], read on a worker
-//! thread ([`jobs`]) whenever the index or the range changes.
+//! thread (`jobs`) whenever the index or the range changes.
 
 mod charts;
 mod jobs;

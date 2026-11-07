@@ -4,7 +4,7 @@
 //! 4:5 portrait social feeds show whole).
 //!
 //! The card is laid out with egui's own fonts and tessellated by epaint as
-//! the window is, then filled by the small software renderer in [`raster`].
+//! the window is, then filled by the small software renderer in `raster`.
 //! Nothing here needs a GPU, a window or the UI thread: [`render`] is a
 //! pure function of a [`Card`], so the page runs it on a worker thread.
 
