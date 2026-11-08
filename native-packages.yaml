@@ -95,8 +95,7 @@ nfpm:
   rpm:
     buildhost: github-actions
 # Windows code and installers are signed through Azure Artifact Signing as
-# PlentyLabs when the windows-signing environment provides the account
-# (PACKAGING.md, "Windows signing").
+# PlentyLabs when the windows-signing environment provides the account.
 windows:
   signing:
     provider: azure-artifact-signing
@@ -204,47 +203,8 @@ assets:
     file: spotifast-v@VERSION@-macos-universal.dmg
     local: dist/spotifast-v@VERSION@-macos-universal.dmg
 templates:
-  arch/spotifast/PKGBUILD: packaging/arch/spotifast/PKGBUILD.in
-  arch/spotifast/spotifast.install: packaging/arch/spotifast.install
-  arch/spotifast-bin/PKGBUILD: packaging/arch/spotifast-bin/PKGBUILD.in
-  arch/spotifast-bin/spotifast-bin.install: packaging/arch/spotifast.install
-  arch/spotifast-git/PKGBUILD: packaging/arch/spotifast-git/PKGBUILD.in
-  arch/spotifast-git/spotifast-git.install: packaging/arch/spotifast.install
   homebrew/spotifast.rb: packaging/homebrew/spotifast.rb.in
 repositories:
-  aur-source:
-    group: aur
-    url: https://aur.archlinux.org/spotifast.git
-    push_url: ssh://aur@aur.archlinux.org/spotifast.git
-    branch: master
-    package_path: "."
-    files:
-      arch/spotifast: "."
-    version_file: ".SRCINFO"
-    version_pattern: "^\\s*pkgver = (\\S+)"
-    publish: push
-  aur-bin:
-    group: aur
-    url: https://aur.archlinux.org/spotifast-bin.git
-    push_url: ssh://aur@aur.archlinux.org/spotifast-bin.git
-    branch: master
-    package_path: "."
-    files:
-      arch/spotifast-bin: "."
-    version_file: ".SRCINFO"
-    version_pattern: "^\\s*pkgver = (\\S+)"
-    publish: push
-  aur-git:
-    group: aur
-    url: https://aur.archlinux.org/spotifast-git.git
-    push_url: ssh://aur@aur.archlinux.org/spotifast-git.git
-    branch: master
-    package_path: "."
-    files:
-      arch/spotifast-git: "."
-    version_file: ".SRCINFO"
-    version_pattern: "^\\s*pkgver = (\\S+)"
-    publish: push
   homebrew:
     url: https://github.com/crmne/homebrew-tap.git
     push_url: https://github.com/crmne/homebrew-tap.git

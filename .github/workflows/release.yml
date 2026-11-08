@@ -131,7 +131,7 @@ jobs:
           cp "$RUNNER_TEMP/appimage/packages/appimage-amd64/appimage/"*.AppImage \
             "$RUNNER_TEMP/appimage/packages/appimage-amd64/appimage/"*.AppImage.zsync dist/
 
-      # The Windows installer (PACKAGING.md, "Windows Installer package").
+      # The Windows installer.
       - name: Windows Installer package
         if: runner.os == 'Windows'
         shell: pwsh

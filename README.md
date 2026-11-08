@@ -147,7 +147,7 @@ cargo run --features demo -- --demo
 
 Translations live in `assets/i18n/`; see
 [Translating Spotifast](docs/_reference/translating.md). Release packaging
-is described in [PACKAGING.md](PACKAGING.md).
+is described in [Release packaging](docs/_reference/packaging.md).
 
 ## More native apps
 

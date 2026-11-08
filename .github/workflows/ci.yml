@@ -110,8 +110,6 @@ jobs:
           cache-generation: quality-v1
       - name: Formatting
         run: cargo fmt --all --check
-      - name: Flatpak release metadata regression tests
-        run: python3 packaging/flatpak/test-metainfo.py
       - name: Linux launcher packaging regressions
         run: python3 packaging/test-launchers.py
       - name: Release name migration regressions
@@ -269,23 +267,3 @@ jobs:
             exit 1
           fi
           nix path-info --recursive ./result | cachix push "$CACHIX_CACHE"
-
-  docs:
-    name: docs
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '4.0'
-          bundler-cache: true
-          working-directory: docs
-
-      - name: Build documentation site
-        working-directory: docs
-        env:
-          JEKYLL_ENV: production
-        run: |
-          bundle exec jekyll build --destination "$RUNNER_TEMP/spotifast-site"

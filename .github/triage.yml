@@ -28,11 +28,9 @@ sources:
 - README.md
 - CONTRIBUTING.md
 - CHANGELOG.md
-- docs/_guide/*.md
 - docs/_reference/*.md
 - src/*.rs
 documentation:
-  docs/_guide/*.md: https://spotifast.rocks/%{name}/
   docs/_reference/*.md: https://spotifast.rocks/%{name}/
 replies:
   version: Which version are you using?

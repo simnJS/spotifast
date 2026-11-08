@@ -1,13 +1,10 @@
-"""Exercise native and Flatpak launcher installs using a release payload.
+"""Exercise the native package's launcher install using a release payload.
 
-Uses the actual AUR package() and Flatpak install commands, without compiling or
-launching the app. Ruby provides the existing YAML parser; no Python packages.
+Reads native-packages.yaml without compiling or launching the app. Ruby
+provides the existing YAML parser; no Python packages.
 """
-import configparser
 import json
-import os
 from pathlib import Path
-import shlex
 import shutil
 import subprocess
 import tempfile
@@ -35,74 +32,9 @@ def payload(root):
     for name in ["LICENSE", "README.md"]:
         shutil.copyfile(ROOT / name, root / name)
     shutil.copytree(ROOT / "contrib/omarchy", root / "contrib/omarchy")
-    (root / "packaging/flatpak").mkdir()
-    shutil.copyfile(ROOT / "packaging/flatpak/rocks.spotifast.Spotifast.metainfo.xml",
-                    root / "packaging/flatpak/rocks.spotifast.Spotifast.metainfo.xml")
 
 
 class LauncherInstallTest(unittest.TestCase):
-    def test_generated_aur_versions_start_at_the_requested_release(self):
-        for package in ["spotifast", "spotifast-bin", "spotifast-git"]:
-            with self.subTest(package=package), tempfile.TemporaryDirectory() as directory:
-                recipe = Path(directory) / "PKGBUILD"
-                template = (ROOT / f"packaging/arch/{package}/PKGBUILD.in").read_text()
-                recipe.write_text(template.replace("@VERSION@", "9.8.7"))
-                version = subprocess.check_output([
-                    "bash", "-c", 'source "$1"; printf "%s" "$pkgver"', "check", str(recipe),
-                ], text=True)
-                self.assertEqual(version, "9.8.7")
-
-    def check_launcher(self, prefix, desktop, window_class, icon):
-        entries = list((prefix / "share/applications").glob("*.desktop"))
-        self.assertEqual([p.name for p in entries], [desktop + ".desktop"])
-        parser = configparser.ConfigParser(interpolation=None)
-        parser.read(entries[0])
-        entry = parser["Desktop Entry"]
-        self.assertEqual(entry["Name"], "Spotifast")
-        self.assertEqual(entry["Icon"], icon)
-        self.assertEqual(entry["StartupWMClass"], window_class)
-        self.assertEqual(entry["Exec"], "spotifast %u")
-        self.assertIn("x-scheme-handler/spotify;", entry["MimeType"])
-        icons = list((prefix / "share/icons/hicolor/scalable/apps").glob("*.svg"))
-        self.assertEqual([p.name for p in icons], [icon + ".svg"])
-        self.assertEqual(icons[0].read_bytes(), (ROOT / "packaging/icons/spotifast.svg").read_bytes())
-        self.assertFalse((prefix / "bin/spotifast").is_symlink())
-        self.assertTrue((prefix / "bin/spotifast").is_file())
-        self.assertEqual([p.name for p in (prefix / "bin").iterdir()], ["spotifast"])
-
-    def test_aur_payloads_install_the_launcher(self):
-        for package in ["spotifast", "spotifast-bin", "spotifast-git"]:
-            with self.subTest(package=package), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                if package.endswith("-bin"):
-                    relative = "spotifast-v9.8.7-x86_64-unknown-linux-gnu"
-                elif package.endswith("-git"):
-                    relative = package
-                else:
-                    relative = "spotifast-9.8.7"
-                payload(root / "src" / relative)
-                template = ROOT / f"packaging/arch/{package}/PKGBUILD.in"
-                command = "source " + shlex.quote(str(template)) + "; pkgver=9.8.7; package"
-                subprocess.run(["bash", "-euc", command], check=True, cwd=root, env={
-                    **os.environ, "CARCH": "x86_64", "srcdir": str(root / "src"),
-                    "pkgdir": str(root / "pkg"),
-                })
-                self.check_launcher(root / "pkg/usr", "spotifast", "spotifast", "spotifast")
-
-    def test_flatpak_install_commands_keep_app_id_and_icon_aligned(self):
-        for manifest in ["rocks.spotifast.Spotifast.yml", "rocks.spotifast.Spotifast.bundle.yml"]:
-            config = yaml(ROOT / "packaging/flatpak" / manifest)
-            commands = config["modules"][-1]["build-commands"]
-            with self.subTest(manifest=manifest), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                payload(root / "source")
-                # Exercise installation only. Cargo build coverage belongs to
-                # the app suites; this fixture supplies the completed input.
-                commands_to_run = [c for c in commands if not c.startswith("cargo ")]
-                command = "\n".join(c.replace("/app/", str(root / "app") + "/") for c in commands_to_run)
-                subprocess.run(["bash", "-euc", command], check=True, cwd=root / "source")
-                self.check_launcher(root / "app", config["id"], config["id"], config["id"])
-
     def test_native_manifest_installs_the_launcher_and_icon(self):
         config = yaml(ROOT / "native-packages.yaml")
         entries = [c for c in config["nfpm"]["contents"] if "/packaging/" in c["src"]]
