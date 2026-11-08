@@ -551,9 +551,9 @@ save another copy of the credential.
 The receiver then signs in and appears in Spotify's device list. Spotifast
 uses the Web API for subsequent control requests.
 
-### Restricted devices and Sonos
+### Restricted devices
 
-Spotify marks some devices as restricted, Sonos players among them. The Web
+Spotify marks some devices as restricted. The Web
 API refuses every player command for one with "Restriction violated" and
 leaves an idle one out of the device list. Spotifast sends commands for a
 restricted device over the playback session's Connect state service instead,
@@ -563,8 +563,8 @@ computer's Connect device to that one. This needs local playback enabled,
 because the session belongs to it. Playback state is still read from the Web
 API, which reports a restricted device while it plays.
 
-Spotify does not always report a restricted device as such, for example a
-Sonos that another app is already steering when Spotifast starts. When the Web
+Spotify does not always report a restricted device as such, for example one
+that another app is already steering when Spotifast starts. When the Web
 API refuses a command for a named device as restricted, Spotifast remembers
 that device as restricted and sends the same command over the Connect route
 once, so later commands go there directly.
@@ -578,13 +578,6 @@ places, and a failed write stops the remaining songs. Signing out cancels
 pending commands and forgets the account's restricted-device state. The
 playback session must belong to the verified Web API account before it can
 control another device.
-
-A Sonos is recognised by its receiver endpoint (`/spotifyzc` on port 1400)
-and is offered in the picker from the network even while Spotify does not list
-it. Its receiver asks for an OAuth authorization code instead of the librespot
-credential. Spotifast does not send a login blob or access token to that HTTP
-endpoint. Transfer and player commands go through Spotify using the existing
-playback session. Other receivers keep the encrypted login blob described above.
 
 ### Device picker order
 

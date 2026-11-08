@@ -1,4 +1,4 @@
-//! Speakers Spotify will not let the Web API control, Sonos above all.
+//! Devices Spotify will not let the Web API control.
 //!
 //! Spotify marks some Connect devices as restricted: the Web API refuses
 //! every player command aimed at one ("Restriction violated"), even while it
@@ -7,15 +7,8 @@
 //! instead, the one librespot's session already speaks: a transfer, and
 //! player commands sent from this device to that one. Those work here too, so
 //! commands for a restricted device take that route.
-//!
-//! A Sonos does not appear in the device list while idle, so it is found by
-//! its ZeroConf endpoint (`/spotifyzc` on port 1400) and offered from there.
-//! It asks for an OAuth authorization code rather than librespot's login
-//! blob. No credential is sent to its HTTP receiver: the existing session
-//! transfers and controls playback through Spotify instead.
 
-use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 use librespot_core::session::Session;
@@ -25,20 +18,8 @@ use crate::api::client::PlayRequest;
 use crate::api::models::Device;
 use crate::backend::RemoteAction;
 
-const PORT: u16 = 1400;
-const ZEROCONF_PATH: &str = "/spotifyzc";
-
-/// A Sonos player known by its Spotify Connect device id.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Speaker {
-    pub device_id: String,
-    pub name: String,
-    pub address: IpAddr,
-}
-
 #[derive(Default)]
 struct Known {
-    speakers: HashMap<String, Speaker>,
     /// Devices Spotify reported as restricted.
     restricted: HashSet<String>,
     /// The device Spotify last reported as playing, when it is restricted.
@@ -46,7 +27,7 @@ struct Known {
     playback_seq: Option<u64>,
 }
 
-/// Receiver identities and queue writes belong to one signed-in backend.
+/// Restricted devices and queue writes belong to one signed-in backend.
 #[derive(Default)]
 pub struct Controller {
     known: Mutex<Known>,
@@ -56,31 +37,6 @@ pub struct Controller {
 impl Controller {
     fn known(&self) -> std::sync::MutexGuard<'_, Known> {
         self.known.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    /// Remembers the Sonos players among resolved receivers.
-    pub fn remember(&self, receivers: &[crate::zeroconf::Receiver]) {
-        let mut known = self.known();
-        known.speakers = receivers
-            .iter()
-            .filter(|receiver| is_sonos(receiver))
-            .filter_map(|receiver| {
-                let id = receiver.device_id.as_ref()?;
-                Some((
-                    id.clone(),
-                    Speaker {
-                        device_id: id.clone(),
-                        name: receiver.name.clone(),
-                        address: receiver.address,
-                    },
-                ))
-            })
-            .collect();
-    }
-
-    /// The Sonos player behind a Connect device id, if it is one.
-    pub fn speaker(&self, device_id: &str) -> Option<Speaker> {
-        self.known().speakers.get(device_id).cloned()
     }
 
     /// Notes which devices Spotify reports as restricted.
@@ -118,35 +74,11 @@ impl Controller {
     pub fn restricted_target(&self, device_id: Option<&str>) -> Option<String> {
         let known = self.known();
         match device_id {
-            Some(id) if known.restricted.contains(id) || known.speakers.contains_key(id) => {
-                Some(id.to_string())
-            }
+            Some(id) if known.restricted.contains(id) => Some(id.to_string()),
             Some(_) => None,
             None => known.active_restricted.clone(),
         }
     }
-}
-
-/// Whether a ZeroConf receiver is a Sonos player.
-pub fn is_sonos(receiver: &crate::zeroconf::Receiver) -> bool {
-    receiver.port == PORT
-        && receiver.path.trim_matches('/') == ZEROCONF_PATH.trim_start_matches('/')
-}
-
-/// A device row for a Sonos receiver, which Spotify does not list while idle.
-pub fn device_row(receiver: &crate::zeroconf::Receiver, active: bool) -> Option<Device> {
-    if !is_sonos(receiver) {
-        return None;
-    }
-    Some(Device {
-        id: Some(receiver.device_id.clone().filter(|id| !id.is_empty())?),
-        name: receiver.name.clone(),
-        is_active: active,
-        is_restricted: false,
-        volume_percent: None,
-        supports_volume: Some(true),
-        kind: "speaker".into(),
-    })
 }
 
 /// The Connect state service's player command for a remote action.
@@ -338,24 +270,6 @@ impl Controller {
 mod tests {
     use super::*;
 
-    fn receiver(port: u16, path: &str) -> crate::zeroconf::Receiver {
-        crate::zeroconf::Receiver {
-            name: "Sonos Move".into(),
-            device_id: Some("d0c4".into()),
-            address: "192.168.2.47".parse().unwrap(),
-            port,
-            path: path.into(),
-        }
-    }
-
-    #[test]
-    fn recognises_sonos_receivers_by_their_endpoint() {
-        assert!(is_sonos(&receiver(1400, "/spotifyzc")));
-        assert!(is_sonos(&receiver(1400, "spotifyzc/")));
-        assert!(!is_sonos(&receiver(80, "/spotifyzc")));
-        assert!(!is_sonos(&receiver(1400, "/zc")));
-    }
-
     #[test]
     fn a_playlist_starts_at_the_named_song() {
         let request = PlayRequest::context("spotify:playlist:abc").starting_at_index(2);
@@ -426,21 +340,6 @@ mod tests {
         );
         controller.observe_playing(3, None);
         assert_eq!(controller.restricted_target(None), None);
-    }
-
-    #[test]
-    fn discovery_updates_addresses_and_only_offers_resolved_identities() {
-        let controller = Controller::default();
-        let mut found = receiver(1400, "/spotifyzc");
-        controller.remember(std::slice::from_ref(&found));
-        found.address = "192.168.2.48".parse().unwrap();
-        controller.remember(std::slice::from_ref(&found));
-        assert_eq!(controller.speaker("d0c4").unwrap().address, found.address);
-        assert_eq!(device_row(&found, false).unwrap().id, found.device_id);
-        found.device_id = None;
-        assert!(device_row(&found, false).is_none());
-        controller.remember(&[]);
-        assert_eq!(controller.restricted_target(Some("d0c4")), None);
     }
 
     #[test]

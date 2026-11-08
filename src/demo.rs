@@ -905,37 +905,6 @@ fn demo_outputs() -> Vec<fastframe_audio::DeviceInfo> {
     .collect()
 }
 
-fn sonos_devices(app: &mut App, active: bool) {
-    app.show_devices = true;
-    app.receivers = vec![crate::zeroconf::Receiver {
-        name: "Office".into(),
-        device_id: Some("office".into()),
-        address: "192.168.1.10".parse().unwrap(),
-        port: 1400,
-        path: "/spotifyzc".into(),
-    }];
-    app.devices
-        .retain(|device| device.id.as_deref() != Some("office"));
-    if active {
-        for device in &mut app.devices {
-            device.is_active = false;
-        }
-        let device = Device {
-            id: Some("office".into()),
-            name: "Office".into(),
-            is_active: true,
-            is_restricted: true,
-            volume_percent: Some(8),
-            supports_volume: Some(true),
-            kind: "speaker".into(),
-        };
-        if let Some(remote) = &mut app.remote {
-            remote.state.device = Some(device.clone());
-        }
-        app.devices.push(device);
-    }
-}
-
 /// Words to go with the sample track, timed so that the one being sung
 /// sits mid-panel at the demo's playback position.
 #[cfg(any(test, feature = "demo"))]
@@ -1636,8 +1605,6 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 app.show_devices = true;
                 app.output_devices = Loadable::Loaded(demo_outputs());
             }
-            "sonos-idle" => sonos_devices(app, false),
-            "sonos-active" => sonos_devices(app, true),
             // The phone plays instead of the speaker, for captures of how
             // remote playback names and draws the playing device.
             "phone-playing" => {
@@ -5002,58 +4969,6 @@ mod tests {
 
     fn frame(ctx: &egui::Context, app: &mut App) {
         frame_events(ctx, app, Vec::new());
-    }
-
-    #[test]
-    fn an_idle_sonos_in_the_picker_transfers_instead_of_authorizing() {
-        for palette in [
-            crate::theme::Palette::dark(),
-            crate::theme::Palette::light(),
-        ] {
-            let (ctx, mut app) = accessible_app("sonos-device-picker");
-            app.backend.set_offline(true);
-            app.palette = palette;
-            app.local_ready = true;
-            sonos_devices(&mut app, false);
-            app.devices.clear();
-            let draw = |app: &mut App, events: Vec<egui::Event>| {
-                let mut output = ctx.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            egui::vec2(760.0, 620.0),
-                        )),
-                        events,
-                        ..Default::default()
-                    },
-                    |_| crate::ui::devices::popup(app, &ctx),
-                );
-                output.textures_delta.clear();
-                output
-            };
-            draw(&mut app, Vec::new());
-            let output = draw(&mut app, Vec::new());
-            let labels = menu_text(&output);
-            assert_eq!(
-                labels.iter().filter(|(text, _)| text == "Office").count(),
-                1
-            );
-            let office = labels.iter().find(|(text, _)| text == "Office").unwrap().1;
-            app.actions.clear();
-            draw(
-                &mut app,
-                pointer_click(office.center(), egui::PointerButton::Primary),
-            );
-            assert!(app.actions.iter().any(
-                |action| matches!(action, crate::model::Action::Transfer(id) if id == "office")
-            ));
-            assert!(
-                !app.actions
-                    .iter()
-                    .any(|action| matches!(action, crate::model::Action::ActivateReceiver(_)))
-            );
-            app.backend.shutdown();
-        }
     }
 
     #[test]

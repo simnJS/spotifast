@@ -213,9 +213,8 @@ librespot provides:
 - Spotify Connect, so another Spotify client can transfer playback to this
   computer.
 - Shuffle, repeat, seek, and volume.
-- Control of restricted Connect devices, including Sonos, through the signed-in
-  playback session. Sonos receivers are discovered on the local network;
-  the Web API alone cannot start or control them.
+- Control of restricted Connect devices through the signed-in playback
+  session; the Web API alone cannot control them.
 - Songs and podcast episodes.
 - Local files that a playlist lists, played from the local files folder chosen
   in Settings and its subfolders. Spotify keeps only a local file's artist,

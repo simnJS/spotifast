@@ -2479,7 +2479,7 @@ impl App {
             repeat: RepeatMode::from_api(&remote.state.repeat_state),
             volume_percent: volume,
             // A restricted device is driven over the playback session's
-            // Connect link instead, see `crate::sonos`.
+            // Connect link instead, see `crate::restricted_device`.
             can_control: device.is_none_or(|device| !device.is_restricted || self.local_ready),
             can_set_volume: device.is_none_or(|device| {
                 (!device.is_restricted || self.local_ready) && device.supports_volume != Some(false)
@@ -8032,10 +8032,6 @@ impl App {
                             }
                         }
                         if let Some(selected) = &self.selected_device
-                            && !self.receivers.iter().any(|receiver| {
-                                crate::sonos::is_sonos(receiver)
-                                    && receiver.device_id.as_deref() == Some(selected.as_str())
-                            })
                             && !self
                                 .devices
                                 .iter()
@@ -34459,25 +34455,6 @@ mod tests {
             app.control_devices_snapshot(),
             crate::single_instance::NO_DEVICES
         );
-    }
-
-    #[test]
-    fn an_idle_sonos_selection_survives_spotifys_device_list() {
-        let mut app = headless_app();
-        app.receivers = vec![crate::zeroconf::Receiver {
-            name: "Office".into(),
-            device_id: Some("office".into()),
-            address: "192.168.1.10".parse().unwrap(),
-            port: 1400,
-            path: "/spotifyzc".into(),
-        }];
-        app.selected_device = Some("office".into());
-        app.handle_api(ApiResponse::Devices(Ok(Vec::new())));
-        assert_eq!(app.selected_device.as_deref(), Some("office"));
-        app.selected_device = Some("departed-phone".into());
-        app.handle_api(ApiResponse::Devices(Ok(Vec::new())));
-        assert_eq!(app.selected_device, None);
-        app.backend.shutdown();
     }
 
     #[test]

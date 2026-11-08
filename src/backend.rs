@@ -1968,7 +1968,7 @@ struct Worker {
     canvas: Arc<crate::canvas::Library>,
     /// The listening stats' open log; refreshes and imports take turns.
     stats: Arc<tokio::sync::Mutex<crate::stats::service::Service>>,
-    connect: Arc<crate::sonos::Controller>,
+    connect: Arc<crate::restricted_device::Controller>,
     /// Reopening or refreshing the picker reuses an in-flight browse.
     receiver_discovery: Option<tokio::task::JoinHandle<()>>,
     background_session: Arc<tokio::sync::Semaphore>,
@@ -4409,7 +4409,6 @@ impl Worker {
         }
         let events = self.events.clone();
         let waker = self.waker.clone();
-        let connect = Arc::clone(&self.connect);
         self.receiver_discovery =
             Some(tokio::task::spawn_blocking(
                 move || match crate::zeroconf::discover(std::time::Duration::from_secs(3)) {
@@ -4419,7 +4418,6 @@ impl Worker {
                                 log::debug!("no receivers found on the network: {error}");
                                 Vec::new()
                             });
-                        connect.remember(&receivers);
                         let _ = events.send(Event::Receivers(receivers));
                         waker.wake();
                     }
@@ -5836,7 +5834,7 @@ async fn handle(
     api: &ApiGateway,
     made_for_you: &crate::made_for_you::MadeForYou,
     new_releases: &crate::new_releases::NewReleases,
-    connect: &crate::sonos::Controller,
+    connect: &crate::restricted_device::Controller,
     engine: Option<&Engine>,
     background_session: &tokio::sync::Semaphore,
     request: ApiRequest,
@@ -6067,8 +6065,8 @@ async fn handle(
         }};
     }
 
-    // Spotify does not always flag a restricted device beforehand (a Sonos
-    // another app is steering, say), and then refuses its player commands.
+    // Spotify does not always flag a restricted device beforehand, and then
+    // refuses its player commands.
     let retry = command_device(&request).map(|device| (device.to_string(), request.clone()));
     let response = match request {
         ApiRequest::Me => ApiResponse::Me(routed!(me())),
@@ -6564,12 +6562,12 @@ fn refused_as_restricted(response: &ApiResponse) -> bool {
     )
 }
 
-/// Player commands for a device the Web API refuses (a Sonos, say) go over
-/// the session's Connect state service instead. `None` leaves the request
-/// to the Web API. See [`crate::sonos`].
+/// Player commands for a device the Web API refuses go over the session's
+/// Connect state service instead. `None` leaves the request to the Web API.
+/// See [`crate::restricted_device`].
 async fn over_connect(
     engine: &Engine,
-    connect: &crate::sonos::Controller,
+    connect: &crate::restricted_device::Controller,
     request: &ApiRequest,
 ) -> Option<ApiResponse> {
     let session = engine.session();
@@ -6584,15 +6582,15 @@ async fn over_connect(
             repeat,
         } => {
             let to = connect.restricted_target(device_id.as_deref())?;
-            let result = match crate::sonos::command_body(
+            let result = match crate::restricted_device::command_body(
                 *action,
                 play.as_ref(),
                 *position_ms,
                 *flag,
                 repeat,
             ) {
-                Some(body) => crate::sonos::command(session, &to, &body).await,
-                None => crate::sonos::set_volume(session, &to, *percent).await,
+                Some(body) => crate::restricted_device::command(session, &to, &body).await,
+                None => crate::restricted_device::set_volume(session, &to, *percent).await,
             };
             ApiResponse::Remote {
                 action: *action,
@@ -6601,11 +6599,18 @@ async fn over_connect(
         }
         ApiRequest::ShufflePlay { device_id, play } => {
             let to = connect.restricted_target(device_id.as_deref())?;
-            let shuffle = crate::sonos::command_body(RemoteAction::Shuffle, None, 0, true, "")?;
-            let start = crate::sonos::command_body(RemoteAction::Play, Some(play), 0, false, "")?;
+            let shuffle =
+                crate::restricted_device::command_body(RemoteAction::Shuffle, None, 0, true, "")?;
+            let start = crate::restricted_device::command_body(
+                RemoteAction::Play,
+                Some(play),
+                0,
+                false,
+                "",
+            )?;
             let result = shuffle_then_play(shuffle, start, |body| {
                 let to = &to;
-                async move { crate::sonos::command(session, to, &body).await }
+                async move { crate::restricted_device::command(session, to, &body).await }
             })
             .await;
             ApiResponse::Remote {
@@ -8518,31 +8523,23 @@ mod authorization_tests {
     }
 
     #[test]
-    fn signing_out_discards_restricted_devices_and_late_discovery_results() {
+    fn signing_out_discards_restricted_devices() {
         let (runtime, mut worker, _) = worker("sign-out-connect");
         let _entered = runtime.enter();
         let previous = Arc::clone(&worker.connect);
         let device = Device {
-            id: Some("sonos".into()),
+            id: Some("restricted".into()),
             is_restricted: true,
             ..Default::default()
         };
         previous.observe_playing(1, Some(&device));
         assert_eq!(
             worker.connect.restricted_target(None).as_deref(),
-            Some("sonos")
+            Some("restricted")
         );
         worker.sign_out();
-        previous.remember(&[crate::zeroconf::Receiver {
-            name: "Old discovery".into(),
-            device_id: Some("late-speaker".into()),
-            address: "127.0.0.1".parse().unwrap(),
-            port: 1400,
-            path: "/spotifyzc".into(),
-        }]);
         assert_eq!(worker.connect.restricted_target(None), None);
-        assert_eq!(worker.connect.restricted_target(Some("sonos")), None);
-        assert_eq!(worker.connect.restricted_target(Some("late-speaker")), None);
+        assert_eq!(worker.connect.restricted_target(Some("restricted")), None);
     }
 
     #[test]
@@ -10120,7 +10117,7 @@ mod session_tests {
                 &api,
                 &crate::made_for_you::MadeForYou::new(crate::http::Http::default()),
                 &crate::new_releases::NewReleases::new(crate::http::Http::default()),
-                &crate::sonos::Controller::default(),
+                &crate::restricted_device::Controller::default(),
                 None,
                 &background_session,
                 ApiRequest::TopArtists { generation: 7 },
@@ -10569,9 +10566,17 @@ mod tests {
     #[tokio::test]
     async fn connect_shuffle_play_waits_for_shuffle_before_starting_playback() {
         let request = PlayRequest::context("spotify:playlist:abc");
-        let shuffle = crate::sonos::command_body(RemoteAction::Shuffle, None, 0, true, "").unwrap();
-        let play =
-            crate::sonos::command_body(RemoteAction::Play, Some(&request), 0, false, "").unwrap();
+        let shuffle =
+            crate::restricted_device::command_body(RemoteAction::Shuffle, None, 0, true, "")
+                .unwrap();
+        let play = crate::restricted_device::command_body(
+            RemoteAction::Play,
+            Some(&request),
+            0,
+            false,
+            "",
+        )
+        .unwrap();
         let sent = std::sync::Mutex::new(Vec::new());
         let shuffled = tokio::sync::Notify::new();
         let sending = shuffle_then_play(shuffle.clone(), play.clone(), |body| {
@@ -10604,9 +10609,17 @@ mod tests {
     #[tokio::test]
     async fn connect_shuffle_play_preserves_errors_and_skips_play_when_shuffle_fails() {
         let request = PlayRequest::context("spotify:playlist:abc");
-        let shuffle = crate::sonos::command_body(RemoteAction::Shuffle, None, 0, true, "").unwrap();
-        let play =
-            crate::sonos::command_body(RemoteAction::Play, Some(&request), 0, false, "").unwrap();
+        let shuffle =
+            crate::restricted_device::command_body(RemoteAction::Shuffle, None, 0, true, "")
+                .unwrap();
+        let play = crate::restricted_device::command_body(
+            RemoteAction::Play,
+            Some(&request),
+            0,
+            false,
+            "",
+        )
+        .unwrap();
         for failed_endpoint in ["set_shuffling_context", "play"] {
             let mut sent = Vec::new();
             let result = shuffle_then_play(shuffle.clone(), play.clone(), |body| {

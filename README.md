@@ -168,10 +168,11 @@ Connect pushes are ignored when this computer is the active device both
 before and after; position-only updates cause no requests. Regular polling
 remains the fallback.
 
-## Sonos playback
+## Restricted devices
 
-Sonos speakers use the Spotify Connect session for playback control. Enable
-local playback first, then select the speaker in the device picker.
+Devices Spotify marks as restricted, which the Web API refuses to control,
+use the Spotify Connect session for playback control. Enable local playback
+first, then select the device in the device picker.
 
 ## Acknowledgements
 
