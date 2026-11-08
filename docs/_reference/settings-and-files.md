@@ -81,7 +81,7 @@ Durable grants use **Secret Service on Linux**, **Keychain on macOS**, and
 **Credential Manager on Windows**, under the service name
 `rocks.spotifast.Spotifast`. Entries are separated by application state
 location and grant type; Web grants carry their Client ID and must verify as
-the same account. Playback and receiver activation require that account too.
+the same account. Playback requires that account too.
 Non-secret settings and session data remain readable JSON. Native credential
 protection reduces exposure from copying ordinary application files. It does
 not protect a usable session from arbitrary code running as the same user;

@@ -815,14 +815,6 @@ pub fn populate(app: &mut App) {
             kind: "smartphone".into(),
         },
     ];
-    // Include an unsigned ZeroConf receiver in the device picker.
-    app.receivers = vec![crate::zeroconf::Receiver {
-        name: "House Spotify".into(),
-        device_id: Some("house-speaker".into()),
-        address: std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 42)),
-        port: 5555,
-        path: "/zc".into(),
-    }];
     app.remote = Some(RemoteSnapshot {
         state: PlaybackState {
             device: Some(app.devices[1].clone()),
@@ -4977,7 +4969,6 @@ mod tests {
         app.backend.set_offline(true);
         app.show_devices = true;
         app.local_ready = true;
-        app.receivers.clear();
         app.devices = (0..40)
             .map(|index| Device {
                 id: Some(format!("speaker-{index}")),

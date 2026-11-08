@@ -530,26 +530,7 @@ unchanged. Spotify can refuse changes to playlists you do not own.
 On Linux the file picker uses a desktop portal, with Zenity as a fallback.
 Install your desktop's file chooser portal or Zenity if no picker opens.
 
-## Receivers on the local network
-
-Spotify's device list only shows signed-in receivers. A new librespot or
-spotifyd receiver is therefore invisible to the Web API.
-
-Receivers announce themselves over mDNS as `_spotify-connect._tcp` and answer
-a small HTTP interface. Opening or refreshing the picker first reads
-`getInfo` to find each receiver's name and device ID. These probes run off
-the UI thread, four at a time, with a two-second limit per receiver and six
-seconds overall after discovery. Only responding receivers with a name and
-ID are offered. Matching IDs are combined; separate devices can have the
-same name. These reads send no account credential.
-
-When a receiver is selected, Spotifast encrypts the stored librespot credential
-with a receiver-specific key and a key from a Diffie-Hellman exchange. The
-encrypted value only works for that receiver and exchange. Spotifast does not
-save another copy of the credential.
-
-The receiver then signs in and appears in Spotify's device list. Spotifast
-uses the Web API for subsequent control requests.
+## Other devices
 
 ### Restricted devices
 
@@ -581,15 +562,12 @@ control another device.
 
 ### Device picker order
 
-No receiver address is saved to disk or assumed reachable on the next launch.
-
 The active output stays first. Other outputs are ordered by how often they
 occur among the last 32 explicit picker selections, most recent first when
-counts match, then by name. This combines signed-in devices and receivers
-waiting on the network. Only preference keys and their account ID are saved in
+counts match, then by name. Only preference keys and their account ID are saved in
 `session.json`; another account does not use that ranking, and sign-out clears
 it. Choosing an output records the selection, including an attempt that fails;
-background discovery and polling never increase its count. There is no new
+background polling never increases its count. There is no new
 setting or network request for ranking. Outputs are ranked by their device
 IDs. This is an ordering hint, not authenticated device identity;
 authentication still happens only on selection.
@@ -718,7 +696,7 @@ These settings apply to Spotifast's requests. The external browser used
 for Spotify approval keeps its own network and proxy settings.
 
 The Web API, artwork, lyrics, and update checks and downloads follow that mode. Update downloads retain their release-host redirect
-restrictions and checksum verification. Local receivers on the LAN are never sent through a proxy.
+restrictions and checksum verification.
 
 Local playback can only use an unauthenticated, plaintext HTTP proxy: that is
 what librespot's CONNECT client supports. Proxy login still covers catalogue

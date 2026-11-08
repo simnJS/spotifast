@@ -65,8 +65,6 @@ Spotifast connects only to the services below.
   can turn automatic checks off in Settings. Downloading an update also
   fetches files from GitHub. No Spotify data is
   sent.
-- **Your local network.** Spotifast looks for Spotify Connect speakers over
-  mDNS and talks to the ones you choose.
 
 Links you open from the app, such as this website,
 open in your browser.

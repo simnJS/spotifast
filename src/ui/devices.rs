@@ -11,83 +11,26 @@ use crate::theme::{self, Icon};
 
 pub const BUTTON_RECT_ID: &str = "devices-button-rect";
 
-enum OutputRow {
-    Device(Device),
-    Receiver(crate::zeroconf::Receiver),
-}
-
-impl OutputRow {
-    /// Spotify's transfer identity, used to keep the active output first.
-    fn identity(&self) -> Option<&str> {
-        match self {
-            Self::Device(device) => device.id.as_deref(),
-            Self::Receiver(receiver) => receiver.device_id.as_deref(),
-        }
-    }
-
-    /// The display label used only after selection history ties.
-    fn name(&self) -> &str {
-        match self {
-            Self::Device(device) => &device.name,
-            Self::Receiver(receiver) => &receiver.name,
-        }
-    }
-
-    /// A stable UI identity even while nearby rows are inserted or reordered.
-    fn widget_key(&self) -> String {
-        match self {
-            Self::Device(device) => format!("connect:{:?}:{}", device.id, device.name),
-            Self::Receiver(receiver) => {
-                format!("receiver:{}:{}", receiver.address, receiver.port)
-            }
-        }
-    }
-
-    /// The identity the device history ranks this row by.
-    fn preference_key(&self) -> Option<String> {
-        match self {
-            Self::Device(device) => device.id.clone(),
-            Self::Receiver(receiver) => receiver.preference_key(),
-        }
-    }
+/// A stable UI identity even while nearby rows are inserted or reordered.
+fn widget_key(device: &Device) -> String {
+    format!("connect:{:?}:{}", device.id, device.name)
 }
 
 /// Active output first, then account-scoped frequency, recency and stable ties.
 fn rank_outputs(
-    rows: &mut [OutputRow],
+    rows: &mut [Device],
     history: &crate::device_history::DeviceHistory,
     account: Option<&str>,
     active: Option<&str>,
 ) {
-    rows.sort_by_cached_key(|row| {
+    rows.sort_by_cached_key(|device| {
         (
-            row.identity().is_none_or(|id| Some(id) != active),
-            history.rank(account, row.preference_key().as_deref()),
-            row.name().to_lowercase(),
-            row.widget_key(),
+            device.id.as_deref().is_none_or(|id| Some(id) != active),
+            history.rank(account, device.id.as_deref()),
+            device.name.to_lowercase(),
+            widget_key(device),
         )
     });
-}
-
-fn receiver_is_listed(receiver: &crate::zeroconf::Receiver, devices: &[Device]) -> bool {
-    devices
-        .iter()
-        .any(|device| match receiver.device_id.as_deref() {
-            Some(id) => device.id.as_deref() == Some(id),
-            None => device.name == receiver.name,
-        })
-}
-
-fn name_devices(devices: &mut [Device], receivers: &[crate::zeroconf::Receiver]) {
-    for device in devices {
-        if device.id.is_some()
-            && let Some(receiver) = receivers
-                .iter()
-                .find(|receiver| receiver.device_id == device.id)
-        {
-            device.name.clone_from(&receiver.name);
-        }
-    }
 }
 
 pub fn device_icon(kind: &str) -> Icon {
@@ -167,63 +110,6 @@ fn enable_playback_row(app: &mut App, ui: &mut egui::Ui) {
         egui::Stroke::new(1.0, palette.outline),
     );
     ui.add_space(4.0);
-}
-
-/// A receiver announced on the local network but not yet in the account.
-/// Choosing it hands over the account, after which it behaves like any other
-/// Spotify Connect device.
-fn receiver_row(app: &mut App, ui: &mut egui::Ui, receiver: &crate::zeroconf::Receiver) {
-    use egui::{Rect, Sense, Vec2, pos2, vec2};
-    let palette = app.palette;
-    let activating = app.activating_receiver.as_deref() == Some(receiver.name.as_str());
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
-    if response.hovered() && !activating {
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(6), palette.surface_hover);
-    }
-    let icon_rect =
-        Rect::from_center_size(pos2(rect.left() + 24.0, rect.center().y), Vec2::splat(22.0));
-    Icon::Speaker
-        .image(palette.text, 22.0)
-        .paint_at(ui, icon_rect);
-    let painter = ui.painter().with_clip_rect(rect);
-    crate::bidi::paint_line(
-        &painter,
-        rect.left() + 48.0,
-        rect.right() - 12.0,
-        rect.center().y - 9.0,
-        &receiver.name,
-        theme::medium(14.0),
-        palette.text,
-    );
-    painter.text(
-        pos2(rect.left() + 48.0, rect.center().y + 10.0),
-        egui::Align2::LEFT_CENTER,
-        if activating {
-            gettext(app.locale, "Connecting…")
-        } else {
-            gettext(app.locale, "On your network, click to connect")
-        },
-        theme::regular(12.0),
-        palette.secondary,
-    );
-    if activating {
-        let mut spin = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(Rect::from_center_size(
-                    pos2(rect.right() - 18.0, rect.center().y),
-                    Vec2::splat(20.0),
-                ))
-                .layout(egui::Layout::centered_and_justified(
-                    egui::Direction::LeftToRight,
-                )),
-        );
-        theme::spinner(&mut spin, 16.0, palette.accent);
-    }
-    if response.clicked() && !activating {
-        app.actions
-            .push(Action::ActivateReceiver(Box::new(receiver.clone())));
-    }
 }
 
 /// The name to show for the saved output: the listed device whose id it
@@ -447,29 +333,14 @@ pub fn popup(app: &mut App, ctx: &egui::Context) {
                     crate::app::Target::Local => local_id.clone(),
                     crate::app::Target::Remote(id) => id,
                 };
-                name_devices(&mut devices, &app.receivers);
                 let mut seen = std::collections::HashSet::new();
                 devices
                     .retain(|device| device.id.as_ref().is_none_or(|id| seen.insert(id.clone())));
 
-                // Receivers on the network that Spotify has not listed yet.
-                // They are real speakers the user can see in the official
-                // client, so offering them here is the whole point.
-                let waiting: Vec<crate::zeroconf::Receiver> = app
-                    .receivers
-                    .iter()
-                    .filter(|receiver| !receiver_is_listed(receiver, &devices))
-                    .cloned()
-                    .collect();
-
-                let mut rows: Vec<_> = devices
-                    .into_iter()
-                    .map(OutputRow::Device)
-                    .chain(waiting.into_iter().map(OutputRow::Receiver))
-                    .collect();
+                let mut rows = devices;
                 if hide_builtin {
-                    rows.retain(|row| {
-                        row.identity().is_none_or(|id| Some(id) != local_id.as_deref())
+                    rows.retain(|device| {
+                        device.id.as_deref().is_none_or(|id| Some(id) != local_id.as_deref())
                     });
                 }
                 rank_outputs(
@@ -484,7 +355,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context) {
                     ui,
                     egui::ScrollArea::vertical()
                         .id_salt("connect-device-list")
-                        // Grow past the Area's remembered height when discovery
+                        // Grow past the Area's remembered height when a refresh
                         // adds devices. Short lists still shrink to their contents.
                         .min_scrolled_height(max_height)
                         .max_height(max_height),
@@ -506,14 +377,8 @@ pub fn popup(app: &mut App, ctx: &egui::Context) {
                             ui.add_space(8.0);
                         }
 
-                        for row in &rows {
-                            ui.push_id(row.widget_key(), |ui| {
-                                let OutputRow::Device(device) = row else {
-                                    if let OutputRow::Receiver(receiver) = row {
-                                        receiver_row(app, ui, receiver);
-                                    }
-                                    return;
-                                };
+                        for device in &rows {
+                            ui.push_id(widget_key(device), |ui| {
                                 let is_local = device.id.is_some() && device.id == local_id;
                                 let is_soloist = device.id.is_some() && device.id == soloist_id;
                                 let active = device.id.is_some() && device.id == active_id;
@@ -622,71 +487,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn active_then_frequent_outputs_rank_across_both_kinds_of_row() {
+    fn active_then_frequent_outputs_rank_first() {
         let mut history = crate::device_history::DeviceHistory::default();
-        let speaker = crate::zeroconf::Receiver {
-            name: "Z speaker".into(),
-            device_id: Some("speaker-id".into()),
-            address: "192.0.2.1".parse().unwrap(),
-            port: 4070,
-            path: "/".into(),
-        };
-        history.record("alice", &speaker.preference_key().unwrap());
-        let mut rows = vec![
-            OutputRow::Device(Device {
-                id: Some("unknown".into()),
-                name: "A phone".into(),
-                ..Default::default()
-            }),
-            OutputRow::Receiver(speaker),
-            OutputRow::Device(Device {
-                id: Some("active".into()),
-                name: "Current output".into(),
-                ..Default::default()
-            }),
-        ];
-        rank_outputs(&mut rows, &history, Some("alice"), Some("active"));
-        assert_eq!(
-            rows.iter().map(OutputRow::identity).collect::<Vec<_>>(),
-            [Some("active"), Some("speaker-id"), Some("unknown")]
-        );
-        rank_outputs(&mut rows, &history, Some("bob"), Some("active"));
-        assert_eq!(
-            rows.iter().map(OutputRow::identity).collect::<Vec<_>>(),
-            [Some("active"), Some("unknown"), Some("speaker-id")]
-        );
-    }
-
-    #[test]
-    fn a_receivers_identity_matches_even_when_its_advertised_name_differs() {
-        let receiver = crate::zeroconf::Receiver {
-            name: "SpotifyConnect".into(),
-            device_id: Some("living-room".into()),
-            address: "127.0.0.1".parse().unwrap(),
-            port: 80,
-            path: "/".into(),
-        };
-        let mut device = Device {
-            id: Some("living-room".into()),
-            name: "Living Room".into(),
+        history.record("alice", "speaker-id");
+        let device = |id: &str, name: &str| Device {
+            id: Some(id.into()),
+            name: name.into(),
             ..Default::default()
         };
-        assert!(receiver_is_listed(&receiver, &[device.clone()]));
-        let mut named = [Device {
-            name: "unnamed".into(),
-            ..device.clone()
-        }];
-        name_devices(&mut named, std::slice::from_ref(&receiver));
-        assert_eq!(named[0].name, receiver.name);
-        assert_eq!(
-            named[0].id, device.id,
-            "renaming preserves the transfer target"
-        );
-        device.id = Some("other-room".into());
-        device.name = receiver.name.clone();
-        assert!(
-            !receiver_is_listed(&receiver, &[device]),
-            "two identities may have the same name"
-        );
+        let mut rows = vec![
+            device("unknown", "A phone"),
+            device("speaker-id", "Z speaker"),
+            device("active", "Current output"),
+        ];
+        let ids = |rows: &[Device]| {
+            rows.iter()
+                .map(|device| device.id.clone().unwrap())
+                .collect::<Vec<_>>()
+        };
+        rank_outputs(&mut rows, &history, Some("alice"), Some("active"));
+        assert_eq!(ids(&rows), ["active", "speaker-id", "unknown"]);
+        rank_outputs(&mut rows, &history, Some("bob"), Some("active"));
+        assert_eq!(ids(&rows), ["active", "unknown", "speaker-id"]);
     }
 }

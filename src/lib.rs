@@ -62,4 +62,3 @@ pub mod updates;
 pub mod util;
 pub mod vis;
 pub mod window;
-pub mod zeroconf;

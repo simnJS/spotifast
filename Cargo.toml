@@ -168,12 +168,7 @@ open = "5"
 percent-encoding = "2"
 urlencoding = "2"
 jiff = "0.2"
-mdns-sd = "0.21"
 unicode-bidi = "0.3"
-hmac = "0.12"
-pbkdf2 = "0.12"
-aes = "0.8"
-ctr = "0.9"
 # Spotify Canvas videos (src/canvas/): the short silent H.264 loops some
 # tracks show instead of the cover. openh264 compiles Cisco's decoder from
 # the source bundled in the crate with the platform's C++ compiler (through

@@ -552,16 +552,7 @@ pub struct App {
     /// What a new window takes up from `page_scroll` on its first frame.
     pub restore_scroll: Option<(String, f32)>,
     pub devices: Vec<Device>,
-    /// Receivers seen on the local network. Spotify lists a receiver only
-    /// once it has an account, so these are the ones it cannot see yet.
-    pub receivers: Vec<crate::zeroconf::Receiver>,
     pub device_history: crate::device_history::DeviceHistory,
-    /// The receiver currently being handed the account, by name.
-    pub activating_receiver: Option<String>,
-    /// Whether music was playing when the receiver was chosen. Activation
-    /// can stop playback before the receiver is ready, so the transfer after
-    /// it plays if music played then or plays now.
-    activating_play: bool,
     pub devices_loading: bool,
     /// This computer's audio outputs, listed when the device picker asks.
     pub output_devices: Loadable<Vec<fastframe_audio::DeviceInfo>>,
@@ -740,8 +731,6 @@ pub struct App {
     /// Last list sent to local playback. Used for autoplay because librespot
     /// cannot continue a list without a context URI.
     local_list: Option<Vec<String>>,
-    /// Activated receiver waiting to appear in Spotify's device list.
-    pending_transfer_to: Option<(String, Instant)>,
     /// When to take a confirming look at remote playback after a command.
     remote_recheck_at: Option<Instant>,
     /// When Spotify pushed a change to another device that no poll since
@@ -1315,10 +1304,7 @@ impl App {
             page_scroll: None,
             restore_scroll: None,
             devices: Vec::new(),
-            receivers: Vec::new(),
             device_history: session.device_history.clone(),
-            activating_receiver: None,
-            activating_play: false,
             devices_loading: false,
             output_devices: Loadable::NotLoaded,
             devices_fetched_at: None,
@@ -1435,7 +1421,6 @@ impl App {
             shuffle_length_serial: 0,
             context_lengths: HashMap::new(),
             local_list: None,
-            pending_transfer_to: None,
             remote_recheck_at: None,
             remote_pushed_at: None,
             seek_preview: None,
@@ -2915,7 +2900,6 @@ impl App {
                         self.on_network_restored();
                     }
                 }
-                Event::Receivers(receivers) => self.receivers = receivers,
                 Event::Autostart { request, result } => self.on_autostart(request, result),
                 Event::AudioDeviceFound { name, id } => self.on_audio_device_found(&name, id),
                 Event::OutputDevices(result) => {
@@ -2926,22 +2910,6 @@ impl App {
                             Loadable::Failed(error)
                         }
                     };
-                }
-                Event::ReceiverActivated { name, result } => {
-                    self.activating_receiver = None;
-                    match result {
-                        Ok(()) => {
-                            self.toast(
-                                // Translators: {name} is the name of a speaker or other playback device.
-                                gettext(self.locale, "{name} is ready").replace("{name}", &name),
-                            );
-                            // It takes a moment to appear in the device list.
-                            self.pending_transfer_to = Some((name, Instant::now()));
-                            self.devices_fetched_at = None;
-                            self.refresh_devices();
-                        }
-                        Err(error) => self.toast_error(format!("{name}: {error}")),
-                    }
                 }
                 Event::Local(state) => self.handle_local(*state),
                 Event::RemoteChanged => {
@@ -7998,39 +7966,6 @@ impl App {
                         self.devices = devices;
                         self.bind_soloist_device();
                         self.control_devices_stale = true;
-                        if let Some((name, since)) = self.pending_transfer_to.clone() {
-                            // The receiver's own id keeps another device of the
-                            // same name from taking over. A rescan can drop the
-                            // receiver; then the name has to do.
-                            let ids: Vec<_> = self
-                                .receivers
-                                .iter()
-                                .filter(|receiver| receiver.name == name)
-                                .filter_map(|receiver| receiver.device_id.clone())
-                                .collect();
-                            let matching = self
-                                .devices
-                                .iter()
-                                .find(|device| {
-                                    device.name == name
-                                        && (ids.is_empty()
-                                            || device
-                                                .id
-                                                .as_ref()
-                                                .is_some_and(|id| ids.contains(id)))
-                                })
-                                .and_then(|device| device.id.clone());
-                            if let Some(id) = matching {
-                                self.pending_transfer_to = None;
-                                let play = self.activating_play
-                                    || self.now_playing().is_some_and(|now| now.playing);
-                                self.transfer_remote(id, play);
-                            } else if since.elapsed() > Duration::from_secs(20) {
-                                self.pending_transfer_to = None;
-                            } else {
-                                self.devices_fetched_at = None;
-                            }
-                        }
                         if let Some(selected) = &self.selected_device
                             && !self
                                 .devices
@@ -12301,7 +12236,6 @@ impl App {
                     | Action::SetShuffle(_)
                     | Action::SetRepeat(_)
                     | Action::Transfer(_)
-                    | Action::ActivateReceiver(_)
                     | Action::AddToQueue { .. }
                     | Action::QueueMany { .. }
                     | Action::PlayNext { .. }
@@ -12981,21 +12915,9 @@ impl App {
                 self.remember_device_choice(&device_id);
                 self.transfer(device_id);
             }
-            Action::ActivateReceiver(receiver) => {
-                self.audio_key_banner = false;
-                if self.activating_receiver.is_none() {
-                    if let Some(key) = receiver.preference_key() {
-                        self.remember_device_choice(&key);
-                    }
-                    self.activating_receiver = Some(receiver.name.clone());
-                    self.activating_play = self.now_playing().is_some_and(|now| now.playing);
-                    self.backend.send(Command::ActivateReceiver(receiver));
-                }
-            }
             Action::RefreshDevices => {
                 self.devices_fetched_at = None;
                 self.refresh_devices();
-                self.backend.send(Command::DiscoverReceivers);
             }
             Action::ClearQueue => self.clear_queue(),
             Action::SaveQueueAsPlaylist => self.save_queue_as_playlist(),
@@ -13262,9 +13184,6 @@ impl App {
                 self.show_devices = !self.show_devices;
                 if self.show_devices {
                     self.refresh_devices();
-                    // Receivers waiting on the network are invisible to the
-                    // Web API, so look for them ourselves.
-                    self.backend.send(Command::DiscoverReceivers);
                 }
             }
             Action::CheckForUpdates => self.check_for_updates(true),
@@ -17068,19 +16987,6 @@ mod tests {
         app.apply(Action::Transfer("speaker".into()), &ctx);
         assert!(
             app.device_history.rank(Some("alice"), Some("speaker"))
-                < app.device_history.rank(None, None)
-        );
-        let receiver = crate::zeroconf::Receiver {
-            name: "Room".into(),
-            device_id: Some("room".into()),
-            address: "192.0.2.1".parse().unwrap(),
-            port: 4070,
-            path: "/".into(),
-        };
-        let key = receiver.preference_key().unwrap();
-        app.apply(Action::ActivateReceiver(Box::new(receiver.clone())), &ctx);
-        assert!(
-            app.device_history.rank(Some("alice"), Some(&key))
                 < app.device_history.rank(None, None)
         );
         app.save_session();
@@ -34488,120 +34394,6 @@ mod tests {
             .unwrap()
             .supports_volume = Some(false);
         assert!(!app.now_playing_live().unwrap().can_set_volume);
-        app.backend.shutdown();
-    }
-
-    /// Activating a receiver can stop the music before the receiver is
-    /// ready. The transfer afterwards plays if music played at the click or
-    /// plays at the transfer.
-    #[test]
-    fn a_receiver_plays_once_ready_if_music_played_when_chosen_or_since() {
-        let speaker = crate::zeroconf::Receiver {
-            name: "nest audio".into(),
-            device_id: Some("nest-audio".into()),
-            address: "192.0.2.1".parse().unwrap(),
-            port: 4070,
-            path: "/".into(),
-        };
-        // Playing at the click, playing at the transfer, and the play flag.
-        for (at_click, at_transfer, play) in [
-            (true, false, true),
-            (false, true, true),
-            (false, false, false),
-        ] {
-            let mut app = headless_app();
-            let ctx = egui::Context::default();
-            let mut now = NowPlaying {
-                local: true,
-                device_name: None,
-                device_kind: None,
-                uri: "spotify:track:1".into(),
-                id: None,
-                title: String::new(),
-                artists: Vec::new(),
-                subtitle: String::new(),
-                album_name: String::new(),
-                album_id: None,
-                show_id: None,
-                art_url: None,
-                art_small: None,
-                duration_ms: 200_000,
-                position_ms: 1_000,
-                playing: at_click,
-                loading: false,
-                shuffle: false,
-                repeat: RepeatMode::Off,
-                volume_percent: 50,
-                can_control: true,
-                can_set_volume: true,
-                is_episode: false,
-                resuming: false,
-            };
-            app.frame_now = Some(now.clone());
-
-            app.apply(Action::ActivateReceiver(Box::new(speaker.clone())), &ctx);
-            now.playing = at_transfer;
-            app.frame_now = Some(now);
-            app.handle_backend_events(vec![Event::ReceiverActivated {
-                name: speaker.name.clone(),
-                result: Ok(()),
-            }]);
-            app.handle_api(ApiResponse::Devices(Ok(vec![Device {
-                id: speaker.device_id.clone(),
-                name: speaker.name.clone(),
-                ..Device::default()
-            }])));
-
-            let transfers = app.backend.take_transfer_requests();
-            assert!(
-                matches!(
-                    transfers.as_slice(),
-                    [ApiRequest::Transfer { device_id, play: sent }]
-                        if Some(device_id) == speaker.device_id.as_ref() && *sent == play
-                ),
-                "{at_click} {at_transfer}: {transfers:?}"
-            );
-            app.backend.shutdown();
-        }
-    }
-
-    /// Another Spotify device with the receiver's name does not take over.
-    #[test]
-    fn a_receiver_takes_over_by_its_own_id_when_names_clash() {
-        let mut app = headless_app();
-        let speaker = crate::zeroconf::Receiver {
-            name: "nest audio".into(),
-            device_id: Some("nest-audio".into()),
-            address: "192.0.2.1".parse().unwrap(),
-            port: 4070,
-            path: "/".into(),
-        };
-        app.receivers = vec![speaker.clone()];
-        app.handle_backend_events(vec![Event::ReceiverActivated {
-            name: speaker.name.clone(),
-            result: Ok(()),
-        }]);
-        app.handle_api(ApiResponse::Devices(Ok(vec![
-            Device {
-                id: Some("phone".into()),
-                name: speaker.name.clone(),
-                ..Device::default()
-            },
-            Device {
-                id: speaker.device_id.clone(),
-                name: speaker.name.clone(),
-                ..Device::default()
-            },
-        ])));
-
-        let transfers = app.backend.take_transfer_requests();
-        assert!(
-            matches!(
-                transfers.as_slice(),
-                [ApiRequest::Transfer { device_id, .. }] if Some(device_id) == speaker.device_id.as_ref()
-            ),
-            "{transfers:?}"
-        );
         app.backend.shutdown();
     }
 
