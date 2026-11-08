@@ -1051,7 +1051,6 @@ mod tests {
             &dirs,
             &crate::settings::Settings::default(),
             crate::settings::ProxyConfig::Off,
-            crate::vis::AudioTap::new(),
             crate::eq::shared(),
         );
         let handle = Handle::start(Config {

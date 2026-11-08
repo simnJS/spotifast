@@ -42,7 +42,7 @@ use sha1::{Digest, Sha1};
 
 use crate::api::models::ArtistRef;
 use crate::sink::{AudioControl, DeviceHook, ErrorHook, RodioSink};
-use crate::vis::{AudioTap, Tapped};
+use crate::vis::Tapped;
 
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
@@ -59,7 +59,6 @@ pub struct EngineConfig {
     pub audio_cache_limit: Option<u64>,
     /// Output buffer length in milliseconds.
     pub buffer_ms: u32,
-    pub tap: Arc<AudioTap>,
     /// The equalizer's settings, shared with the window that sets them.
     pub eq: crate::eq::SharedEq,
     /// Proxy used by the Web API client. Librespot only uses the HTTP form.
@@ -621,17 +620,12 @@ impl Engine {
         Arc<Mutex<LocalState>>,
         Arc<AudioControl>,
     )> {
-        let normalisation_factor = Arc::new(std::sync::atomic::AtomicU64::new(1.0f64.to_bits()));
         let player_config = PlayerConfig {
             bitrate: config.bitrate(),
             gapless: config.gapless,
             normalisation: config.normalisation,
             normalisation_type: NormalisationType::Auto,
             position_update_interval: Some(Duration::from_secs(1)),
-            // The fork reports each track's normalisation factor here, so
-            // the tap can undo it for the visualisers: they show the music,
-            // not the loudness housekeeping.
-            normalisation_report: Some(Arc::clone(&normalisation_factor)),
             // librespot reads this folder's tags on its own player thread
             // when the engine starts, never on the UI thread.
             local_file_directories: config.local_files.iter().cloned().collect(),
@@ -660,7 +654,6 @@ impl Engine {
             Arc::clone(&state),
             Arc::clone(notify),
             &mixer,
-            Arc::clone(&normalisation_factor),
             Arc::clone(&audio),
         );
         let player = Player::new(player_config, session.clone(), volume, sink_builder);
@@ -988,12 +981,10 @@ fn sink_builder(
     state: Arc<Mutex<LocalState>>,
     notify: Notify,
     mixer: &Arc<dyn Mixer>,
-    normalisation: Arc<std::sync::atomic::AtomicU64>,
     audio: Arc<AudioControl>,
 ) -> SinkAndVolume {
     let device = config.audio_device.clone();
     let buffer_ms = config.buffer_ms;
-    let tap = Arc::clone(&config.tap);
     let eq = Arc::clone(&config.eq);
     let notify_device = Arc::clone(&notify);
     let report: ErrorHook = Arc::new(move |message: String| {
@@ -1020,15 +1011,7 @@ fn sink_builder(
                 RodioSink::new(device, report, volume, buffer_ms, Arc::clone(&audio))
                     .on_device(saved),
             );
-            Box::new(Tapped::new(
-                sink,
-                audio,
-                tap,
-                ceiling,
-                false,
-                eq,
-                normalisation,
-            )) as Box<dyn Sink>
+            Box::new(Tapped::new(sink, audio, ceiling, false, eq)) as Box<dyn Sink>
         }),
         Box::new(NoOpVolume),
     )
@@ -2013,7 +1996,6 @@ mod tests {
     fn device_id_is_stable_hex() {
         let config = EngineConfig {
             buffer_ms: crate::sink::DEFAULT_BUFFER_MS,
-            tap: AudioTap::new(),
             eq: crate::eq::shared(),
             device_name: "Spotifast".into(),
             bitrate_kbps: 320,

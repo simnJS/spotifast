@@ -36,23 +36,6 @@ pub fn budget(conditions: Conditions, window_shown: bool, focused: bool) -> Budg
     }
 }
 
-/// The frame rate of the main window's visualizers (the player bar's and
-/// the mini player's) within `budget`, from the user's `fps` (0 is uncapped,
-/// the display's own rate): as chosen in focus, half of it out of focus or
-/// while saving energy, and at most 30 while saving energy. `None` while
-/// nobody can see the window: no frames. Uncapped halves to 30, the half
-/// rate these visualizers always had.
-pub fn visualiser_fps(budget: Budget, conditions: Conditions, fps: u32) -> Option<u32> {
-    match budget {
-        Budget::Background => None,
-        Budget::Normal => Some(fps),
-        Budget::Saver => {
-            let half = if fps == 0 { 30 } else { (fps / 2).max(1) };
-            Some(if conditions.saver { half.min(30) } else { half })
-        }
-    }
-}
-
 /// Whether local playback is doing work the user is waiting for, which
 /// macOS must not slow down with App Nap while another app is in front,
 /// and during which the computer must not go to sleep on its own (#962):
@@ -67,34 +50,6 @@ pub fn playback_needs_activity(local: &LocalState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The player bar and mini player visualizers keep the rate chosen in
-    /// focus, halve it out of focus, draw at most 30 saving energy, and
-    /// none while nobody can see them.
-    #[test]
-    fn the_visualizers_halve_their_rate_out_of_focus_and_stop_unseen() {
-        let normal = Conditions::default();
-        let saving = Conditions {
-            saver: true,
-            ..normal
-        };
-        assert_eq!(visualiser_fps(Budget::Normal, normal, 60), Some(60));
-        assert_eq!(visualiser_fps(Budget::Normal, normal, 0), Some(0));
-        assert_eq!(
-            visualiser_fps(Budget::Saver, normal, 144),
-            Some(72),
-            "out of focus"
-        );
-        assert_eq!(visualiser_fps(Budget::Saver, normal, 0), Some(30));
-        assert_eq!(
-            visualiser_fps(Budget::Saver, saving, 144),
-            Some(30),
-            "saving energy"
-        );
-        assert_eq!(visualiser_fps(Budget::Saver, saving, 30), Some(15));
-        assert_eq!(visualiser_fps(Budget::Background, normal, 60), None);
-        assert_eq!(visualiser_fps(Budget::Background, normal, 0), None);
-    }
 
     #[test]
     fn nothing_is_drawn_when_nobody_can_see_it() {

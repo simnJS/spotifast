@@ -9289,13 +9289,8 @@ mod authorization_tests {
             cache: root.join("cache"),
         };
         let settings = crate::settings::Settings::default();
-        let config = crate::app::engine_config(
-            &dirs,
-            &settings,
-            ProxyConfig::Off,
-            crate::vis::AudioTap::new(),
-            crate::eq::shared(),
-        );
+        let config =
+            crate::app::engine_config(&dirs, &settings, ProxyConfig::Off, crate::eq::shared());
         let http = Http::new(reqwest::Client::new());
         let art = ArtLoader::new(http.clone(), runtime.handle().clone(), dirs.art_cache_dir());
         let (sender, events) = std::sync::mpsc::channel();

@@ -932,8 +932,6 @@ pub struct App {
     /// What the demo types in the Settings filter.
     #[cfg(feature = "demo")]
     pub demo_settings_filter: Option<String>,
-    /// The sound on its way out of the sink.
-    pub tap: std::sync::Arc<crate::vis::AudioTap>,
     /// The equalizer as the player's thread reads it.
     pub eq: crate::eq::SharedEq,
     /// The window's pixels per point when it last drew, so artwork chosen
@@ -1138,7 +1136,6 @@ impl App {
         // settings beside it until migration binds that password in the store.
         settings.proxy_password_legacy |= dirs.proxy_secret_file().try_exists().unwrap_or(true);
         let plays = crate::history::History::load(&dirs.history_file());
-        let tap = crate::vis::AudioTap::new();
         let eq = crate::eq::shared();
         if let Ok(mut shared) = eq.lock() {
             *shared = eq_settings(&settings);
@@ -1152,7 +1149,6 @@ impl App {
             &dirs,
             &settings,
             applied_proxy.clone(),
-            std::sync::Arc::clone(&tap),
             std::sync::Arc::clone(&eq),
         );
         let backend = Backend::spawn(
@@ -1540,7 +1536,6 @@ impl App {
             held_update: None,
             #[cfg(feature = "demo")]
             demo_settings_filter: None,
-            tap,
             eq,
             pixels_per_point: 1.0,
         };
@@ -13531,7 +13526,6 @@ impl App {
                     &self.dirs,
                     &self.settings,
                     self.applied_proxy.clone(),
-                    std::sync::Arc::clone(&self.tap),
                     std::sync::Arc::clone(&self.eq),
                 );
                 self.backend.send(Command::RestartEngine(config));
@@ -14828,11 +14822,9 @@ pub fn engine_config(
     dirs: &AppDirs,
     settings: &Settings,
     proxy: crate::settings::ProxyConfig,
-    tap: std::sync::Arc<crate::vis::AudioTap>,
     eq: crate::eq::SharedEq,
 ) -> EngineConfig {
     EngineConfig {
-        tap,
         eq,
         device_name: settings.device_name.trim().to_string(),
         bitrate_kbps: settings.bitrate,

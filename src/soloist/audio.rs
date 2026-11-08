@@ -381,7 +381,7 @@ impl Bridge {
 /// The stream properties Soloist runs with, added to any the user set.
 ///
 /// Only this child's stream stays at unity: its documented volume events
-/// drive our final gain, after the equalizer and visualizers.
+/// drive our final gain, after the equalizer.
 ///
 /// `node.dont-fallback` keeps it from ever reaching a speaker unprocessed,
 /// but alone it makes WirePlumber destroy the stream the moment the private
@@ -538,7 +538,6 @@ mod tests {
                 &dirs,
                 &crate::settings::Settings::default(),
                 crate::settings::ProxyConfig::Off,
-                crate::vis::AudioTap::new(),
                 crate::eq::shared(),
             )
         };
@@ -1027,19 +1026,14 @@ mod pipewire {
         input_rate: u32,
         output_rate: u32,
         input_resampler: Option<crate::resample::Resampler>,
-        tap_resampler: Option<crate::resample::Resampler>,
-        tap: Arc<crate::vis::AudioTap>,
         limiter: crate::limiter::Limiter,
         samples: VecDeque<f64>,
         gain: f64,
         /// One `CHUNK` from the ring, and what the rate conversion makes of it.
         pulled: Vec<f32>,
         converted: Vec<f32>,
-        /// One `CHUNK` on its way out, and its copies for the tap.
+        /// One `CHUNK` on its way out.
         block: Vec<f64>,
-        narrow: Vec<f32>,
-        tapped_narrow: Vec<f32>,
-        tapped: Vec<f64>,
         /// The ring's write count at the output's last cycle.
         seen: usize,
         /// Whether the output is playing the queue, or holding for it to fill.
@@ -1063,12 +1057,7 @@ mod pipewire {
         delay: f64,
     }
     impl Chain {
-        fn new(
-            eq: crate::eq::Processor,
-            tap: Arc<crate::vis::AudioTap>,
-            input_rate: u32,
-            output_rate: u32,
-        ) -> Self {
+        fn new(eq: crate::eq::Processor, input_rate: u32, output_rate: u32) -> Self {
             let resampler = |from, to| {
                 let mut resampler = crate::resample::Resampler::new(from, to, 2);
                 if let Some(resampler) = &mut resampler {
@@ -1083,17 +1072,12 @@ mod pipewire {
                 input_rate,
                 output_rate,
                 input_resampler: resampler(input_rate, output_rate),
-                tap_resampler: resampler(output_rate, RATE as u32),
-                tap,
                 limiter: crate::limiter::Limiter::new(f64::from(output_rate)),
                 samples: VecDeque::with_capacity((MAX_RATE as f64 * MAX_HELD) as usize),
                 gain: 0.0,
                 pulled: vec![0.0; CHUNK],
                 converted: Vec::with_capacity(room(input_rate, output_rate)),
                 block: vec![0.0; CHUNK],
-                narrow: vec![0.0; CHUNK],
-                tapped_narrow: Vec::with_capacity(room(output_rate, RATE as u32)),
-                tapped: vec![0.0; room(output_rate, RATE as u32)],
                 seen: 0,
                 primed: false,
                 lowest: usize::MAX,
@@ -1249,16 +1233,12 @@ mod pipewire {
         fn reset(&mut self) {
             self.samples.clear();
             self.eq.reset();
-            self.tap.try_clear();
             self.gain = 0.0;
             self.primed = false;
             self.step = 1.0;
             self.wanted_step = 1.0;
             self.phase = 0.0;
             if let Some(resampler) = &mut self.input_resampler {
-                resampler.reset();
-            }
-            if let Some(resampler) = &mut self.tap_resampler {
                 resampler.reset();
             }
             self.limiter.reset();
@@ -1345,20 +1325,6 @@ mod pipewire {
             }
             let samples = &mut self.block[..count];
             self.eq.apply(samples);
-            if let Some(resampler) = &mut self.tap_resampler {
-                for (narrow, sample) in self.narrow.iter_mut().zip(samples.iter()) {
-                    *narrow = *sample as f32;
-                }
-                self.tapped_narrow.clear();
-                resampler.process_into(&self.narrow[..count], &mut self.tapped_narrow);
-                for (wide, sample) in self.tapped.iter_mut().zip(&self.tapped_narrow) {
-                    *wide = f64::from(*sample);
-                }
-                self.tap
-                    .try_push(&self.tapped[..self.tapped_narrow.len()], 1.0);
-            } else {
-                self.tap.try_push(samples, 1.0);
-            }
             // Matches Soloist's native PipeWire curve: 50% is 0.125 gain.
             let wanted = (f64::from(percent.min(100)) / 100.0).powi(3);
             for frame in samples.as_chunks_mut::<2>().0 {
@@ -1391,24 +1357,22 @@ mod pipewire {
         /// Only the owned child feeds the input, as the main loop last saw.
         owned: AtomicBool,
         stats: Stats,
-        tap: Arc<crate::vis::AudioTap>,
         shared_eq: crate::eq::SharedEq,
         /// The main loop's: what the chain was last built from.
         settings: Mutex<(u32, u32, crate::eq::EqSettings)>,
     }
     impl Audio {
-        fn new(eq: crate::eq::SharedEq, tap: Arc<crate::vis::AudioTap>) -> Self {
+        fn new(eq: crate::eq::SharedEq) -> Self {
             let rate = RATE as u32;
             let settings = Self::eq_settings(&eq);
             let processor = crate::eq::Processor::prepared(eq.clone(), rate);
             Self {
                 ring: Ring::new((MAX_RATE as f64 * MAX_HELD) as usize),
-                chain: Mutex::new(Chain::new(processor, tap.clone(), rate, rate)),
+                chain: Mutex::new(Chain::new(processor, rate, rate)),
                 flush: AtomicBool::new(false),
                 input_rate: AtomicU32::new(rate),
                 owned: AtomicBool::new(false),
                 stats: Stats::default(),
-                tap,
                 shared_eq: eq,
                 settings: Mutex::new((rate, rate, settings)),
             }
@@ -1432,7 +1396,7 @@ mod pipewire {
             *settings = (input, output, wanted);
             self.input_rate.store(input, Ordering::Relaxed);
             let eq = crate::eq::Processor::prepared(self.shared_eq.clone(), output);
-            let mut fresh = Chain::new(eq, self.tap.clone(), input, output);
+            let mut fresh = Chain::new(eq, input, output);
             self.swap(|chain| std::mem::swap(chain, &mut fresh));
             drop(fresh);
             self.clear();
@@ -1449,11 +1413,10 @@ mod pipewire {
             let mut eq = crate::eq::Processor::prepared(self.shared_eq.clone(), settings.1);
             self.swap(|chain| std::mem::swap(&mut chain.eq, &mut eq));
         }
-        /// Forgets queued audio, and at once what the tap shows.
+        /// Forgets queued audio.
         fn clear(&self) {
             self.flush.store(true, Ordering::Release);
             self.stats.restart();
-            self.tap.clear();
         }
         /// The input's callback.
         fn push(&self, bytes: &[u8]) {
@@ -1550,7 +1513,7 @@ mod pipewire {
             })
             .register();
         let graph = Rc::new(RefCell::new(Graph::default()));
-        let audio = Arc::new(Audio::new(config.eq, config.tap));
+        let audio = Arc::new(Audio::new(config.eq));
         // The input's node id, once it has one: the timer keeps this.
         let input_id = Rc::new(Cell::new(pw::constants::ID_ANY));
         // The realtime callback can't see the graph, so what it needs of it
@@ -1886,7 +1849,7 @@ mod pipewire {
                     println!("{line}");
                 }
             }
-            // Linking does not require playback. Show EQ and visualizers as
+            // Linking does not require playback. Show EQ as
             // soon as the owned child is routed, including while paused.
             timer_audio.refresh_eq();
             let input_node = active_input.node_id();
@@ -1901,8 +1864,7 @@ mod pipewire {
             match route {
                 Route::Owned => state.routed.store(true, Ordering::Release),
                 Route::Foreign => {
-                    // Silent until it goes: only Soloist reaches the tap and
-                    // the output. Soloist's own link is left alone.
+                    // Silent until it goes: only Soloist reaches the output. Soloist's own link is left alone.
                     timer_audio.clear();
                     let graph = graph.borrow();
                     for link in graph.foreign_links(input_node, child) {
@@ -2114,7 +2076,7 @@ mod pipewire {
         }
 
         #[test]
-        fn equalizer_shapes_the_tap_before_volume_at_native_rates() {
+        fn equalizer_shapes_the_output_before_volume_at_native_rates() {
             for rate in [44_100, 48_000, 96_000, 192_000] {
                 let eq = crate::eq::shared();
                 {
@@ -2122,8 +2084,7 @@ mod pipewire {
                     eq.on = true;
                     eq.bands_db[4] = 6.0;
                 }
-                let tap = crate::vis::AudioTap::new();
-                let audio = owned(Audio::new(eq, tap.clone()));
+                let audio = owned(Audio::new(eq));
                 audio.rates(Some(rate), Some(rate));
                 // Takes up the flush that drops audio of the old format.
                 audio.render(&mut [], 0);
@@ -2132,8 +2093,9 @@ mod pipewire {
                 let mut output = vec![0; input.len()];
                 render_all(&audio, &mut output, 0);
                 assert_eq!(peak(&output), 0.0, "zero volume must be silent");
-                let before = tap.window(512, 0);
-                let level = before.iter().copied().map(f32::abs).fold(0.0, f32::max);
+                audio.push(&input);
+                render_all(&audio, &mut output, 100);
+                let level = peak(&output[output.len() / 2..]);
                 assert!(
                     (level - 0.2).abs() < 0.005,
                     "post-EQ level at {rate} Hz: {level}"
@@ -2145,25 +2107,17 @@ mod pipewire {
                     (level - 0.025).abs() < 0.002,
                     "volume curve at {rate} Hz: {level}"
                 );
-                let after = tap.window(512, 0);
-                let level = after.iter().copied().map(f32::abs).fold(0.0, f32::max);
-                assert!(
-                    (level - 0.2).abs() < 0.005,
-                    "volume changed the visualization"
-                );
             }
         }
 
         #[test]
         fn pause_clears_queued_audio_and_nonfinite_input_is_silent() {
-            let tap = crate::vis::AudioTap::new();
-            let audio = owned(Audio::new(crate::eq::shared(), tap.clone()));
+            let audio = owned(Audio::new(crate::eq::shared()));
             audio.push(&tone(44_100, 4096));
             audio.clear();
             let mut output = vec![0; 4096 * 8];
             audio.render(&mut output, 100);
             assert_eq!(peak(&output), 0.0);
-            assert!(tap.window(512, 0).iter().all(|v| *v == 0.0));
             audio.push(
                 &[f32::NAN, f32::INFINITY]
                     .into_iter()
@@ -2186,8 +2140,7 @@ mod pipewire {
         /// has reacted to the link.
         #[test]
         fn input_is_dropped_unless_it_is_the_owned_child_alone() {
-            let tap = crate::vis::AudioTap::new();
-            let audio = Audio::new(crate::eq::shared(), tap.clone());
+            let audio = Audio::new(crate::eq::shared());
             audio.push(&tone(44_100, 4096));
             assert_eq!(audio.ring.len(), 0);
             let mut output = vec![0; 4096 * 8];
@@ -2204,7 +2157,7 @@ mod pipewire {
         /// Each fault the log can name is counted, and a clean run says nothing.
         #[test]
         fn the_report_names_each_fault_and_stays_quiet_without_one() {
-            let audio = owned(Audio::new(crate::eq::shared(), crate::vis::AudioTap::new()));
+            let audio = owned(Audio::new(crate::eq::shared()));
             assert_eq!(audio.stats.take().line(), None);
             audio.push(&tone(44_100, 4096));
             let mut output = vec![0; 4096 * 8];
@@ -2257,7 +2210,7 @@ mod pipewire {
         /// before the first sound, or a long one, is music.
         #[test]
         fn a_short_silence_inside_the_sound_is_a_gap_in_the_input() {
-            let audio = owned(Audio::new(crate::eq::shared(), crate::vis::AudioTap::new()));
+            let audio = owned(Audio::new(crate::eq::shared()));
             let silence = |frames: usize| vec![0; frames * 8];
             audio.push(&silence(1024));
             audio.push(&tone(44_100, 1024));
@@ -2307,7 +2260,7 @@ mod pipewire {
             output
         }
         fn fresh() -> Audio {
-            owned(Audio::new(crate::eq::shared(), crate::vis::AudioTap::new()))
+            owned(Audio::new(crate::eq::shared()))
         }
         /// The frames of `MIN_TARGET` at the tests' 44.1 kHz.
         const TARGET: usize = 2646;
@@ -2693,7 +2646,7 @@ mod pipewire {
         /// wait, and the sound is still there afterwards.
         #[test]
         fn a_busy_chain_renders_silence_and_loses_nothing() {
-            let audio = owned(Audio::new(crate::eq::shared(), crate::vis::AudioTap::new()));
+            let audio = owned(Audio::new(crate::eq::shared()));
             audio.push(&tone(44_100, 4096));
             let mut output = vec![1; 1024 * 8];
             let chain = audio.chain.lock().unwrap();
@@ -2709,8 +2662,7 @@ mod pipewire {
         #[test]
         fn an_equalizer_change_arrives_from_the_main_loop() {
             let eq = crate::eq::shared();
-            let tap = crate::vis::AudioTap::new();
-            let audio = owned(Audio::new(eq.clone(), tap.clone()));
+            let audio = owned(Audio::new(eq.clone()));
             let level = |audio: &Audio| {
                 let input = tone(44_100, 4410);
                 let mut output = vec![0; input.len()];
@@ -2835,7 +2787,7 @@ mod pipewire {
                     eq.on = true;
                     eq.bands_db[4] = 6.0;
                 }
-                let audio = owned(Audio::new(eq, crate::vis::AudioTap::new()));
+                let audio = owned(Audio::new(eq));
                 audio.rates(Some(input), Some(output));
                 for quantum in [256, 1024, 8192] {
                     let incoming = tone(input, quantum * input as usize / output as usize);
@@ -2886,7 +2838,6 @@ mod pipewire {
                     &dirs,
                     &crate::settings::Settings::default(),
                     crate::settings::ProxyConfig::Off,
-                    crate::vis::AudioTap::new(),
                     crate::eq::shared(),
                 );
                 // As in the app, the output finds its own way to the default
@@ -3234,7 +3185,6 @@ mod pipewire {
             let output =
                 std::env::var("SOLOIST_AUDIO_TEST_OUTPUT").expect("private null sink required");
             assert!(output.starts_with("spotifast_test_"));
-            let tap = crate::vis::AudioTap::new();
             let eq = crate::eq::shared();
             {
                 let mut eq = eq.lock().unwrap();
@@ -3250,7 +3200,6 @@ mod pipewire {
                 &dirs,
                 &crate::settings::Settings::default(),
                 crate::settings::ProxyConfig::Off,
-                tap.clone(),
                 eq,
             );
             // This inactive bridge also exercises ordinary default-output
@@ -3341,16 +3290,6 @@ mod pipewire {
             assert!(bridge.routed(), "route must match the owned child's PID");
             assert!(!other.routed());
             assert!(!other.failed(), "private routes must not chain together");
-            let tap_peak = tap
-                .window(512, 0)
-                .iter()
-                .copied()
-                .map(f32::abs)
-                .fold(0.0, f32::max);
-            assert!(
-                (tap_peak - 0.2).abs() < 0.01,
-                "zero-volume post-EQ tap: {tap_peak}"
-            );
             async fn capture(output: &str) -> f32 {
                 let child = tokio::process::Command::new("pw-record")
                     .args([
@@ -3402,14 +3341,11 @@ mod pipewire {
             );
             bridge.update(&json!({"status":"paused"}));
             tokio::time::sleep(Duration::from_millis(150)).await;
-            assert!(tap.window(512, 0).iter().all(|v| *v == 0.0));
             bridge.update(&json!({"type":"volume_changed", "status":"playing", "volume":100}));
             tokio::time::sleep(Duration::from_millis(250)).await;
             let full = capture(&output).await;
             assert!((full - 0.2).abs() < 0.01, "resumed output: {full}");
-            println!(
-                "Native private route: zero={silent}, half={half}, full={full}, pre-volume tap={tap_peak}"
-            );
+            println!("Native private route: zero={silent}, half={half}, full={full}");
             let mut foreign = tokio::process::Command::new("pw-play")
                 .args([
                     "--target",
@@ -3436,12 +3372,7 @@ mod pipewire {
                 !bridge.failed(),
                 "a foreign source is removed, and costs the route nothing"
             );
-            let peak_after = tap
-                .window(512, 0)
-                .iter()
-                .copied()
-                .map(f32::abs)
-                .fold(0.0, f32::max);
+            let peak_after = capture(&output).await;
             assert!(peak_after <= 0.25, "nothing foreign was mixed in");
             let _ = foreign.kill().await;
             foreign.wait().await.unwrap();
@@ -3452,7 +3383,6 @@ mod pipewire {
             drop(bridge);
             tokio::time::sleep(Duration::from_millis(150)).await;
             assert!(state.stop.load(Ordering::Acquire));
-            assert!(tap.window(512, 0).iter().all(|v| *v == 0.0));
         }
     }
 }

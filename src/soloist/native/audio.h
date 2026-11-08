@@ -1,4 +1,4 @@
-// The native adapters own the OS objects. Rust owns DSP and visualizer state.
+// The native adapters own the OS objects. Rust owns DSP state.
 // No callback retains its buffer. Only control() runs on audio callbacks;
 // process() and event() run on the dedicated worker, never on the UI thread.
 #pragma once
