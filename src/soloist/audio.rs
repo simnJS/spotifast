@@ -1,6 +1,6 @@
 //! Private OS audio routing for the managed Soloist process. No system mix is
 //! recorded. Linux uses PipeWire; the default native-audio feature adds
-//! process capture on macOS and Windows.
+//! process capture on macOS.
 use std::{
     sync::{
         Arc, Mutex,
@@ -156,10 +156,7 @@ struct State {
 
 #[cfg(any(
     target_os = "linux",
-    all(
-        feature = "soloist-native-audio",
-        any(target_os = "macos", target_os = "windows")
-    )
+    all(feature = "soloist-native-audio", target_os = "macos")
 ))]
 impl State {
     fn new() -> Self {
@@ -190,10 +187,7 @@ impl State {
     }
 }
 
-#[cfg(all(
-    feature = "soloist-native-audio",
-    any(test, target_os = "macos", target_os = "windows")
-))]
+#[cfg(all(feature = "soloist-native-audio", any(test, target_os = "macos")))]
 #[path = "native.rs"]
 mod native;
 
@@ -218,24 +212,15 @@ impl Bridge {
         config: crate::player::EngineConfig,
         output_volume: OutputVolume,
     ) -> Option<Self> {
-        #[cfg(not(all(
-            feature = "soloist-native-audio",
-            any(target_os = "macos", target_os = "windows")
-        )))]
+        #[cfg(not(all(feature = "soloist-native-audio", target_os = "macos")))]
         let _ = output_volume;
-        #[cfg(all(
-            feature = "soloist-native-audio",
-            any(target_os = "macos", target_os = "windows")
-        ))]
+        #[cfg(all(feature = "soloist-native-audio", target_os = "macos"))]
         {
             native::open(config, output_volume)
         }
         #[cfg(not(any(
             target_os = "linux",
-            all(
-                feature = "soloist-native-audio",
-                any(target_os = "macos", target_os = "windows")
-            )
+            all(feature = "soloist-native-audio", target_os = "macos")
         )))]
         {
             let _ = config;
@@ -351,7 +336,7 @@ impl Bridge {
         self.state.routed.load(Ordering::Acquire)
     }
     /// A confirmed Mac route can raise the source without exposing dry audio.
-    /// Windows observes only; Linux already locks source gain in PipeWire.
+    /// Linux already locks source gain in PipeWire.
     pub fn owns_output_volume(&self) -> bool {
         cfg!(all(target_os = "macos", feature = "soloist-native-audio"))
             && self.routed()
@@ -419,10 +404,7 @@ pub fn child_props(existing: &str) -> String {
     test,
     any(
         target_os = "linux",
-        all(
-            feature = "soloist-native-audio",
-            any(target_os = "macos", target_os = "windows")
-        )
+        all(feature = "soloist-native-audio", target_os = "macos")
     )
 ))]
 mod tests {

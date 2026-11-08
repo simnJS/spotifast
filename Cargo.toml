@@ -236,7 +236,7 @@ zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-tokio-c
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [build-dependencies]
-# Compile the small macOS and Windows Soloist audio adapters.
+# Compile the small macOS Soloist audio adapter.
 cc = { version = "1", optional = true }
 # Drops unfinished PO entries and compiles catalog text and gettext plural
 # expressions to Rust. Ordinary builds do not need gettext tools.
@@ -256,10 +256,8 @@ winresource = "0.1"
 
 [features]
 default = ["soloist-native-audio"]
-# Process-only Soloist audio: Mac EQ and visualizers, Windows visualizers.
+# Process-only Soloist audio: the Mac EQ.
 soloist-native-audio = ["dep:cc"]
-# Keep the existing maintainer preview command working.
-soloist-preview = ["soloist-native-audio"]
 # Sample data and screenshot flags; never part of a release build.
 demo = []
 
