@@ -2927,11 +2927,6 @@ impl App {
                         }
                     };
                 }
-                Event::ReceiversProgress(updates) => {
-                    if let Some(receivers) = updates.take() {
-                        crate::zeroconf::merge_discovered(&mut self.receivers, receivers);
-                    }
-                }
                 Event::ReceiverActivated { name, result } => {
                     self.activating_receiver = None;
                     match result {
@@ -17081,22 +17076,16 @@ mod tests {
         );
         let receiver = crate::zeroconf::Receiver {
             name: "Room".into(),
-            device_id: Some(crate::cast::device_id("Room")),
+            device_id: Some("room".into()),
             address: "192.0.2.1".parse().unwrap(),
-            port: 8009,
+            port: 4070,
             path: "/".into(),
-            cast: true,
         };
         let key = receiver.preference_key().unwrap();
         app.apply(Action::ActivateReceiver(Box::new(receiver.clone())), &ctx);
         assert!(
             app.device_history.rank(Some("alice"), Some(&key))
                 < app.device_history.rank(None, None)
-        );
-        assert_eq!(
-            app.device_history
-                .rank(Some("alice"), receiver.device_id.as_deref()),
-            app.device_history.rank(None, None)
         );
         app.save_session();
         app.flush_files();
@@ -34481,7 +34470,6 @@ mod tests {
             address: "192.168.1.10".parse().unwrap(),
             port: 1400,
             path: "/spotifyzc".into(),
-            cast: false,
         }];
         app.selected_device = Some("office".into());
         app.handle_api(ApiResponse::Devices(Ok(Vec::new())));
@@ -34533,11 +34521,10 @@ mod tests {
     fn a_receiver_plays_once_ready_if_music_played_when_chosen_or_since() {
         let speaker = crate::zeroconf::Receiver {
             name: "nest audio".into(),
-            device_id: Some(crate::cast::device_id("nest audio")),
+            device_id: Some("nest-audio".into()),
             address: "192.0.2.1".parse().unwrap(),
-            port: 8009,
+            port: 4070,
             path: "/".into(),
-            cast: true,
         };
         // Playing at the click, playing at the transfer, and the play flag.
         for (at_click, at_transfer, play) in [
@@ -34607,11 +34594,10 @@ mod tests {
         let mut app = headless_app();
         let speaker = crate::zeroconf::Receiver {
             name: "nest audio".into(),
-            device_id: Some(crate::cast::device_id("nest audio")),
+            device_id: Some("nest-audio".into()),
             address: "192.0.2.1".parse().unwrap(),
-            port: 8009,
+            port: 4070,
             path: "/".into(),
-            cast: true,
         };
         app.receivers = vec![speaker.clone()];
         app.handle_backend_events(vec![Event::ReceiverActivated {

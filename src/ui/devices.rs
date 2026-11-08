@@ -37,14 +37,13 @@ impl OutputRow {
     fn widget_key(&self) -> String {
         match self {
             Self::Device(device) => format!("connect:{:?}:{}", device.id, device.name),
-            Self::Receiver(receiver) => format!(
-                "receiver:{}:{}:{}",
-                receiver.cast, receiver.address, receiver.port
-            ),
+            Self::Receiver(receiver) => {
+                format!("receiver:{}:{}", receiver.address, receiver.port)
+            }
         }
     }
 
-    /// Cast preference identity is distinct from its name-derived transfer ID.
+    /// The identity the device history ranks this row by.
     fn preference_key(&self) -> Option<String> {
         match self {
             Self::Device(device) => device.id.clone(),
@@ -184,12 +183,9 @@ fn receiver_row(app: &mut App, ui: &mut egui::Ui, receiver: &crate::zeroconf::Re
     }
     let icon_rect =
         Rect::from_center_size(pos2(rect.left() + 24.0, rect.center().y), Vec2::splat(22.0));
-    let icon = if receiver.cast {
-        Icon::Cast
-    } else {
-        Icon::Speaker
-    };
-    icon.image(palette.text, 22.0).paint_at(ui, icon_rect);
+    Icon::Speaker
+        .image(palette.text, 22.0)
+        .paint_at(ui, icon_rect);
     let painter = ui.painter().with_clip_rect(rect);
     crate::bidi::paint_line(
         &painter,
@@ -641,22 +637,21 @@ mod tests {
     #[test]
     fn active_then_frequent_outputs_rank_across_both_kinds_of_row() {
         let mut history = crate::device_history::DeviceHistory::default();
-        let cast = crate::zeroconf::Receiver {
+        let speaker = crate::zeroconf::Receiver {
             name: "Z speaker".into(),
-            device_id: Some("cast-id".into()),
+            device_id: Some("speaker-id".into()),
             address: "192.0.2.1".parse().unwrap(),
-            port: 8009,
+            port: 4070,
             path: "/".into(),
-            cast: true,
         };
-        history.record("alice", &cast.preference_key().unwrap());
+        history.record("alice", &speaker.preference_key().unwrap());
         let mut rows = vec![
             OutputRow::Device(Device {
                 id: Some("unknown".into()),
                 name: "A phone".into(),
                 ..Default::default()
             }),
-            OutputRow::Receiver(cast),
+            OutputRow::Receiver(speaker),
             OutputRow::Device(Device {
                 id: Some("active".into()),
                 name: "Current output".into(),
@@ -666,46 +661,13 @@ mod tests {
         rank_outputs(&mut rows, &history, Some("alice"), Some("active"));
         assert_eq!(
             rows.iter().map(OutputRow::identity).collect::<Vec<_>>(),
-            [Some("active"), Some("cast-id"), Some("unknown")]
+            [Some("active"), Some("speaker-id"), Some("unknown")]
         );
         rank_outputs(&mut rows, &history, Some("bob"), Some("active"));
         assert_eq!(
             rows.iter().map(OutputRow::identity).collect::<Vec<_>>(),
-            [Some("active"), Some("unknown"), Some("cast-id")]
+            [Some("active"), Some("unknown"), Some("speaker-id")]
         );
-    }
-
-    #[test]
-    fn a_same_named_cast_at_another_address_cannot_inherit_a_preference() {
-        let speaker = crate::zeroconf::Receiver {
-            name: "Z room".into(),
-            device_id: Some("same-name-id".into()),
-            address: "192.0.2.1".parse().unwrap(),
-            port: 8009,
-            path: "/".into(),
-            cast: true,
-        };
-        let other = crate::zeroconf::Receiver {
-            address: "192.0.2.2".parse().unwrap(),
-            ..speaker.clone()
-        };
-        let mut history = crate::device_history::DeviceHistory::default();
-        history.record("alice", &speaker.preference_key().unwrap());
-        history.record("alice", "same-name-id");
-        let mut rows = vec![
-            OutputRow::Receiver(other),
-            OutputRow::Device(Device {
-                id: Some("phone".into()),
-                name: "A phone".into(),
-                ..Default::default()
-            }),
-            OutputRow::Receiver(speaker),
-        ];
-        rank_outputs(&mut rows, &history, Some("alice"), None);
-        assert!(
-            matches!(&rows[0], OutputRow::Receiver(row) if row.address == "192.0.2.1".parse::<std::net::IpAddr>().unwrap())
-        );
-        assert_eq!(rows[1].identity(), Some("phone"));
     }
 
     #[test]
@@ -716,7 +678,6 @@ mod tests {
             address: "127.0.0.1".parse().unwrap(),
             port: 80,
             path: "/".into(),
-            cast: false,
         };
         let mut device = Device {
             id: Some("living-room".into()),

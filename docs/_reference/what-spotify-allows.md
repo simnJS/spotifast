@@ -168,10 +168,6 @@ clients. Spotifast uses its session for:
   2024 cannot read a category's playlists there, so there is no fallback:
   without local playback signed in, Search says so under its recent
   searches.
-- **Google Cast speakers and groups.** librespot has no Cast sender, so
-  Spotifast starts Spotify's receiver on the device itself. The session then
-  obtains a token for that receiver, as Spotify's own apps do. See
-  [how it connects](/how-it-connects/#google-cast-devices).
 
 ### Private requests
 

@@ -1094,8 +1094,6 @@ pub enum Event {
         name: String,
         id: String,
     },
-    /// Cast advertisements ready before the final browse/probe reconciliation.
-    ReceiversProgress(crate::zeroconf::ReceiverUpdates),
     /// The login registration after `request`: what the system has now, or
     /// why the change failed.
     Autostart {
@@ -2033,27 +2031,6 @@ struct Worker {
     /// The user asked to set up playback and the saved grant is being tried
     /// first. Only Spotify rejecting it opens the browser.
     authorize_if_rejected: bool,
-}
-
-/// A failed Connect probe setup must still reconcile departed provisional rows.
-fn receiver_snapshot(
-    receivers: Vec<crate::zeroconf::Receiver>,
-    resolve: impl FnOnce(
-        Vec<crate::zeroconf::Receiver>,
-    ) -> anyhow::Result<Vec<crate::zeroconf::Receiver>>,
-) -> Vec<crate::zeroconf::Receiver> {
-    let cast = receivers
-        .iter()
-        .filter(|receiver| receiver.cast)
-        .cloned()
-        .collect();
-    match resolve(receivers) {
-        Ok(receivers) => receivers,
-        Err(error) => {
-            log::debug!("no receivers found on the network: {error}");
-            cast
-        }
-    }
 }
 
 impl Worker {
@@ -4433,21 +4410,15 @@ impl Worker {
         let events = self.events.clone();
         let waker = self.waker.clone();
         let connect = Arc::clone(&self.connect);
-        let updates = crate::zeroconf::ReceiverUpdates::default();
         self.receiver_discovery =
             Some(tokio::task::spawn_blocking(
-                move || match crate::zeroconf::discover_with_updates(
-                    std::time::Duration::from_secs(3),
-                    |receivers| {
-                        if updates.publish(receivers) {
-                            let _ = events.send(Event::ReceiversProgress(updates.clone()));
-                            waker.wake();
-                        }
-                    },
-                )
-                .map(|receivers| receiver_snapshot(receivers, crate::zeroconf::resolve_receivers))
-                {
+                move || match crate::zeroconf::discover(std::time::Duration::from_secs(3)) {
                     Ok(receivers) => {
+                        let receivers = crate::zeroconf::resolve_receivers(receivers)
+                            .unwrap_or_else(|error| {
+                                log::debug!("no receivers found on the network: {error}");
+                                Vec::new()
+                            });
                         connect.remember(&receivers);
                         let _ = events.send(Event::Receivers(receivers));
                         waker.wake();
@@ -4459,9 +4430,6 @@ impl Worker {
 
     /// Sends the stored playback credential to a receiver so it can sign in.
     fn activate_receiver(&self, receiver: crate::zeroconf::Receiver) {
-        if receiver.cast {
-            return self.activate_cast(receiver);
-        }
         let events = self.events.clone();
         let waker = self.waker.clone();
         let credentials = self
@@ -4495,37 +4463,6 @@ impl Worker {
                 }
                 crate::zeroconf::add_user(&http, &receiver, &info, &credentials, "Spotifast")
                     .map_err(|error| error.to_string())
-            })();
-            let _ = events.send(Event::ReceiverActivated { name, result });
-            waker.wake();
-        });
-    }
-
-    /// Starts Spotify on a Google Cast device and signs it in with a token
-    /// that this session obtains for the device's Spotify client.
-    fn activate_cast(&self, receiver: crate::zeroconf::Receiver) {
-        let events = self.events.clone();
-        let waker = self.waker.clone();
-        let session = self
-            .engine
-            .as_ref()
-            .map(|engine| engine.session().clone())
-            .filter(|session| same_account(&session.username(), self.api.account().as_ref()));
-        let lease = self.credentials.lease(CredentialSlot::Playback);
-        let runtime = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || {
-            let name = receiver.name.clone();
-            let result = (|| -> Result<(), String> {
-                let session = session.ok_or_else(|| "Enable playback on this computer first, so there is an account to hand over".to_string())?;
-                crate::cast::start(receiver.address, receiver.port, &name, |client, device| {
-                    let token =
-                        runtime.block_on(crate::cast::device_token(&session, client, device))?;
-                    if !lease.current() {
-                        anyhow::bail!("Sign-in changed before receiver activation.");
-                    }
-                    Ok(token)
-                })
-                .map_err(|error| format!("{error:#}"))
             })();
             let _ = events.send(Event::ReceiverActivated { name, result });
             waker.wake();
@@ -8100,29 +8037,6 @@ fn playback_credentials(account: Option<AccountId>, access_token: String) -> Opt
 #[cfg(test)]
 mod authorization_tests {
     #[test]
-    fn failed_connect_resolution_keeps_only_current_cast_results() {
-        let cast = crate::zeroconf::Receiver {
-            name: "Current Cast".into(),
-            device_id: Some("cast".into()),
-            address: "192.0.2.1".parse().unwrap(),
-            port: 8009,
-            path: "/".into(),
-            cast: true,
-        };
-        let connect = crate::zeroconf::Receiver {
-            cast: false,
-            ..cast.clone()
-        };
-        let final_rows = receiver_snapshot(vec![connect, cast.clone()], |_| {
-            Err(anyhow::anyhow!("HTTP client initialization failed"))
-        });
-        assert_eq!(final_rows, [cast]);
-        // A service removed during the browse must not survive through progress.
-        assert!(receiver_snapshot(Vec::new(), |_| Err(anyhow::anyhow!("failed"))).is_empty());
-        assert!(receiver_snapshot(final_rows, |_| Ok(Vec::new())).is_empty());
-    }
-
-    #[test]
     fn opening_the_picker_again_does_not_start_a_second_receiver_scan() {
         let (runtime, mut worker, _) = worker("coalesce-receiver-scan");
         let _entered = runtime.enter();
@@ -8625,7 +8539,6 @@ mod authorization_tests {
             address: "127.0.0.1".parse().unwrap(),
             port: 1400,
             path: "/spotifyzc".into(),
-            cast: false,
         }]);
         assert_eq!(worker.connect.restricted_target(None), None);
         assert_eq!(worker.connect.restricted_target(Some("sonos")), None);
