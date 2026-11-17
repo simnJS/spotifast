@@ -5797,11 +5797,9 @@ impl App {
                     self.mark_settings_dirty();
                 }
             }
-            crate::stats_api::Update::Disconnected(_) => {
-                if self.settings.stats_server.connected {
-                    self.settings.stats_server.connected = false;
-                    self.mark_settings_dirty();
-                }
+            crate::stats_api::Update::Disconnected(_) if self.settings.stats_server.connected => {
+                self.settings.stats_server.connected = false;
+                self.mark_settings_dirty();
             }
             _ => {}
         }
