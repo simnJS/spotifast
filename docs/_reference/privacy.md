@@ -20,7 +20,8 @@ current release.
   Linux. On Windows a copy encrypted for your Windows account also stays in
   the data folder, for when Credential Manager loses it. Your Spotify
   password never passes through Spotifast; you sign in on Spotify's own
-  pages. A proxy password, if you set one, uses the same store.
+  pages. A proxy password, if you set one, uses the same store, and so does
+  a statistics server's token.
 - **Settings and history.** Settings, window positions, recent plays, the
   last session and themes live in the config
   directory. A copy started from the Windows ZIP keeps them, its state and
@@ -61,6 +62,18 @@ Spotifast connects only to the services below.
   20-second lookup budget, respecting `Retry-After`; search can recover when
   the exact lookup is temporarily unavailable. A failed lookup can use older
   cached lyrics, but never caches an outage as a missing transcription.
+- **A statistics server, if you connect one.** **Settings → Statistics
+  server** can connect Spotifast to a self-hosted
+  [spotifast-stats-api](https://github.com/simnJS/spotifast-stats-api)
+  server, `https://spotapi.simnjs.fr` unless you type another address.
+  Nothing goes to it until you connect. You sign in on its page in your
+  browser, where Spotify asks you to approve it; the server then reads your
+  listening from Spotify itself. Spotifast reads back the plays it recorded,
+  its status and the account's display name, and sends it the streaming
+  history you import on the Stats page. The token it issues stays in the
+  system credential store and is never written to the log. **Disconnect**
+  forgets it here and revokes it on the server. See
+  [How It Connects](/how-it-connects/#statistics-server).
 - **GitHub.** Once a day, Spotifast asks GitHub for the latest release. You
   can turn automatic checks off in Settings. Downloading an update also
   fetches files from GitHub. No Spotify data is

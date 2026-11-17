@@ -1,4 +1,5 @@
-//! Durable Spotify grants and proxy passwords in the platform credential store.
+//! Durable Spotify grants, proxy passwords and the statistics server's
+//! token in the platform credential store.
 //!
 //! All native calls run on one dedicated thread. A locked store cannot hold
 //! the UI, command loop, or runtime shutdown hostage. Generation checks reject
@@ -30,16 +31,19 @@ pub enum Slot {
     Playback,
     Proxy,
     Soloist,
+    /// The statistics server's address and token ([`crate::stats_api`]).
+    StatsServer,
 }
 
 impl Slot {
     pub const SPOTIFY: [Self; 3] = [Self::Shared, Self::Personal, Self::Playback];
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Shared,
         Self::Personal,
         Self::Playback,
         Self::Proxy,
         Self::Soloist,
+        Self::StatsServer,
     ];
     pub(crate) fn index(self) -> usize {
         self as usize
@@ -51,6 +55,7 @@ impl Slot {
             Self::Playback => "playback",
             Self::Proxy => "proxy-password",
             Self::Soloist => "soloist-key",
+            Self::StatsServer => "stats-server",
         }
     }
 }
@@ -62,6 +67,7 @@ pub enum Grant {
     Playback(Credentials),
     Proxy(ProxyPassword),
     Soloist(crate::soloist::Key),
+    StatsServer(crate::stats_api::Connection),
 }
 
 /// No Debug implementation: the password is usable, and the username is private.
@@ -105,6 +111,7 @@ impl Grant {
             }
             (Slot::Proxy, Self::Proxy(password)) => password.valid(),
             (Slot::Soloist, Self::Soloist(key)) => key.valid(),
+            (Slot::StatsServer, Self::StatsServer(connection)) => connection.valid(),
             _ => false,
         }
     }
@@ -584,7 +591,7 @@ type Job = Box<dyn FnOnce(&mut dyn ProtectedStore) + Send>;
 struct Inner {
     dirs: AppDirs,
     profile: String,
-    generations: [AtomicU64; 5],
+    generations: [AtomicU64; 6],
     // Held only around the tiny local marker files, never a native store call.
     markers: Mutex<()>,
     jobs: mpsc::SyncSender<Job>,
@@ -793,7 +800,7 @@ impl Store {
     }
 
     fn legacy_paths(&self, slot: Slot) -> Vec<PathBuf> {
-        if slot == Slot::Soloist {
+        if matches!(slot, Slot::Soloist | Slot::StatsServer) {
             return Vec::new();
         }
         if slot == Slot::Proxy {
@@ -806,7 +813,7 @@ impl Store {
             Slot::Personal => dirs.personal_web_token_file(),
             Slot::Playback => dirs.credentials_dir().join("credentials.json"),
             Slot::Proxy => unreachable!("proxy legacy paths handled above"),
-            Slot::Soloist => unreachable!("Soloist has no legacy files"),
+            Slot::Soloist | Slot::StatsServer => unreachable!("no legacy files"),
         };
         let mut paths = vec![path.clone(), path.with_extension("json.tmp")];
         if slot != Slot::Playback {
@@ -1442,6 +1449,38 @@ mod tests {
         })
     }
 
+    fn stats_server() -> Grant {
+        Grant::StatsServer(crate::stats_api::Connection {
+            server: crate::stats_api::DEFAULT_SERVER.into(),
+            token: crate::stats_api::Token::new("dummy-stats-server-token").unwrap(),
+        })
+    }
+
+    /// The statistics server's token is saved and read back like the other
+    /// secrets, and a disconnection keeps it from coming back.
+    #[tokio::test]
+    async fn the_statistics_server_token_round_trips_and_stays_revoked() {
+        let f = Fixture::new();
+        let lease = f.store.lease(Slot::StatsServer);
+        lease.save(stats_server()).await.unwrap();
+        let restarted = f.restart();
+        let loaded = restarted.lease(Slot::StatsServer).load().await.unwrap();
+        assert!(loaded.grant == Some(stats_server()));
+        // A grant of another slot is not one.
+        assert!(!stats_server().valid_for(Slot::Proxy));
+        restarted.revoke(Slot::StatsServer).unwrap();
+        restarted.lease(Slot::StatsServer).delete().await.unwrap();
+        assert!(
+            f.restart()
+                .lease(Slot::StatsServer)
+                .load()
+                .await
+                .unwrap()
+                .grant
+                .is_none()
+        );
+    }
+
     fn write_legacy(path: &Path, grant: &Grant) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let bytes = match grant {
@@ -1449,6 +1488,7 @@ mod tests {
             Grant::Playback(credentials) => serde_json::to_vec(credentials).unwrap(),
             Grant::Proxy(password) => password.password.as_bytes().to_vec(),
             Grant::Soloist(_) => panic!("Soloist has no legacy format"),
+            Grant::StatsServer(_) => panic!("the statistics server has no legacy format"),
         };
         std::fs::write(path, bytes).unwrap();
     }
@@ -1599,6 +1639,7 @@ mod tests {
                 account: "dummy-account".into(),
                 value: "dummy-soloist-key".into(),
             }),
+            stats_server(),
         ];
         for (slot, grant) in Slot::ALL.into_iter().zip(grants.iter()) {
             store.lease(slot).save(grant.clone()).await.unwrap();
@@ -1697,6 +1738,7 @@ mod tests {
                 account: "dummy-account".into(),
                 value: "dummy-soloist-key".into(),
             }),
+            stats_server(),
         ];
         for (slot, grant) in Slot::ALL.into_iter().zip(grants.iter()) {
             store.lease(slot).save(grant.clone()).await.unwrap();

@@ -244,7 +244,9 @@ out, or a reconnection that gives up stops it.
   entries of its own, never moving or deleting the installed copy's
   ([portable copies](/settings-and-files/#portable-copies)). Librespot retains its reusable credential in
   memory; Spotifast owns persistence. Flatpak can talk to
-  `org.freedesktop.secrets` for this.
+  `org.freedesktop.secrets` for this. A [statistics
+  server](#statistics-server)'s token, when one is connected, is kept there
+  too.
   Version 0.7.1 still uses the older unencrypted files.
   See [migration, sign-out, and storage protection](/settings-and-files/).
 - Downloaded audio and artwork, in the cache directory, within the budget
@@ -261,7 +263,8 @@ out, or a reconnection that gives up stops it.
   prefixes refresh through the existing Web API grant, one page at a time,
   while the saved rows remain visible. Manual refresh starts immediately.
   Like and Unlike are kept over lagging reads until Spotify confirms them.
-- Spotifast has no telemetry, analytics, or hosted service. When the lyrics
+- Spotifast has no telemetry, analytics, or hosted service; it talks to a
+  [statistics server](#statistics-server) only once you connect one. When the lyrics
   panel is open and neither Spotify nor a local file has lyrics, it sends
   the track's artist, title, album, and length to
   [lrclib.net](https://lrclib.net). It also checks
@@ -453,7 +456,8 @@ remaining shows for that refresh; the shelf keeps what it showed before.
 ## Listening stats
 
 Spotifast keeps a log of what the account plays, for its listening stats,
-on this computer only. Nothing is sent anywhere but Spotify's own Web API.
+on this computer only. Nothing is sent anywhere but Spotify's own Web API,
+unless you connect a [statistics server](#statistics-server).
 
 - **Logger.** At sign-in, after the computer wakes, and every twenty
   minutes while Spotifast runs, it asks for
@@ -476,12 +480,69 @@ on this computer only. Nothing is sent anywhere but Spotify's own Web API.
 - **Import.** The streaming history Spotify's privacy page sends on request
   (the "Extended streaming history" ZIP, one of its JSON files, or the
   older account data's `StreamingHistory_music_*.json`) is read from the
-  disk and never uploaded.
+  disk. It is uploaded only to a connected statistics server, as described
+  below.
 
 The log is stored per account under the state folder, in `stats/`, readable
 by the user only: segments of one JSON line per play, each written whole and
-atomically, and a `metadata.json` cache. A play Spotify, the local history
-and an import all report is kept once.
+atomically, and a `metadata.json` cache. A play Spotify, the local history,
+an import and a statistics server all report is kept once.
+
+### Statistics server
+
+**Settings → Statistics server** can connect Spotifast to a self-hosted
+[spotifast-stats-api](https://github.com/simnJS/spotifast-stats-api)
+server, `https://spotapi.simnjs.fr` unless you type another address. The
+server reads the account's recently played every two minutes or so, day
+and night, even while this computer is off, so it catches plays that
+Spotify's fifty-play limit would drop between two of the logger's reads,
+and it keeps the history imported into it. Nothing is sent to it until you
+connect. Only `https://` addresses are accepted, except a server on this
+computer (`http://127.0.0.1`, `http://localhost`).
+
+- **Connecting.** **Connect** listens on a free port of this computer
+  (`127.0.0.1`, chosen by the system) and opens
+  `{server}/auth/login?app_redirect=http://127.0.0.1:{port}/callback&app_state={random}`
+  in the browser. After Spotify's consent, the server sends the browser back
+  to that address with an API token and the same state; any other request,
+  or another state, is ignored. The page then says Spotifast is connected and
+  the tab can be closed. Spotifast stops waiting after five minutes. For a
+  server that cannot send the browser back, **Paste a token** takes the token
+  its own login page shows. Either way, Spotifast checks the token with
+  `GET /me` before keeping it.
+- **The token** is kept in the system credential store, like the Spotify
+  grants, never in `settings.json` and never in the log. `settings.json`
+  keeps only the address and whether a connection is made, so the token is
+  read back at start. It travels in the `Authorization` header of each
+  request to the server, never in an address.
+- **Pulling plays.** At start, right after connecting, at every stats
+  refresh (every twenty minutes, after waking, and **Sync now**), Spotifast
+  asks `GET /me` and `GET /me/status`, then reads `GET /history` newest
+  first, two hundred plays a page, until it meets the newest play it pulled
+  before. Where it stopped is kept beside the account's play log, in
+  `stats-server.json`. When the server holds more plays than the pulls
+  brought, because history was imported into it meanwhile, the next pull
+  reads them all once more and the merge drops what the log already has.
+  The plays go into the same log, as their own source, and merge with the
+  logger's, the local history's and the imports' like any other: a play
+  the server read from Spotify has Spotify's `played_at` and the track's
+  length, like the logger's; one imported into it ends on a whole second and
+  carries the time really played, which replaces an estimate. The server's
+  account must be the Spotify account signed in here: the plays of another
+  account are never added.
+- **Importing.** While connected, the file chosen on the Stats page is also
+  sent to `POST /import`, an export ZIP whole (up to 200 MB) or one
+  `Streaming_History_Audio_*.json` file (up to 64 MB). The older
+  `StreamingHistory_music_*.json` files stay on this computer: the server
+  does not read them. The local import happens either way.
+- **Settings** shows the account's display name, when the server last read
+  Spotify, how many plays it holds and when Spotifast last pulled them. The
+  Stats page's import card says **Synced from** the server, with the time of
+  the last pull.
+- **Disconnect** forgets the token here at once and asks the server to
+  revoke it (`GET /auth/tokens`, then `DELETE /auth/token/{id}`). Plays
+  already pulled stay in the local stats. A token the server refuses is
+  forgotten the same way, and Settings asks to connect again.
 
 ## Album queueing
 

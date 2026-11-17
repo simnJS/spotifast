@@ -1,7 +1,7 @@
 //! Local listening statistics, in the manner of stats.fm, kept on this
 //! computer only.
 //!
-//! Two sources feed one per-account log of plays:
+//! These sources feed one per-account log of plays:
 //!
 //! - the logger ([`logger`]), which reads `/me/player/recently-played` every
 //!   twenty minutes, at start and after waking, and so catches the plays of
@@ -9,7 +9,10 @@
 //!   that Spotify's answer leaves out;
 //! - an import ([`import`]) of the "Extended streaming history" ZIP (or its
 //!   JSON files, or the older account-data `StreamingHistory_music_*.json`)
-//!   Spotify's privacy page sends on request.
+//!   Spotify's privacy page sends on request;
+//! - when one is connected in Settings, the statistics server
+//!   ([`crate::stats_api`]), which reads recently-played every few minutes
+//!   even while this computer is off, pulled at each refresh.
 //!
 //! The log lives under the state folder ([`store`]), one directory per
 //! account, as append-only segments of JSON lines that are each written
@@ -56,6 +59,10 @@ pub enum Source {
     Spotify,
     /// A play Spotifast itself saw ([`crate::history`]).
     Local,
+    /// The statistics server's `/history` ([`crate::stats_api`]): what it
+    /// read from recently-played, with the track's duration for the time
+    /// played, and what was imported into it, with the time played.
+    Server,
 }
 
 impl Source {
@@ -66,7 +73,9 @@ impl Source {
             Self::Extended => 0,
             Self::Account => 1,
             Self::Spotify => 2,
-            Self::Local => 3,
+            // Spotify's own `played_at`, as the logger's, but fewer details.
+            Self::Server => 3,
+            Self::Local => 4,
         }
     }
 
@@ -187,6 +196,8 @@ pub enum Update {
     },
     ImportProgress(ImportProgress),
     ImportFinished(Result<ImportSummary, String>),
+    /// About the statistics server.
+    Server(crate::stats_api::Update),
 }
 
 /// The listening stats as the interface holds them (`app.stats`).
@@ -200,6 +211,8 @@ pub struct StatsState {
     pub importing: Option<ImportProgress>,
     /// How the last import ended.
     pub last_import: Option<Result<ImportSummary, String>>,
+    /// The statistics server, when one is connected.
+    pub server: crate::stats_api::State,
 }
 
 impl StatsState {
@@ -231,6 +244,7 @@ impl StatsState {
                 self.importing = None;
                 self.last_import = Some(result);
             }
+            Update::Server(update) => self.server.receive(update),
         }
     }
 

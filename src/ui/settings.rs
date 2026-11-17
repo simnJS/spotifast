@@ -1391,6 +1391,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
     }
 
+    if stats_server_section(app, ui, &needle) {
+        any_visible = true;
+    }
+
     let proxy = gettext(locale, "Proxy");
     let proxy_rows = [RowText::new(
         gettext(locale, "Mode, host, port, username and password"),
@@ -1793,6 +1797,312 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if changed {
         app.actions.push(Action::SettingsChanged);
     }
+}
+
+/// How long ago `at_ms` was, for the statistics server's figures.
+fn ago(locale: crate::i18n::Locale, now_ms: i64, at_ms: i64) -> String {
+    let minutes = (now_ms - at_ms).max(0) / 60_000;
+    if minutes < 1 {
+        gettext(locale, "just now").into_owned()
+    } else if minutes < 60 {
+        // Translators: {minutes} is a number of minutes.
+        gettext(locale, "{minutes} min ago").replace("{minutes}", &minutes.to_string())
+    } else if minutes < 48 * 60 {
+        // Translators: {hours} is a number of hours.
+        gettext(locale, "{hours} h ago").replace("{hours}", &(minutes / 60).to_string())
+    } else {
+        // Translators: {days} is a number of days.
+        gettext(locale, "{days} days ago").replace("{days}", &(minutes / (24 * 60)).to_string())
+    }
+}
+
+/// Where the statistics server stands: when it last read Spotify, how
+/// many plays it holds, and the last pull.
+fn stats_server_status(state: &crate::stats_api::State, locale: crate::i18n::Locale) -> String {
+    let now = jiff::Timestamp::now().as_millisecond();
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(status) = &state.status {
+        parts.push(match status.last_poll_ok_at {
+            // Translators: {ago} is how long ago, like "3 min ago".
+            Some(at) => {
+                gettext(locale, "Read Spotify {ago}").replace("{ago}", &ago(locale, now, at))
+            }
+            None => gettext(locale, "Has not read Spotify yet").into_owned(),
+        });
+        let plays = u64::try_from(status.plays_count).unwrap_or(0);
+        parts.push(
+            ngettext(
+                locale,
+                // Translators: {count} is a number of plays the statistics server holds.
+                "{count} play",
+                "{count} plays",
+                u32::try_from(plays).unwrap_or(u32::MAX),
+            )
+            .replace("{count}", &crate::util::format_count(plays)),
+        );
+        if let Some(error) = status
+            .last_error
+            .as_deref()
+            .filter(|error| !error.is_empty())
+        {
+            // Translators: {error} is the statistics server's own message.
+            parts.push(gettext(locale, "Its last read failed: {error}").replace("{error}", error));
+        }
+    }
+    if let Some(synced) = &state.synced {
+        // Translators: {ago} is how long ago, like "3 min ago".
+        parts.push(
+            gettext(locale, "Synced {ago}").replace("{ago}", &ago(locale, now, synced.at_ms)),
+        );
+    }
+    if parts.is_empty() {
+        gettext(locale, "Sync to see where the server stands.").into_owned()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+/// The statistics server: its address, connecting through the browser or
+/// with a pasted token, and where it stands once connected. Whether the
+/// section showed.
+fn stats_server_section(app: &mut App, ui: &mut egui::Ui, needle: &str) -> bool {
+    use crate::stats_api::Phase;
+    let palette = app.palette;
+    let locale = app.locale;
+    let state = app.stats.server.clone();
+    let title = gettext(locale, "Statistics server");
+    let host = state
+        .server
+        .as_deref()
+        .map(crate::stats_api::host)
+        .unwrap_or_default()
+        .to_owned();
+    let (connection, connection_detail) = match state.phase {
+        Phase::Disconnected => (
+            gettext(locale, "Not connected").into_owned(),
+            gettext(
+                locale,
+                "Connect opens the server's sign-in in your browser, where Spotify asks you to approve it.",
+            )
+            .into_owned(),
+        ),
+        Phase::Authorizing => (
+            gettext(locale, "Waiting for your browser").into_owned(),
+            gettext(
+                locale,
+                "Approve the server on Spotify's page. Spotifast stops waiting after five minutes.",
+            )
+            .into_owned(),
+        ),
+        Phase::Connecting => (
+            gettext(locale, "Connecting…").into_owned(),
+            // Translators: {server} is the statistics server's address.
+            gettext(locale, "Checking the connection with {server}.").replace("{server}", &host),
+        ),
+        Phase::Connected => (
+            match state
+                .account
+                .as_ref()
+                .map(|account| account.display_name.as_str())
+                .filter(|name| !name.is_empty())
+            {
+                // Translators: {name} is the Spotify account's display name.
+                Some(name) => gettext(locale, "Connected as {name}").replace("{name}", name),
+                None => gettext(locale, "Connected").into_owned(),
+            },
+            // Translators: {server} is the statistics server's address.
+            gettext(locale, "Your listening stats add the plays {server} records.")
+                .replace("{server}", &host),
+        ),
+    };
+    let rows = [
+        RowText::new(
+            gettext(locale, "Server address"),
+            gettext(
+                locale,
+                "A Spotifast statistics server reads what you play every few minutes, even while this computer is off, and keeps the history imported into it.",
+            ),
+        ),
+        RowText::new(connection, connection_detail),
+        RowText::new(
+            gettext(locale, "On the server"),
+            stats_server_status(&state, locale),
+        )
+        .when(state.phase == Phase::Connected),
+        RowText::new(
+            gettext(locale, "Paste a token"),
+            gettext(
+                locale,
+                "For a server that cannot send the browser back: sign in on its page, then paste the token it shows.",
+            ),
+        )
+        .when(state.phase == Phase::Disconnected),
+    ];
+    if !section_matches(needle, &title, &rows) {
+        return false;
+    }
+    ui.push_id("stats-server-settings", |ui| {
+        section(ui, &palette, &title, |ui| {
+            if rows[0].matches(needle, &title) {
+                widgets::setting_note(ui, &palette, &rows[0].title, &rows[0].description);
+                let address = gettext(locale, "Address");
+                // The address of a connection stays as it is until it is undone.
+                let edited = ui
+                    .add_enabled_ui(state.phase == Phase::Disconnected, |ui| {
+                        widgets::labeled_field(
+                            ui,
+                            &palette,
+                            locale,
+                            &address,
+                            &mut app.settings.stats_server.url,
+                            crate::stats_api::DEFAULT_SERVER,
+                            false,
+                        )
+                        .changed()
+                    })
+                    .inner;
+                if edited {
+                    app.mark_settings_dirty();
+                }
+                ui.add_space(10.0);
+            }
+            filtered_row(ui, &palette, needle, &title, &rows[1], |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    match state.phase {
+                        Phase::Disconnected => {
+                            if theme::pill_button(ui, &palette, &gettext(locale, "Connect"), true)
+                                .clicked()
+                            {
+                                app.actions.push(Action::ConnectStatsServer);
+                            }
+                        }
+                        Phase::Authorizing => {
+                            if theme::soft_button(
+                                ui,
+                                &palette,
+                                None,
+                                &gettext(locale, "Cancel"),
+                                false,
+                            )
+                            .clicked()
+                            {
+                                app.actions.push(Action::DisconnectStatsServer);
+                            }
+                            theme::spinner(ui, 16.0, palette.accent);
+                        }
+                        Phase::Connecting => {
+                            theme::spinner(ui, 16.0, palette.accent);
+                        }
+                        Phase::Connected => {
+                            if theme::soft_button(
+                                ui,
+                                &palette,
+                                None,
+                                &gettext(locale, "Disconnect"),
+                                false,
+                            )
+                            .clicked()
+                            {
+                                app.actions.push(Action::DisconnectStatsServer);
+                            }
+                        }
+                    }
+                });
+            });
+            filtered_row(ui, &palette, needle, &title, &rows[2], |ui| {
+                let syncing = app.stats.index.is_loading();
+                let sync = ui
+                    .add_enabled_ui(!syncing, |ui| {
+                        theme::soft_button(
+                            ui,
+                            &palette,
+                            Some(Icon::Refresh),
+                            &gettext(locale, "Sync now"),
+                            false,
+                        )
+                    })
+                    .inner;
+                if sync.clicked() {
+                    app.actions.push(Action::RefreshStats);
+                }
+            });
+            if rows[3].matches(needle, &title) {
+                widgets::setting_note(ui, &palette, &rows[3].title, &rows[3].description);
+                let token_id = ui.make_persistent_id("stats-server-token");
+                let mut token = ui
+                    .data(|data| data.get_temp::<String>(token_id))
+                    .unwrap_or_default();
+                let field = widgets::labeled_field(
+                    ui,
+                    &palette,
+                    locale,
+                    &gettext(locale, "Token"),
+                    &mut token,
+                    &gettext(locale, "Paste the token"),
+                    true,
+                );
+                let entered =
+                    field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::splat(8.0);
+                    let pasted = crate::stats_api::Token::new(&token);
+                    let used = ui
+                        .add_enabled_ui(pasted.is_some(), |ui| {
+                            theme::soft_button(
+                                ui,
+                                &palette,
+                                None,
+                                &gettext(locale, "Use token"),
+                                false,
+                            )
+                        })
+                        .inner
+                        .clicked();
+                    if (used || entered)
+                        && let Some(pasted) = pasted
+                    {
+                        app.actions.push(Action::PasteStatsServerToken(pasted));
+                        token.clear();
+                    }
+                    if let Ok(server) =
+                        crate::stats_api::normalize_server(&app.settings.stats_server.url)
+                        && theme::soft_button(
+                            ui,
+                            &palette,
+                            Some(Icon::ExternalLink),
+                            &gettext(locale, "Open the sign-in page"),
+                            false,
+                        )
+                        .clicked()
+                    {
+                        app.actions
+                            .push(Action::OpenUrl(format!("{server}/auth/login")));
+                    }
+                });
+                // Kept in memory only, and only until it is used.
+                ui.data_mut(|data| data.insert_temp(token_id, token));
+                ui.add_space(10.0);
+            }
+            if let Some(error) = &state.error {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    theme::icon(ui, Icon::CircleAlert, 16.0, palette.danger);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(error)
+                                .font(theme::regular(13.0))
+                                .color(palette.secondary),
+                        )
+                        .wrap(),
+                    );
+                });
+                ui.add_space(10.0);
+            }
+        });
+    });
+    true
 }
 
 /// The choices for starting with the computer, left to right when side by

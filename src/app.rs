@@ -1528,6 +1528,13 @@ impl App {
         if let Some(folder) = app.settings.local_files_folder() {
             app.backend.send(Command::ScanLocalFiles(folder));
         }
+        // The statistics server's token is in the credential store, which
+        // demo and isolated test runs leave alone like Spotify's grants.
+        if options.restore_sign_in && app.settings.stats_server.connected {
+            let server = app.settings.stats_server.url.clone();
+            app.stats.server.connecting(server.clone());
+            app.backend.send(Command::StatsServerRestore { server });
+        }
         // What was played here is on disk and needs nothing from the
         // network, so the tab has rows before Spotify has answered.
         app.rebuild_recents();
@@ -2890,6 +2897,9 @@ impl App {
                 Event::Auth(status) => self.handle_auth(status),
                 Event::Playback(status) => self.handle_playback(status),
                 Event::Stats(update) => {
+                    if let crate::stats::Update::Server(server) = &update {
+                        self.on_stats_server(server);
+                    }
                     let account = self.user_id().map(str::to_owned);
                     self.stats.receive(update, account.as_deref());
                 }
@@ -5772,6 +5782,52 @@ impl App {
                 crate::account_cache::Cache::new(account.to_owned(), playlists.clone()),
             ));
         }
+    }
+
+    /// Keeps Settings in step with the statistics server: a connection is
+    /// restored at the next start, one that is gone is not.
+    fn on_stats_server(&mut self, update: &crate::stats_api::Update) {
+        match update {
+            crate::stats_api::Update::Connected { server, .. }
+            | crate::stats_api::Update::Restored { server } => {
+                let saved = &mut self.settings.stats_server;
+                if !saved.connected || saved.url != *server {
+                    saved.connected = true;
+                    saved.url.clone_from(server);
+                    self.mark_settings_dirty();
+                }
+            }
+            crate::stats_api::Update::Disconnected(_) => {
+                if self.settings.stats_server.connected {
+                    self.settings.stats_server.connected = false;
+                    self.mark_settings_dirty();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Connects to the statistics server typed in Settings: through the
+    /// browser, or with a pasted token. Settings shows the step at once.
+    fn connect_stats_server(&mut self, token: Option<crate::stats_api::Token>) {
+        let server = self.settings.stats_server.url.trim().to_owned();
+        if token.is_some() {
+            self.stats.server.connecting(server.clone());
+        } else {
+            self.stats.server.authorizing(server.clone());
+        }
+        self.backend
+            .send(Command::StatsServerConnect { server, token });
+    }
+
+    /// Forgets the statistics server; Settings shows it gone at once.
+    fn disconnect_stats_server(&mut self) {
+        self.stats.server.disconnect();
+        if self.settings.stats_server.connected {
+            self.settings.stats_server.connected = false;
+            self.mark_settings_dirty();
+        }
+        self.backend.send(Command::StatsServerDisconnect);
     }
 
     /// Asks the backend to bring the signed-in account's listening stats up
@@ -13644,6 +13700,9 @@ impl App {
                 self.backend.send(Command::ImportStreamingHistory(path));
             }
             Action::ImportStreamingHistory(None) => self.backend.choose_streaming_history(),
+            Action::ConnectStatsServer => self.connect_stats_server(None),
+            Action::PasteStatsServerToken(token) => self.connect_stats_server(Some(token)),
+            Action::DisconnectStatsServer => self.disconnect_stats_server(),
             Action::ForgetLocalFilesFolder => self.set_local_files_folder(None),
             Action::OpenLocalFilesFolder => {
                 if let Some(folder) = self.settings.local_files_folder() {

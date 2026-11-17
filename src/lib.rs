@@ -54,6 +54,7 @@ pub mod single_instance;
 pub mod sink;
 pub mod soloist;
 pub mod stats;
+pub mod stats_api;
 mod storage;
 pub mod theme;
 pub mod thumbbar;

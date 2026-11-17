@@ -19,6 +19,8 @@ Spotifast follows each platform's conventions. On Linux:
 | Legacy personal Web API grant | `~/.local/state/spotifast/personal_web_api_token.json` | Removed after migration or sign-out |
 | Legacy playback credential | `~/.local/state/spotifast/credentials/` | Removed after migration or sign-out |
 | Proxy password | System credential store | Clear the password and apply the manual proxy settings |
+| Statistics server token | System credential store | Use Disconnect in Settings > Statistics server |
+| Statistics server cursor | `~/.local/state/spotifast/stats/<account>/stats-server.json` | Yes, the next pull reads the server's whole history again |
 | Legacy proxy password | `~/.local/state/spotifast/proxy_password` | Removed after protected migration |
 | Last session | `~/.local/state/spotifast/session.json` | Yes |
 | Play history | `~/.local/state/spotifast/history.json` | Yes |
@@ -391,6 +393,7 @@ main fields are:
 | `eq_user_presets` | `[]` | Equalizer presets you saved, each with a `name`, its `preamp_db` and its ten `bands_db`, listed after the built-in presets |
 | `balance` | `0` | Left to right, -1 to 1, for local playback |
 | `mono` | `false` | Play both channels the same |
+| `stats_server` | `{"url": "https://spotapi.simnjs.fr", "connected": false}` | The [statistics server](/how-it-connects/#statistics-server): its address, and whether Spotifast is connected to it. The token is in the system credential store, never here. Older files without this field are not connected |
 | `keep_playing_in_background` | `true` | Close to tray |
 | `tray_icon` | `colour` | Linux and Windows: the tray icon in `colour`, or in `white` or `black` to match the panel or taskbar. macOS ignores it: the menu bar draws its icon black or white to match itself |
 | `mac_notch_widget` | `false` | Show interactive Now Playing widget when hovering over the MacBook notch (macOS only) |

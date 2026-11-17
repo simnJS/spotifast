@@ -939,17 +939,29 @@ fn import_card(app: &mut App, ui: &mut Ui, view: &mut View) {
                 theme::bold(20.0),
                 palette.text,
             );
+            let explanation = if app.stats.server.connected().is_some() {
+                tr(
+                    locale,
+                    "Spotify keeps every play since your account began. On your Spotify \
+                     account page, open Privacy, ask to download your data and tick \
+                     \"Extended streaming history\". Spotify emails the ZIP within a few \
+                     days. Choose it (or its JSON files) here: it is read on this computer \
+                     and sent to your statistics server too.",
+                )
+            } else {
+                tr(
+                    locale,
+                    "Spotify keeps every play since your account began. On your Spotify \
+                     account page, open Privacy, ask to download your data and tick \
+                     \"Extended streaming history\". Spotify emails the ZIP within a few \
+                     days. Choose it (or its JSON files) here: it stays on this computer.",
+                )
+            };
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(tr(
-                        locale,
-                        "Spotify keeps every play since your account began. On your Spotify \
-                         account page, open Privacy, ask to download your data and tick \
-                         \"Extended streaming history\". Spotify emails the ZIP within a few \
-                         days. Choose it (or its JSON files) here: it stays on this computer.",
-                    ))
-                    .font(theme::regular(13.5))
-                    .color(palette.secondary),
+                    egui::RichText::new(explanation)
+                        .font(theme::regular(13.5))
+                        .color(palette.secondary),
                 )
                 .wrap()
                 .selectable(false),
@@ -1011,12 +1023,116 @@ fn import_card(app: &mut App, ui: &mut Ui, view: &mut View) {
                     theme::text(ui, text, theme::regular(13.5), palette.secondary);
                 }
             });
+            upload_line(app, ui);
             ui.add_space(10.0);
             ui.separator();
             ui.add_space(6.0);
             sync_line(app, ui, view);
+            server_line(app, ui);
         });
     ui.add_space(24.0);
+}
+
+/// How sending the imported history to the statistics server goes.
+fn upload_line(app: &App, ui: &mut Ui) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let state = &app.stats.server;
+    let host = state
+        .server
+        .as_deref()
+        .map(crate::stats_api::host)
+        .unwrap_or_default();
+    let (icon, color, text) = if state.uploading {
+        (
+            None,
+            palette.accent,
+            // Translators: {server} is the statistics server's address.
+            tr(locale, "Sending it to {server}…").replace("{server}", host),
+        )
+    } else {
+        match &state.uploaded {
+            Some(Ok(plays)) => (
+                Some(Icon::CircleCheck),
+                palette.accent,
+                crate::i18n::ngettext(
+                    locale,
+                    // Translators: {server} is the statistics server's address.
+                    "{server} took in {count} new play",
+                    "{server} took in {count} new plays",
+                    u32::try_from(*plays).unwrap_or(u32::MAX),
+                )
+                .replace("{server}", host)
+                .replace("{count}", &summary::count(*plays)),
+            ),
+            Some(Err(error)) => (Some(Icon::CircleAlert), palette.danger, error.clone()),
+            None => return,
+        }
+    };
+    ui.horizontal_wrapped(|ui| {
+        match icon {
+            Some(icon) => {
+                theme::icon(ui, icon, 16.0, color);
+            }
+            None => {
+                theme::spinner(ui, 16.0, color);
+            }
+        }
+        theme::text(ui, text, theme::regular(13.5), palette.secondary);
+    });
+}
+
+/// Where the plays of the statistics server come from, and when they last
+/// came, while one is connected.
+fn server_line(app: &App, ui: &mut Ui) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let state = &app.stats.server;
+    let Some(server) = state.connected() else {
+        return;
+    };
+    let host = crate::stats_api::host(server);
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        let text = match (&state.synced, &state.error) {
+            (_, Some(error)) => {
+                theme::icon(ui, Icon::CircleAlert, 14.0, palette.danger);
+                error.clone()
+            }
+            (Some(synced), None) => {
+                theme::icon(ui, Icon::CircleCheck, 14.0, palette.secondary);
+                format!(
+                    "{} · {}",
+                    // Translators: {server} is the statistics server's address.
+                    tr(locale, "Synced from {server}").replace("{server}", host),
+                    summary::updated(locale, now_ms() - synced.at_ms)
+                )
+            }
+            (None, None) => {
+                theme::icon(ui, Icon::Refresh, 14.0, palette.secondary);
+                // Translators: {server} is the statistics server's address.
+                tr(locale, "Connected to {server}").replace("{server}", host)
+            }
+        };
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(text)
+                    .font(theme::regular(13.5))
+                    .color(palette.secondary),
+            )
+            .wrap()
+            .selectable(false),
+        );
+    });
+    theme::text(
+        ui,
+        tr(
+            locale,
+            "Your statistics server records what you play every few minutes, even while this computer is off.",
+        ),
+        theme::regular(12.0),
+        palette.dim,
+    );
 }
 
 fn sync_line(app: &mut App, ui: &mut Ui, view: &mut View) {

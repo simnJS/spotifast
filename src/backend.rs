@@ -1008,6 +1008,35 @@ pub enum Command {
         selected:
             std::pin::Pin<Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>>,
     },
+    /// Connect to the statistics server at `server`: through the browser
+    /// when `token` is `None`, else with the token pasted in Settings.
+    StatsServerConnect {
+        server: String,
+        token: Option<crate::stats_api::Token>,
+    },
+    /// Read the saved statistics server connection back, at start.
+    StatsServerRestore {
+        server: String,
+    },
+    /// Forget the statistics server, revoking its token there when it can.
+    StatsServerDisconnect,
+    /// Internal: a new token was checked with the server, for the
+    /// connection attempt `generation`.
+    StatsServerChecked {
+        generation: u64,
+        result: Result<(crate::stats_api::Connection, crate::stats_api::Me), String>,
+    },
+    /// Internal: the saved connection was read from the credential store.
+    StatsServerRestored {
+        generation: u64,
+        server: String,
+        result: Result<crate::credentials::Loaded, crate::credentials::Error>,
+    },
+    /// Internal: a pull from the statistics server ended.
+    StatsServerSynced {
+        generation: u64,
+        result: Result<crate::stats_api::Synced, crate::stats_api::client::Error>,
+    },
     /// Internal: an audiobook lookup finished for the session it started in.
     AudiobookShowsResolved {
         session_generation: u64,
@@ -1958,6 +1987,13 @@ struct Worker {
     canvas: Arc<crate::canvas::Library>,
     /// The listening stats' open log; refreshes and imports take turns.
     stats: Arc<tokio::sync::Mutex<crate::stats::service::Service>>,
+    /// The statistics server connected to, with its token.
+    stats_server: Option<crate::stats_api::Connection>,
+    /// Bumped by each connection, restoration and disconnection of the
+    /// statistics server, so an answer about an older one changes nothing.
+    stats_server_generation: u64,
+    /// A browser sign-in to the statistics server in flight.
+    stats_server_login: Option<tokio::task::AbortHandle>,
     connect: Arc<crate::restricted_device::Controller>,
     background_session: Arc<tokio::sync::Semaphore>,
     art: ArtLoader,
@@ -2061,6 +2097,9 @@ impl Worker {
             made_for_you: Arc::new(crate::made_for_you::MadeForYou::new(http.clone())),
             new_releases: Arc::new(crate::new_releases::NewReleases::new(http.clone())),
             stats: Arc::default(),
+            stats_server: None,
+            stats_server_generation: 0,
+            stats_server_login: None,
             canvas: Arc::new(crate::canvas::Library::new(http.clone())),
             connect: Arc::default(),
             background_session: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -2111,20 +2150,275 @@ impl Worker {
         let history = self.dirs.history_file();
         let stats = Arc::clone(&self.stats);
         let source = StatsWeb(Arc::clone(&self.api));
+        let server = self.stats_server_client();
+        let generation = self.stats_server_generation;
+        let commands = self.commands.clone();
         let events = self.events.clone();
         let waker = self.waker.clone();
         tokio::spawn(async move {
             let result = stats
                 .lock()
                 .await
-                .refresh(&account_id, dir, history, &source)
+                .refresh(&account_id, dir, history, &source, server.as_ref())
                 .await;
             let update = match result {
-                Ok(index) => crate::stats::Update::Loaded { account_id, index },
+                Ok(refreshed) => {
+                    if let Some(result) = refreshed.server {
+                        let _ = commands.send(Command::StatsServerSynced { generation, result });
+                    }
+                    crate::stats::Update::Loaded {
+                        account_id,
+                        index: refreshed.index,
+                    }
+                }
                 Err(error) => crate::stats::Update::Failed { account_id, error },
             };
             let _ = events.send(Event::Stats(update));
             waker.wake();
+        });
+    }
+
+    /// The statistics server's client, while connected.
+    fn stats_server_client(&self) -> Option<crate::stats_api::client::Client> {
+        let connection = self.stats_server.as_ref()?;
+        let http = self.http.client().ok()?;
+        Some(crate::stats_api::client::Client::new(
+            http,
+            connection.server.clone(),
+            connection.token.clone(),
+        ))
+    }
+
+    fn emit_stats_server(&self, update: crate::stats_api::Update) {
+        self.emit(Event::Stats(crate::stats::Update::Server(update)));
+    }
+
+    /// Connects to the statistics server: opens its login page in the
+    /// browser and waits for it to send the browser back with a token, or
+    /// checks a pasted token. A connection attempt replaces the one before.
+    fn connect_stats_server(&mut self, server: String, token: Option<crate::stats_api::Token>) {
+        self.stats_server_generation += 1;
+        let generation = self.stats_server_generation;
+        if let Some(login) = self.stats_server_login.take() {
+            login.abort();
+        }
+        let server = match crate::stats_api::normalize_server(&server) {
+            Ok(server) => server,
+            Err(error) => {
+                self.emit_stats_server(crate::stats_api::Update::Failed(error));
+                return;
+            }
+        };
+        let http = match self.http.client() {
+            Ok(http) => http,
+            Err(error) => {
+                self.emit_stats_server(crate::stats_api::Update::Failed(error));
+                return;
+            }
+        };
+        let commands = self.commands.clone();
+        let task = tokio::spawn(async move {
+            let result = async {
+                let token = match token {
+                    Some(token) => token,
+                    None => {
+                        let login = crate::stats_api::loopback::Login::start(&server)?;
+                        let url = login.url.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Err(error) = crate::opener::open(&url) {
+                                log::warn!("unable to open a browser: {error}");
+                            }
+                        });
+                        login.wait().await?
+                    }
+                };
+                let client =
+                    crate::stats_api::client::Client::new(http, server.clone(), token.clone());
+                let account = client.me().await.map_err(|error| error.to_string())?;
+                Ok::<_, String>((crate::stats_api::Connection { server, token }, account))
+            }
+            .await;
+            let _ = commands.send(Command::StatsServerChecked { generation, result });
+        });
+        self.stats_server_login = Some(task.abort_handle());
+    }
+
+    /// Keeps a connection the server accepted, and pulls its plays.
+    fn on_stats_server_checked(
+        &mut self,
+        generation: u64,
+        result: Result<(crate::stats_api::Connection, crate::stats_api::Me), String>,
+    ) {
+        if generation != self.stats_server_generation {
+            return;
+        }
+        self.stats_server_login = None;
+        match result {
+            Ok((connection, account)) => {
+                self.credentials.invalidate(CredentialSlot::StatsServer);
+                let lease = self.credentials.lease(CredentialSlot::StatsServer);
+                let notice = self.storage_notice(lease.clone());
+                let saving = lease.save(StoredGrant::StatsServer(connection.clone()));
+                tokio::spawn(async move {
+                    if let Err(error) = saving.await {
+                        notice(error);
+                    }
+                });
+                self.emit_stats_server(crate::stats_api::Update::Connected {
+                    server: connection.server.clone(),
+                    account,
+                });
+                self.stats_server = Some(connection);
+                self.refresh_stats();
+            }
+            Err(error) => self.emit_stats_server(crate::stats_api::Update::Failed(error)),
+        }
+    }
+
+    /// Reads the saved connection to `server` back from the credential
+    /// store.
+    fn restore_stats_server(&mut self, server: String) {
+        self.stats_server_generation += 1;
+        let generation = self.stats_server_generation;
+        let lease = self.credentials.lease(CredentialSlot::StatsServer);
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let result = lease.load().await;
+            let _ = commands.send(Command::StatsServerRestored {
+                generation,
+                server,
+                result,
+            });
+        });
+    }
+
+    fn on_stats_server_restored(
+        &mut self,
+        generation: u64,
+        server: String,
+        result: Result<crate::credentials::Loaded, crate::credentials::Error>,
+    ) {
+        if generation != self.stats_server_generation {
+            return;
+        }
+        let saved = match result {
+            Ok(loaded) => {
+                if let Some(error) = loaded.warning {
+                    self.emit(Event::Error(error.to_string()));
+                }
+                match loaded.grant {
+                    Some(StoredGrant::StatsServer(connection)) => Some(connection),
+                    _ => None,
+                }
+            }
+            // A locked store: Settings keeps the connection for the next
+            // start.
+            Err(error) => {
+                self.emit_stats_server(crate::stats_api::Update::Failed(error.to_string()));
+                return;
+            }
+        };
+        let wanted = crate::stats_api::normalize_server(&server).ok();
+        match saved {
+            Some(connection) if wanted.as_deref() == Some(connection.server.as_str()) => {
+                self.emit_stats_server(crate::stats_api::Update::Restored {
+                    server: connection.server.clone(),
+                });
+                self.stats_server = Some(connection);
+                self.refresh_stats();
+            }
+            // No token for that server any more.
+            _ => self.emit_stats_server(crate::stats_api::Update::Disconnected(None)),
+        }
+    }
+
+    /// Forgets the statistics server here, and revokes its token there.
+    fn disconnect_stats_server(&mut self) {
+        self.stats_server_generation += 1;
+        if let Some(login) = self.stats_server_login.take() {
+            login.abort();
+        }
+        if let Some(client) = self.stats_server_client() {
+            // Forgotten here whatever the server answers.
+            tokio::spawn(async move {
+                if let Err(error) = client.revoke().await {
+                    log::warn!("could not revoke the statistics server's token: {error}");
+                }
+            });
+        }
+        self.forget_stats_server();
+        self.emit_stats_server(crate::stats_api::Update::Disconnected(None));
+    }
+
+    /// Forgets the connection in memory and in the credential store.
+    fn forget_stats_server(&mut self) {
+        self.stats_server = None;
+        if let Err(error) = self.credentials.revoke(CredentialSlot::StatsServer) {
+            self.emit(Event::Error(error.to_string()));
+        }
+        self.delete_stored_grant(CredentialSlot::StatsServer);
+    }
+
+    /// Tells the interface how a pull went. A token the server refuses is
+    /// forgotten: it cannot work again.
+    fn on_stats_server_synced(
+        &mut self,
+        generation: u64,
+        result: Result<crate::stats_api::Synced, crate::stats_api::client::Error>,
+    ) {
+        if generation != self.stats_server_generation || self.stats_server.is_none() {
+            return;
+        }
+        match result {
+            Ok(synced) => self.emit_stats_server(crate::stats_api::Update::Synced(synced)),
+            Err(crate::stats_api::client::Error::Unauthorized) => {
+                self.stats_server_generation += 1;
+                self.forget_stats_server();
+                self.emit_stats_server(crate::stats_api::Update::Disconnected(Some(
+                    crate::stats_api::client::Error::Unauthorized.to_string(),
+                )));
+            }
+            Err(error) => {
+                self.emit_stats_server(crate::stats_api::Update::Failed(error.to_string()));
+            }
+        }
+    }
+
+    /// Sends the streaming history being imported to the statistics server
+    /// as well, so it holds it too. A file the server does not read stays
+    /// on this computer only.
+    fn upload_streaming_history(
+        &self,
+        client: crate::stats_api::client::Client,
+        path: std::path::PathBuf,
+    ) {
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        tokio::spawn(async move {
+            let read =
+                tokio::task::spawn_blocking(move || crate::stats_api::client::read_upload(&path))
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(crate::stats_api::client::Error::File(error.to_string()))
+                    });
+            let upload = match read {
+                Ok(Some(upload)) => upload,
+                Ok(None) => return,
+                Err(error) => {
+                    send_stats_server(
+                        &events,
+                        &waker,
+                        crate::stats_api::Update::Uploaded(Err(error.to_string())),
+                    );
+                    return;
+                }
+            };
+            send_stats_server(&events, &waker, crate::stats_api::Update::Uploading);
+            let result = client
+                .upload(upload)
+                .await
+                .map_err(|error| error.to_string());
+            send_stats_server(&events, &waker, crate::stats_api::Update::Uploaded(result));
         });
     }
 
@@ -2137,6 +2431,9 @@ impl Worker {
             ))));
             return;
         };
+        if let Some(client) = self.stats_server_client() {
+            self.upload_streaming_history(client, path.clone());
+        }
         let account_id = account.as_str().to_owned();
         let dir = self.dirs.stats_dir(&account_id);
         let stats = Arc::clone(&self.stats);
@@ -2496,6 +2793,22 @@ impl Worker {
                 }
                 Command::RefreshStats => self.refresh_stats(),
                 Command::ImportStreamingHistory(path) => self.import_streaming_history(path),
+                Command::StatsServerConnect { server, token } => {
+                    self.connect_stats_server(server, token);
+                }
+                Command::StatsServerRestore { server } => self.restore_stats_server(server),
+                Command::StatsServerDisconnect => self.disconnect_stats_server(),
+                Command::StatsServerChecked { generation, result } => {
+                    self.on_stats_server_checked(generation, result);
+                }
+                Command::StatsServerRestored {
+                    generation,
+                    server,
+                    result,
+                } => self.on_stats_server_restored(generation, server, result),
+                Command::StatsServerSynced { generation, result } => {
+                    self.on_stats_server_synced(generation, result);
+                }
                 Command::ChooseStreamingHistory { selected } => {
                     let commands = self.commands.clone();
                     tokio::spawn(async move {
@@ -3213,7 +3526,10 @@ impl Worker {
         lease: CredentialLease,
         result: Result<crate::credentials::Loaded, crate::credentials::Error>,
     ) {
-        if matches!(slot, CredentialSlot::Proxy | CredentialSlot::Soloist) {
+        if matches!(
+            slot,
+            CredentialSlot::Proxy | CredentialSlot::Soloist | CredentialSlot::StatsServer
+        ) {
             return;
         }
         if !lease.current() {
@@ -3266,7 +3582,9 @@ impl Worker {
                     }
                 }
             }
-            None | Some(StoredGrant::Proxy(_) | StoredGrant::Soloist(_)) => {}
+            None
+            | Some(StoredGrant::Proxy(_) | StoredGrant::Soloist(_) | StoredGrant::StatsServer(_)) =>
+                {}
         }
         if slot == CredentialSlot::Playback {
             self.start_prerelease();
@@ -5180,6 +5498,16 @@ impl Worker {
             }
         });
     }
+}
+
+/// Tells the interface about the statistics server from a task.
+fn send_stats_server(
+    events: &std::sync::mpsc::Sender<Event>,
+    waker: &Waker,
+    update: crate::stats_api::Update,
+) {
+    let _ = events.send(Event::Stats(crate::stats::Update::Server(update)));
+    waker.wake();
 }
 
 /// The Web API as the listening stats read it: recently played, and one

@@ -1,7 +1,8 @@
 //! Merging plays that describe the same listen.
 //!
-//! The same listen can reach the log three ways: Spotify's recently-played
-//! answer, Spotifast's own history, and an imported streaming history. They
+//! The same listen can reach the log four ways: Spotify's recently-played
+//! answer, Spotifast's own history, an imported streaming history, and the
+//! statistics server, whose plays are of the first kind or the third. They
 //! time it differently (the import gives the end and the time played, the
 //! older import only to the minute, recently-played a `played_at` with no
 //! time played, the local history the moment the play counted), so each
@@ -11,7 +12,8 @@
 //! a song played twice in a row stays two plays. Records from one source
 //! are never merged, except an exact repeat (the same file imported twice).
 //! The record that knows the most is the one kept: real time played before
-//! an estimate, then the import before the logger before the local history.
+//! an estimate, then the import before the logger before the server before
+//! the local history.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -49,6 +51,13 @@ fn start_window(record: &PlayRecord) -> (i64, i64) {
         super::Source::Spotify => (at - length - TIGHT_MS, at + TIGHT_MS),
         // Recorded once the play counted, some time after it started.
         super::Source::Local => (at - length - LOOSE_MS, at + TIGHT_MS),
+        // Imported into the server: the end, and the time really played.
+        super::Source::Server if !record.estimated => {
+            let start = at - i64::from(record.ms_played);
+            (start - TIGHT_MS, start + TIGHT_MS)
+        }
+        // Read by the server from recently-played: Spotify's `played_at`.
+        super::Source::Server => (at - length - TIGHT_MS, at + TIGHT_MS),
     }
 }
 
@@ -315,5 +324,69 @@ mod tests {
         b.track = "Other".into();
         b.uri = Some("spotify:track:b".into());
         assert_eq!(merge(vec![a], vec![b]).records.len(), 2);
+    }
+
+    /// A play of the statistics server: read from recently-played (an
+    /// estimate) or imported into it (the time really played).
+    fn server(at_s: i64, ms: u32, estimated: bool) -> PlayRecord {
+        let mut record = play(Source::Server, at_s, ms);
+        record.estimated = estimated;
+        record.album_id = None;
+        record
+    }
+
+    #[test]
+    fn the_server_and_the_logger_reading_one_listen_are_one_play() {
+        // Both read Spotify's played_at; the logger's record has more details.
+        let mut logged = play(Source::Spotify, 10_000, 200_000);
+        logged.album_id = Some("al".into());
+        let merged = merge(vec![logged], vec![server(10_000, 200_000, true)]);
+        assert_eq!(merged.records.len(), 1);
+        assert_eq!(merged.records[0].source, Source::Spotify);
+        assert!(merged.added.is_empty());
+        assert_eq!(merged.duplicates, 1);
+    }
+
+    #[test]
+    fn a_play_imported_into_the_server_replaces_the_loggers_estimate() {
+        let mut logged = play(Source::Spotify, 10_000, 200_000);
+        logged.album_id = Some("al".into());
+        // Ended a second after Spotify's played_at, after 150 seconds.
+        let merged = merge(vec![logged], vec![server(10_001, 150_000, false)]);
+        assert_eq!(merged.records.len(), 1);
+        let kept = &merged.records[0];
+        assert_eq!(kept.source, Source::Server);
+        assert_eq!(kept.ms_played, 150_000);
+        assert!(!kept.estimated);
+        // It takes what it lacks from the logger's record.
+        assert_eq!(kept.album_id.as_deref(), Some("al"));
+        assert_eq!(merged.added.len(), 1);
+    }
+
+    #[test]
+    fn the_same_export_imported_here_and_on_the_server_counts_once() {
+        let extended = play(Source::Extended, 10_001, 150_000);
+        let merged = merge(vec![extended], vec![server(10_001, 150_000, false)]);
+        assert_eq!(merged.records.len(), 1);
+        assert_eq!(merged.records[0].source, Source::Extended);
+        assert_eq!(merged.duplicates, 1);
+    }
+
+    #[test]
+    fn the_server_is_kept_over_the_local_history() {
+        let local = play(Source::Local, 5_030, 200_000);
+        let merged = merge(vec![local], vec![server(5_000, 200_000, true)]);
+        assert_eq!(merged.records.len(), 1);
+        assert_eq!(merged.records[0].source, Source::Server);
+    }
+
+    #[test]
+    fn server_plays_of_one_song_back_to_back_stay_two() {
+        let plays = vec![server(1_000, 200_000, true), server(1_200, 200_000, true)];
+        assert_eq!(merge(Vec::new(), plays.clone()).records.len(), 2);
+        // Pulled again, they are repeats.
+        let again = merge(merge(Vec::new(), plays.clone()).records, plays);
+        assert_eq!(again.records.len(), 2);
+        assert_eq!(again.duplicates, 2);
     }
 }

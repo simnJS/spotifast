@@ -1670,6 +1670,13 @@ pub enum Action {
     /// Import Spotify's streaming history into the listening stats: the
     /// file given, or the one picked in a file dialog when `None`.
     ImportStreamingHistory(Option<std::path::PathBuf>),
+    /// Connect to the statistics server in Settings through the browser.
+    ConnectStatsServer,
+    /// Connect to the statistics server in Settings with a token copied
+    /// from its own login page.
+    PasteStatsServerToken(crate::stats_api::Token),
+    /// Forget the statistics server, revoking its token there when it can.
+    DisconnectStatsServer,
     /// Stop playing local files.
     ForgetLocalFilesFolder,
     OpenLocalFilesFolder,

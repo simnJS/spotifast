@@ -215,6 +215,29 @@ impl SlowAppBanner {
     pub const MAX_DISMISSALS: u8 = 3;
 }
 
+/// The optional statistics server ([`crate::stats_api`]): its address, and
+/// whether Spotifast is connected to it. Its token is in the credential
+/// store, never here. Files from before it existed name the default server,
+/// not connected.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatsServerSettings {
+    /// The server's address.
+    pub url: String,
+    /// A connection was made and not undone: its token is read back at
+    /// start.
+    pub connected: bool,
+}
+
+impl Default for StatsServerSettings {
+    fn default() -> Self {
+        Self {
+            url: crate::stats_api::DEFAULT_SERVER.to_owned(),
+            connected: false,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -342,6 +365,8 @@ pub struct Settings {
     pub balance: f32,
     /// Play both channels the same.
     pub mono: bool,
+    /// The statistics server the listening stats also read from.
+    pub stats_server: StatsServerSettings,
     /// Which proxy to use. Older files without this field stay on `system`.
     #[serde(default, skip_serializing_if = "proxy_mode_is_system")]
     pub proxy_mode: ProxyMode,
@@ -442,6 +467,7 @@ impl Default for Settings {
             eq_user_presets: Vec::new(),
             balance: 0.0,
             mono: false,
+            stats_server: StatsServerSettings::default(),
             proxy_mode: ProxyMode::System,
             proxy: String::new(),
             proxy_host: String::new(),
@@ -1015,6 +1041,26 @@ mod tests {
         let encoded = serde_json::to_string(&hidden).unwrap();
         let decoded: Settings = serde_json::from_str(&encoded).unwrap();
         assert!(!decoded.mac_show_in_dock);
+    }
+
+    /// Older files name the default statistics server, not connected; a
+    /// connection and another address survive a save.
+    #[test]
+    fn the_statistics_server_defaults_off_and_round_trips() {
+        let empty: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.stats_server.url, crate::stats_api::DEFAULT_SERVER);
+        assert!(!empty.stats_server.connected);
+        let partial: Settings =
+            serde_json::from_str(r#"{"stats_server": {"connected": true}}"#).unwrap();
+        assert_eq!(partial.stats_server.url, crate::stats_api::DEFAULT_SERVER);
+        assert!(partial.stats_server.connected);
+        let mut settings = Settings::default();
+        settings.stats_server.url = "https://stats.example".into();
+        settings.stats_server.connected = true;
+        let encoded = settings.encode().unwrap();
+        assert!(!encoded.contains("token"));
+        let decoded: Settings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.stats_server, settings.stats_server);
     }
 
     #[test]
