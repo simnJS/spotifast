@@ -158,8 +158,9 @@ pub enum Update {
     Failed(String),
     /// The connection is gone; with why, when the server refused it.
     Disconnected(Option<String>),
-    /// A refresh: the figures on show are asked for again.
-    Refreshed,
+    /// A refresh that began at `at_ms`: the figures asked for before are
+    /// asked for again.
+    Refreshed { at_ms: i64 },
     /// The answer to a page's [`stats::Fetch`] from `server`, at `at_ms`.
     Fetched {
         server: String,
@@ -237,9 +238,9 @@ impl State {
                     ..Self::default()
                 };
             }
-            Update::Refreshed => {
+            Update::Refreshed { at_ms } => {
                 self.checking = false;
-                self.answers.refresh();
+                self.answers.refresh(at_ms);
             }
             Update::Fetched {
                 server,
@@ -260,7 +261,8 @@ impl State {
                 self.importing = None;
                 // The figures on show do not count the new plays yet.
                 if result.is_ok() {
-                    self.answers.refresh();
+                    self.answers
+                        .refresh(jiff::Timestamp::now().as_millisecond());
                 }
                 self.imported = Some(result);
             }
@@ -465,7 +467,7 @@ mod tests {
         state.receive(Update::Restored {
             server: DEFAULT_SERVER.into(),
         });
-        state.answers.fetching(&weeks);
+        state.answers.fetching(&weeks, 1);
         // An answer of another server is dropped.
         state.receive(Update::Fetched {
             server: "https://elsewhere.example".into(),
@@ -497,14 +499,14 @@ mod tests {
         );
         assert!(!state.answers.wants(&weeks));
         // A refresh, and an import that went through, ask again.
-        state.receive(Update::Refreshed);
+        state.receive(Update::Refreshed { at_ms: 10 });
         assert!(state.answers.wants(&weeks));
-        state.answers.fetching(&weeks);
+        state.answers.fetching(&weeks, 11);
         state.receive(Update::Fetched {
             server: DEFAULT_SERVER.into(),
             fetch: weeks.clone(),
             result: Ok(range()),
-            at_ms: 3,
+            at_ms: 12,
         });
         assert!(!state.answers.wants(&weeks));
         state.receive(Update::Importing(import::Sent {

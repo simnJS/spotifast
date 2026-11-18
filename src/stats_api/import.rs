@@ -16,7 +16,7 @@ use serde::Deserialize;
 use super::client::Error;
 
 /// The largest export archive the server takes.
-pub const MAX_ARCHIVE_BYTES: u64 = 200 * 1024 * 1024;
+pub const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 /// The largest single history file the server takes.
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// A whole export can take a while to send on a slow line and for the
@@ -291,7 +291,6 @@ mod tests {
             }
             total += read;
         }
-        drop(reader);
         assert_eq!(total, 1_000_000);
         assert!(reports.len() <= 101, "{}", reports.len());
         assert!(reports.len() >= 50, "{}", reports.len());

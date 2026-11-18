@@ -550,7 +550,7 @@ computer (`http://127.0.0.1`, `http://localhost`).
   show. The server's account must be the Spotify account signed in here:
   another account's figures are never shown.
 - **Importing.** The file chosen on the Stats page is sent to
-  `POST /import` as it is, an export ZIP (`application/zip`, up to 200 MB)
+  `POST /import` as it is, an export ZIP (`application/zip`, up to 512 MB)
   or one `Streaming_History_Audio_*.json` file (`application/json`, up to
   64 MB), streamed from the disk with the bytes sent shown as they go. The
   server answers a report per file (new plays, plays it already had,

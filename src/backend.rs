@@ -1035,9 +1035,11 @@ pub enum Command {
         server: String,
         result: Result<crate::credentials::Loaded, crate::credentials::Error>,
     },
-    /// Internal: a check of the statistics server's account ended.
+    /// Internal: a check of the statistics server's account, which began
+    /// at `started_ms`, ended.
     StatsServerSynced {
         generation: u64,
+        started_ms: i64,
         result: Result<crate::stats_api::Synced, crate::stats_api::client::Error>,
     },
     /// Fetch figures from the statistics server, in API mode.
@@ -2210,6 +2212,7 @@ impl Worker {
     /// log is left as it is.
     fn refresh_server_stats(&self, client: crate::stats_api::client::Client) {
         let generation = self.stats_server_generation;
+        let started_ms = jiff::Timestamp::now().as_millisecond();
         let commands = self.commands.clone();
         tokio::spawn(async move {
             let result = async {
@@ -2221,7 +2224,11 @@ impl Worker {
                 })
             }
             .await;
-            let _ = commands.send(Command::StatsServerSynced { generation, result });
+            let _ = commands.send(Command::StatsServerSynced {
+                generation,
+                started_ms,
+                result,
+            });
         });
     }
 
@@ -2510,6 +2517,7 @@ impl Worker {
     fn on_stats_server_synced(
         &mut self,
         generation: u64,
+        started_ms: i64,
         result: Result<crate::stats_api::Synced, crate::stats_api::client::Error>,
     ) {
         if generation != self.stats_server_generation || self.stats_server.is_none() {
@@ -2533,7 +2541,7 @@ impl Worker {
                 self.emit_stats_server(crate::stats_api::Update::Failed(error.to_string()));
             }
         }
-        self.emit_stats_server(crate::stats_api::Update::Refreshed);
+        self.emit_stats_server(crate::stats_api::Update::Refreshed { at_ms: started_ms });
     }
 
     /// Hands the interface the server's report of an import. A token the
@@ -2984,9 +2992,11 @@ impl Worker {
                     server,
                     result,
                 } => self.on_stats_server_restored(generation, server, result),
-                Command::StatsServerSynced { generation, result } => {
-                    self.on_stats_server_synced(generation, result);
-                }
+                Command::StatsServerSynced {
+                    generation,
+                    started_ms,
+                    result,
+                } => self.on_stats_server_synced(generation, started_ms, result),
                 Command::StatsServerFetch(fetch) => self.fetch_server_stats(fetch),
                 Command::StatsServerFetched {
                     generation,

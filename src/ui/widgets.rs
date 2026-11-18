@@ -5850,7 +5850,7 @@ pub(crate) mod your_stats {
                 [Action::FetchServerStats(asked)] if *asked == fetch
             ));
             app.actions.clear();
-            app.stats.server.answers.fetching(&fetch);
+            app.stats.server.answers.fetching(&fetch, 1);
             // On its way: not asked twice.
             assert_eq!(for_subject(&mut app, &ctx, artist.clone()), Shown::Loading);
             assert!(app.actions.is_empty());
@@ -5863,8 +5863,8 @@ pub(crate) mod your_stats {
                 panic!("the failure shows");
             };
             assert!(error.contains("offline"));
-            app.stats.server.answers.refresh();
-            app.stats.server.answers.fetching(&fetch);
+            app.stats.server.answers.refresh(2);
+            app.stats.server.answers.fetching(&fetch, 3);
             app.stats.server.answers.receive(
                 &fetch,
                 Ok(Answer::Item(Arc::new(server_answer(&[(

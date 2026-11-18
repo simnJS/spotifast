@@ -98,21 +98,16 @@ pub enum Answer {
 /// A time in an answer: milliseconds since the Unix epoch, or an RFC 3339
 /// timestamp. Anything else reads as unknown.
 fn instant<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<i64>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Raw {
-        Millis(i64),
-        Text(String),
-        Other(serde_json::Value),
-    }
-    Ok(match Option::<Raw>::deserialize(deserializer)? {
-        Some(Raw::Millis(ms)) => Some(ms),
-        Some(Raw::Text(text)) => text
-            .parse::<jiff::Timestamp>()
-            .ok()
-            .map(jiff::Timestamp::as_millisecond),
-        Some(Raw::Other(_)) | None => None,
-    })
+    Ok(
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Number(ms)) => ms.as_i64(),
+            Some(serde_json::Value::String(text)) => text
+                .parse::<jiff::Timestamp>()
+                .ok()
+                .map(jiff::Timestamp::as_millisecond),
+            _ => None,
+        },
+    )
 }
 
 /// A list the server answers: `{"items": [...]}`, as the existing routes
@@ -371,8 +366,8 @@ pub struct Slot<T> {
     pub error: Option<Error>,
     /// A fetch is on its way.
     pub fetching: bool,
-    /// The round of the last fetch asked ([`Answers::refresh`]).
-    asked: Option<u64>,
+    /// When the last fetch was asked, in milliseconds.
+    asked: Option<i64>,
 }
 
 impl<T> Default for Slot<T> {
@@ -414,10 +409,11 @@ impl<T> Slot<T> {
 /// new connection starts with none.
 #[derive(Clone, Debug, Default)]
 pub struct Answers {
-    /// Bumped by each refresh. An answer asked in an earlier round is
-    /// asked again the next time a page shows it, and stays shown
-    /// meanwhile.
-    round: u64,
+    /// When the last refresh began, in milliseconds. An answer asked
+    /// before it is asked again the next time a page shows it, and stays
+    /// shown meanwhile; one asked since, such as a page's first answer
+    /// after connecting, is not asked twice.
+    refreshed_at: Option<i64>,
     ranges: HashMap<Period, Slot<RangeStats>>,
     items: HashMap<Item, Slot<ItemFigures>>,
     /// The items held, oldest first, for dropping.
@@ -433,7 +429,7 @@ impl Answers {
         self.items.get(item)
     }
 
-    fn slot_asked(&self, fetch: &Fetch) -> Option<(bool, Option<u64>)> {
+    fn slot_asked(&self, fetch: &Fetch) -> Option<(bool, Option<i64>)> {
         match fetch {
             Fetch::Range(period) => self
                 .ranges
@@ -446,22 +442,28 @@ impl Answers {
     }
 
     /// Whether `fetch` must be asked for: never asked, or not since the
-    /// last refresh, and none on its way.
+    /// last refresh began, and none on its way.
     pub fn wants(&self, fetch: &Fetch) -> bool {
         match self.slot_asked(fetch) {
             None => true,
-            Some((fetching, asked)) => !fetching && asked != Some(self.round),
+            Some((fetching, asked)) => {
+                !fetching
+                    && match (asked, self.refreshed_at) {
+                        (None, _) => true,
+                        (Some(asked), Some(refreshed)) => asked < refreshed,
+                        (Some(_), None) => false,
+                    }
+            }
         }
     }
 
-    /// Notes that `fetch` is on its way.
-    pub fn fetching(&mut self, fetch: &Fetch) {
-        let round = self.round;
+    /// Notes that `fetch` is on its way, asked at `at_ms`.
+    pub fn fetching(&mut self, fetch: &Fetch, at_ms: i64) {
         match fetch {
             Fetch::Range(period) => {
                 let slot = self.ranges.entry(*period).or_default();
                 slot.fetching = true;
-                slot.asked = Some(round);
+                slot.asked = Some(at_ms);
             }
             Fetch::Item { item, .. } => {
                 if !self.items.contains_key(item) {
@@ -473,7 +475,7 @@ impl Answers {
                 }
                 let slot = self.items.entry(item.clone()).or_default();
                 slot.fetching = true;
-                slot.asked = Some(round);
+                slot.asked = Some(at_ms);
             }
         }
     }
@@ -506,9 +508,10 @@ impl Answers {
         }
     }
 
-    /// A refresh: every answer is asked again when next shown.
-    pub fn refresh(&mut self) {
-        self.round += 1;
+    /// A refresh that began at `at_ms`: every answer asked before is asked
+    /// again when next shown.
+    pub fn refresh(&mut self, at_ms: i64) {
+        self.refreshed_at = Some(self.refreshed_at.map_or(at_ms, |at| at.max(at_ms)));
     }
 
     /// Whether any answer is on its way.
@@ -774,7 +777,7 @@ mod tests {
         let mut answers = Answers::default();
         let weeks = Fetch::Range(Period::Weeks4);
         assert!(answers.wants(&weeks));
-        answers.fetching(&weeks);
+        answers.fetching(&weeks, 5);
         // On its way: not asked twice.
         assert!(!answers.wants(&weeks));
         assert!(answers.fetching_any());
@@ -784,26 +787,30 @@ mod tests {
         let slot = answers.range(Period::Weeks4).unwrap();
         assert!(Arc::ptr_eq(slot.get().unwrap(), &first));
         assert_eq!(slot.value.as_ref().unwrap().1, 10);
+        // A refresh that began before it was asked, as the check right
+        // after connecting, does not ask again.
+        answers.refresh(4);
+        assert!(!answers.wants(&weeks));
 
-        // A refresh asks again; the answer shown stays until another comes,
-        // and through a failure.
-        answers.refresh();
+        // A later refresh asks again; the answer shown stays until another
+        // comes, and through a failure.
+        answers.refresh(15);
         assert!(answers.wants(&weeks));
-        answers.fetching(&weeks);
+        answers.fetching(&weeks, 16);
         answers.receive(&weeks, Err(Error::Network("offline".into())), 20);
         let slot = answers.range(Period::Weeks4).unwrap();
         assert!(Arc::ptr_eq(slot.get().unwrap(), &first));
         assert_eq!(slot.error, Some(Error::Network("offline".into())));
         // A failure is not asked again before the next refresh.
         assert!(!answers.wants(&weeks));
-        answers.refresh();
-        answers.fetching(&weeks);
+        answers.refresh(25);
+        answers.fetching(&weeks, 26);
         answers.receive(&weeks, Ok(Answer::Range(range(Period::Weeks4))), 30);
         assert_eq!(answers.range(Period::Weeks4).unwrap().error, None);
 
         // Another account's figures never show, not even earlier ones.
-        answers.refresh();
-        answers.fetching(&weeks);
+        answers.refresh(35);
+        answers.fetching(&weeks, 36);
         answers.receive(&weeks, Err(Error::OtherAccount), 40);
         assert!(answers.range(Period::Weeks4).unwrap().get().is_none());
         assert!(!answers.fetching_any());
@@ -820,7 +827,7 @@ mod tests {
             artist: None,
         };
         for id in 0..ITEMS_KEPT + 1 {
-            answers.fetching(&fetch(id));
+            answers.fetching(&fetch(id), 1);
         }
         let first = Item {
             kind: Kind::Artist,

@@ -5848,7 +5848,9 @@ impl App {
         if server.phase != crate::stats_api::Phase::Connected || !server.answers.wants(&fetch) {
             return;
         }
-        server.answers.fetching(&fetch);
+        server
+            .answers
+            .fetching(&fetch, jiff::Timestamp::now().as_millisecond());
         self.backend.send(Command::StatsServerFetch(fetch));
     }
 
