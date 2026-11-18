@@ -2681,6 +2681,19 @@ fn entry_menu(app: &mut App, response: &egui::Response, entry: &Entry, custom_or
                         offset_index: None,
                     });
                 }
+                // Liked Songs queue in their order, as Spotify's own menu does.
+                if super::widgets::menu_item(
+                    ui,
+                    &app.palette,
+                    Some(Icon::ListEnd),
+                    &gettext(app.locale, "Add to queue"),
+                ) && let Some(user) = &app.user
+                {
+                    app.actions.push(Action::AddToQueue {
+                        uri: format!("spotify:user:{}:collection", user.id),
+                        label: entry.name.clone(),
+                    });
+                }
                 pin_menu(app, ui, entry.ordering_key());
             });
     }

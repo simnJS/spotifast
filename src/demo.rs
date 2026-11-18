@@ -3494,6 +3494,12 @@ mod tests {
         );
         let tree = accessible_frame(&ctx, &mut app, vec![]);
         accessible_node(&tree, &gettext(Locale::German, "Play"), Role::Button);
+        // Liked Songs queue whole, as in Spotify's own menu.
+        accessible_node(
+            &tree,
+            &gettext(Locale::German, "Add to queue"),
+            Role::Button,
+        );
         let pin = accessible_node(&tree, &gettext(Locale::German, "Pin to top"), Role::Button);
         accessible_frame(
             &ctx,
@@ -6836,7 +6842,7 @@ mod tests {
                 "Artists",
                 artist(1).name,
                 artist(1).uri,
-                vec!["Follow"],
+                vec!["Follow", "Add to queue"],
             ),
             (
                 Page::Podcasts,
@@ -6949,7 +6955,7 @@ mod tests {
                 SearchFilter::Playlists,
                 playlist(1).name,
                 playlist(1).uri,
-                vec!["Edit details", "Delete"],
+                vec!["Add to queue", "Edit details", "Delete"],
             ),
             (
                 SearchFilter::Podcasts,

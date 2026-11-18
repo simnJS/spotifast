@@ -6,6 +6,9 @@
 
 use super::*;
 
+/// How long a list that played out waits for its last song's radio.
+const RADIO_FOLLOW_WAIT: Duration = Duration::from_secs(30);
+
 impl App {
     /// "`<Name>` Radio" for a seed whose name is known.
     pub fn radio_name(&self, seed: &str) -> Option<String> {
@@ -154,6 +157,17 @@ impl App {
             return;
         };
         let refreshing = std::mem::take(&mut page.refreshing);
+        // A radio that took too long no longer follows what played.
+        let follow = self
+            .radio_follow
+            .take_if(|(followed, _)| followed.as_str() == seed)
+            .is_some_and(|(_, at)| at.elapsed() < RADIO_FOLLOW_WAIT);
+        if follow && let Ok(songs) = &result {
+            self.play_radio_after(seed, songs);
+        }
+        let Some(page) = self.radio_pages.get_mut(seed) else {
+            return;
+        };
         match result {
             Ok(songs) => {
                 let uris = songs.iter().map(|track| track.uri.clone()).collect();
@@ -173,6 +187,50 @@ impl App {
             // A failed refresh keeps the mix on screen and says why.
             Err(error) if refreshing => self.toast(error),
             Err(error) => page.songs = Loadable::Failed(error),
+        }
+    }
+
+    /// Carries on with the radio of the song another device stopped after,
+    /// once the list it was given played out, as Spotify's autoplay carries
+    /// on from what played (queue rule "When the queue runs out"). A radio
+    /// already on its page plays at once; otherwise it is resolved first.
+    pub(super) fn follow_with_radio(&mut self, seed: String) {
+        if let Some(songs) = self
+            .radio_pages
+            .get(&seed)
+            .and_then(|page| page.songs.get())
+            .cloned()
+        {
+            self.play_radio_after(&seed, &songs);
+            return;
+        }
+        self.radio_follow = Some((seed.clone(), Instant::now()));
+        self.load_radio(&seed);
+    }
+
+    /// Plays a radio's songs after the song it is based on, which just
+    /// played, unless something else started since it was asked for.
+    fn play_radio_after(&mut self, seed: &str, songs: &[Track]) {
+        if self.now_playing_live().is_some_and(|now| now.playing) {
+            return;
+        }
+        let uris: Vec<String> = songs
+            .iter()
+            .filter(|song| !song.uri.is_empty() && song.uri != seed)
+            .map(|song| song.uri.clone())
+            .collect();
+        if uris.is_empty() {
+            return;
+        }
+        log::info!("the list ended; playing the radio of {seed}");
+        let (uris, index) = cap_uris(&uris, 0);
+        self.play_request(PlayRequest::tracks(uris).starting_at_index(index), false);
+        if let Some(station) = util::station_uri(seed) {
+            self.assumed_context = Some(AssumedContext {
+                uri: station,
+                shuffle: None,
+                at: Instant::now(),
+            });
         }
     }
 

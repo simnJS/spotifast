@@ -152,6 +152,17 @@ pub enum RecentsFor {
     Panel,
 }
 
+/// A playlist, Liked Songs or an artist whose songs Add to queue reads, a
+/// page at a time. An album has its own request,
+/// [`ApiRequest::AlbumQueueTracks`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueueSource {
+    Playlist(String),
+    LikedSongs,
+    /// An artist's popular songs, which come in one answer.
+    Artist(String),
+}
+
 #[derive(Clone, Debug)]
 pub enum ApiRequest {
     Me,
@@ -349,6 +360,13 @@ pub enum ApiRequest {
     },
     AlbumQueueTracks {
         id: String,
+        offset: u32,
+        request: u64,
+    },
+    /// One page of a playlist's, Liked Songs' or an artist's songs, read
+    /// for Add to queue.
+    QueueSourceItems {
+        source: QueueSource,
         offset: u32,
         request: u64,
     },
@@ -646,6 +664,13 @@ pub enum ApiResponse {
         offset: u32,
         request: u64,
         result: ApiResult<Page<Track>>,
+    },
+    /// The songs of one page of a [`QueueSource`], in its order, with the
+    /// page's own offset and limit so the next page follows on.
+    QueueSourceItems {
+        offset: u32,
+        request: u64,
+        result: ApiResult<Page<PlayableItem>>,
     },
     Show {
         id: String,
@@ -1542,6 +1567,7 @@ impl Backend {
         if matches!(
             request,
             ApiRequest::AlbumQueueTracks { .. }
+                | ApiRequest::QueueSourceItems { .. }
                 | ApiRequest::AddToQueue { .. }
                 | ApiRequest::AddManyToQueue { .. }
         ) {
@@ -5835,6 +5861,12 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
             Operation::PlaylistMutation(api.playlist_access(playlist_id))
         }
         ApiRequest::ArtistTopTracks { .. } => Operation::ArtistTopTracks,
+        // Each source reads as its own page does.
+        ApiRequest::QueueSourceItems { source, .. } => match source {
+            QueueSource::Playlist(id) => Operation::PlaylistItems(api.playlist_access(id)),
+            QueueSource::LikedSongs => Operation::UserData,
+            QueueSource::Artist(_) => Operation::ArtistTopTracks,
+        },
         ApiRequest::RelatedArtists { .. } => Operation::RelatedArtists,
         ApiRequest::ContextLength { context_uri, .. } => context_length_read(context_uri)
             .map_or(Operation::Catalog, |read| operation_for(api, &read)),
@@ -6816,6 +6848,24 @@ async fn handle(
             offset,
             request,
         },
+        ApiRequest::QueueSourceItems {
+            source,
+            offset,
+            request,
+        } => ApiResponse::QueueSourceItems {
+            result: match &source {
+                QueueSource::Playlist(id) => {
+                    routed!(playlist_items(id, offset, PLAYLIST_PAGE_SIZE))
+                        .map(|page| playable_page(page, playlist_row_song))
+                }
+                QueueSource::LikedSongs => routed!(saved_tracks(offset, 50)).map(|page| {
+                    playable_page(page, |saved| Some(PlayableItem::Track(saved.track)))
+                }),
+                QueueSource::Artist(id) => routed!(artist_top_tracks(id)).map(artist_songs_page),
+            },
+            offset,
+            request,
+        },
         ApiRequest::Show { id } => ApiResponse::Show {
             result: routed!(show(&id)),
             id,
@@ -7207,9 +7257,50 @@ fn session_read(request: &ApiRequest) -> Option<SessionRead<'_>> {
             id,
             offset: *offset,
         },
+        ApiRequest::QueueSourceItems {
+            source: QueueSource::Playlist(id),
+            offset,
+            ..
+        } => SessionRead::Rows {
+            id,
+            offset: *offset,
+        },
+        ApiRequest::QueueSourceItems {
+            source: QueueSource::Artist(id),
+            ..
+        } => SessionRead::ArtistTop { id },
         ApiRequest::MyPlaylists { .. } => SessionRead::Library,
         _ => return None,
     })
+}
+
+/// A page of rows as the songs in them, in order. The page keeps its
+/// offset and its length before rows without a song were left out, so the
+/// next page follows on from where this one ended.
+fn playable_page<T>(
+    page: Page<T>,
+    song: impl FnMut(T) -> Option<PlayableItem>,
+) -> Page<PlayableItem> {
+    let limit = page
+        .limit
+        .max(u32::try_from(page.items.len()).unwrap_or(u32::MAX));
+    Page {
+        items: page.items.into_iter().filter_map(song).collect(),
+        total: page.total,
+        limit,
+        offset: page.offset,
+        next: page.next,
+    }
+}
+
+/// The song in a playlist row, if it holds one.
+fn playlist_row_song(row: PlaylistItem) -> Option<PlayableItem> {
+    row.item.or(row.track)
+}
+
+/// An artist's popular songs as one whole page.
+fn artist_songs_page(tracks: Vec<Track>) -> Page<PlayableItem> {
+    Page::whole(tracks.into_iter().map(PlayableItem::Track).collect())
 }
 
 /// What the session read: artist cards or tracks, a playlist's header,
@@ -7266,6 +7357,26 @@ fn session_response(request: &ApiRequest, answer: SessionAnswer) -> Option<ApiRe
                 result,
             }
         }
+        (
+            ApiRequest::QueueSourceItems {
+                offset, request, ..
+            },
+            SessionAnswer::Rows(result),
+        ) => ApiResponse::QueueSourceItems {
+            offset: *offset,
+            request: *request,
+            result: result.map(|page| playable_page(page, playlist_row_song)),
+        },
+        (
+            ApiRequest::QueueSourceItems {
+                offset, request, ..
+            },
+            SessionAnswer::ArtistTop(result),
+        ) => ApiResponse::QueueSourceItems {
+            offset: *offset,
+            request: *request,
+            result: result.map(artist_songs_page),
+        },
         // The session reads the library whole, so its answer starts the
         // list over at the top, whichever page of a Web API load asked: it
         // holds every row that load had shown, and the rest.
@@ -10674,6 +10785,90 @@ mod session_tests {
         assert!(same_account("alice", Some(&alice)));
         assert!(!same_account("bob", Some(&alice)));
         assert!(!same_account("alice", None), "nothing verified yet");
+    }
+
+    /// Add to queue reads a playlist's rows and an artist's popular songs
+    /// the way their pages do, over the session when it serves them, and
+    /// answers with the songs in order, keeping each page's place so the
+    /// next one follows on even where a row held no song.
+    #[test]
+    fn queue_reads_take_their_pages_route_and_keep_their_place() {
+        let playlist = ApiRequest::QueueSourceItems {
+            source: QueueSource::Playlist("pl1".into()),
+            offset: 150,
+            request: 7,
+        };
+        assert_eq!(
+            session_read(&playlist),
+            Some(SessionRead::Rows {
+                id: "pl1",
+                offset: 150
+            })
+        );
+        let artist = ApiRequest::QueueSourceItems {
+            source: QueueSource::Artist("ar1".into()),
+            offset: 0,
+            request: 8,
+        };
+        assert_eq!(
+            session_read(&artist),
+            Some(SessionRead::ArtistTop { id: "ar1" })
+        );
+        let liked = ApiRequest::QueueSourceItems {
+            source: QueueSource::LikedSongs,
+            offset: 0,
+            request: 9,
+        };
+        assert_eq!(session_read(&liked), None);
+
+        let song = |id: &str| {
+            PlayableItem::Track(Track {
+                uri: format!("spotify:track:{id}"),
+                ..Default::default()
+            })
+        };
+        let rows = Page {
+            items: vec![
+                PlaylistItem {
+                    item: Some(song("one")),
+                    ..Default::default()
+                },
+                PlaylistItem::default(),
+                PlaylistItem {
+                    track: Some(song("two")),
+                    ..Default::default()
+                },
+            ],
+            total: 10,
+            limit: 0,
+            offset: 150,
+            next: Some("next".into()),
+        };
+        let Some(ApiResponse::QueueSourceItems {
+            offset: 150,
+            request: 7,
+            result: Ok(page),
+        }) = session_response(&playlist, SessionAnswer::Rows(Ok(rows)))
+        else {
+            panic!("the rows answer the queue read that asked");
+        };
+        let uris: Vec<&str> = page.items.iter().map(PlayableItem::uri).collect();
+        assert_eq!(uris, ["spotify:track:one", "spotify:track:two"]);
+        assert_eq!(page.next_offset(), Some(153), "past the row without a song");
+        let Some(ApiResponse::QueueSourceItems {
+            result: Ok(page), ..
+        }) = session_response(
+            &artist,
+            SessionAnswer::ArtistTop(Ok(vec![Track {
+                uri: "spotify:track:hit".into(),
+                ..Default::default()
+            }])),
+        )
+        else {
+            panic!("the popular songs answer the queue read that asked");
+        };
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.next_offset(), None, "an artist's songs come whole");
     }
 
     /// A header read, a page of rows or a sample at the request's offset,

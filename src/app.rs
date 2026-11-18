@@ -14,7 +14,7 @@ use crate::api::models::{
 };
 use crate::backend::{
     ApiRequest, ApiResponse, AuthStatus, Backend, Command, Event, LocalPlayback, LyricsRequest,
-    PLAYLIST_PAGE_SIZE, PlaylistCacheRows, RecentsFor, RemoteAction, Waker,
+    PLAYLIST_PAGE_SIZE, PlaylistCacheRows, QueueSource, RecentsFor, RemoteAction, Waker,
 };
 use crate::i18n::{Locale, gettext, ngettext};
 use crate::model::QueueTab;
@@ -275,12 +275,40 @@ pub enum Target {
     Remote(Option<String>),
 }
 
-struct PendingAlbumQueue {
-    id: String,
+/// Where an Add to queue on a whole album, playlist, Liked Songs or artist
+/// reads its songs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CollectionSource {
+    Album(String),
+    Other(QueueSource),
+}
+
+impl CollectionSource {
+    /// The collection a URI names, when Add to queue can take it whole.
+    fn of(uri: &str) -> Option<Self> {
+        if uri.ends_with(":collection") {
+            return Some(Self::Other(QueueSource::LikedSongs));
+        }
+        let id = util::uri_id(uri)?.to_string();
+        match util::uri_kind(uri)? {
+            "album" => Some(Self::Album(id)),
+            "playlist" => Some(Self::Other(QueueSource::Playlist(id))),
+            "artist" => Some(Self::Other(QueueSource::Artist(id))),
+            _ => None,
+        }
+    }
+}
+
+/// The most songs one Add to queue on a collection adds, as many as a play
+/// hands the player.
+const MAX_QUEUED_FROM_COLLECTION: usize = MAX_PLAYED_URIS;
+
+struct PendingCollectionQueue {
+    source: CollectionSource,
     label: String,
     target: Target,
     offset: u32,
-    tracks: Vec<Track>,
+    items: Vec<PlayableItem>,
 }
 
 struct PendingQueueAdd {
@@ -731,6 +759,13 @@ pub struct App {
     /// Last list sent to local playback. Used for autoplay because librespot
     /// cannot continue a list without a context URI.
     local_list: Option<Vec<String>>,
+    /// The list's last song has started, so songs playing now are ones
+    /// queued behind it, and autoplay follows the last of them.
+    local_list_ended: bool,
+    /// The song another device stopped after when its list played out,
+    /// and when: its radio plays once resolved, unless something else
+    /// started meanwhile.
+    radio_follow: Option<(String, Instant)>,
     /// When to take a confirming look at remote playback after a command.
     remote_recheck_at: Option<Instant>,
     /// When Spotify pushed a change to another device that no poll since
@@ -862,14 +897,14 @@ pub struct App {
     pub manual_queue: Vec<String>,
     /// Queue additions shown before Spotify confirms them, with request time.
     pending_queue_adds: Vec<PendingQueueAdd>,
-    pending_album_queues: HashMap<u64, PendingAlbumQueue>,
+    pending_collection_queues: HashMap<u64, PendingCollectionQueue>,
     pending_queue_batches: HashMap<u64, Target>,
     album_queue_serial: u64,
     /// The latest `play-search` command. Its answer plays only while this
     /// still names it: a newer search or anything the user started since
     /// takes precedence over a search that finishes late.
     play_search_serial: u64,
-    last_album_queue: Option<(String, Instant)>,
+    last_collection_queue: Option<(String, Instant)>,
     /// The account's playlist tree from Spotify, folders and all; empty
     /// until the session answers.
     pub rootlist: Vec<crate::player::RootlistEntry>,
@@ -1428,6 +1463,8 @@ impl App {
             shuffle_length_serial: 0,
             context_lengths: HashMap::new(),
             local_list: None,
+            local_list_ended: false,
+            radio_follow: None,
             remote_recheck_at: None,
             remote_pushed_at: None,
             seek_preview: None,
@@ -1496,11 +1533,11 @@ impl App {
             resume_queue: session.last_added_queue.clone(),
             manual_queue: Vec::new(),
             pending_queue_adds: Vec::new(),
-            pending_album_queues: HashMap::new(),
+            pending_collection_queues: HashMap::new(),
             pending_queue_batches: HashMap::new(),
             album_queue_serial: 0,
             play_search_serial: 0,
-            last_album_queue: None,
+            last_collection_queue: None,
             rootlist: Vec::new(),
             rootlist_cache: session.rootlist.clone(),
             account_caches_generation: 0,
@@ -3673,9 +3710,9 @@ impl App {
         self.pending_remote_volume = None;
         self.local_transfer_sequence = None;
         self.queue_start_pending = None;
-        self.pending_album_queues.clear();
+        self.pending_collection_queues.clear();
         self.pending_queue_batches.clear();
-        self.last_album_queue = None;
+        self.last_collection_queue = None;
         self.cover_uploads.clear();
         self.uploaded_covers.clear();
         // Pages still on their way belong to the signed-out account's load.
@@ -3896,8 +3933,15 @@ impl App {
                 }
             }
         }
+        if track_changed
+            && let (Some(list), Some(track)) = (&self.local_list, &state.track)
+            && list.last() == Some(&track.uri)
+        {
+            self.local_list_ended = true;
+        }
         if let Some(seed) = autoplay_seed(
             self.local_list.as_deref(),
+            self.local_list_ended,
             self.settings.autoplay,
             &self.local,
             &state,
@@ -7309,8 +7353,8 @@ impl App {
         if !matches!(self.target(), Target::Local) {
             return;
         }
-        self.pending_album_queues.clear();
-        self.last_album_queue = None;
+        self.pending_collection_queues.clear();
+        self.last_collection_queue = None;
         // `queue_one` writes every queued song to both lists, so they hold
         // the same wishes and adding their counts asks for twice the rows
         // Next up was given. The extra row taken is the context's own copy
@@ -8115,6 +8159,22 @@ impl App {
                             device.volume_percent = Some(pushed.percent);
                         }
                         self.reconcile_remote_volume(seq, state.as_ref());
+                        // Nothing the user asked for is on its way: a play
+                        // or a pause would explain the stop instead.
+                        let list_end =
+                            self.remote
+                                .as_ref()
+                                .zip(state.as_ref())
+                                .filter(|_| {
+                                    self.settings.autoplay
+                                        && self
+                                            .optimistic_playing
+                                            .is_none_or(|(_, at)| at.elapsed() >= PLAYBACK_HOLD)
+                                        && self.intent_track.as_ref().is_none_or(|intent| {
+                                            intent.at.elapsed() >= PLAYBACK_HOLD
+                                        })
+                                })
+                                .and_then(|(before, after)| remote_list_end(before, after));
                         let previous_uri = self.remote.as_ref().and_then(|remote| {
                             remote
                                 .state
@@ -8185,6 +8245,9 @@ impl App {
                         }
                         if uri != previous_uri {
                             self.on_now_playing_changed();
+                        }
+                        if let Some(seed) = list_end {
+                            self.follow_with_radio(seed);
                         }
                     }
                     Err(error) => log::debug!("playback state unavailable: {error}"),
@@ -9566,7 +9629,21 @@ impl App {
                 offset,
                 result,
             } => {
-                self.receive_album_queue(request, offset, result);
+                let result = result.map(|page| crate::api::models::Page {
+                    items: page.items.into_iter().map(PlayableItem::Track).collect(),
+                    total: page.total,
+                    limit: page.limit,
+                    offset: page.offset,
+                    next: page.next,
+                });
+                self.receive_collection_queue(request, offset, result);
+            }
+            ApiResponse::QueueSourceItems {
+                request,
+                offset,
+                result,
+            } => {
+                self.receive_collection_queue(request, offset, result);
             }
             ApiResponse::Show { id, result } => {
                 if let Ok(show) = &result
@@ -10547,6 +10624,7 @@ impl App {
                 let mut load = local_load(&request, shuffle);
                 load.repeat = Some(self.local_repeat());
                 self.local_list = load.context_uri.is_none().then(|| load.uris.clone());
+                self.local_list_ended = false;
                 let shuffle_after = shuffle && load.shuffle.is_none() && !load.uris.is_empty();
                 self.backend.player(PlayerCommand::Load(load));
                 if shuffle_after {
@@ -11370,15 +11448,39 @@ impl App {
     }
 
     /// Adds a row to Next up immediately, before the context's upcoming rows.
+    /// An album, a playlist, Liked Songs or an artist adds its songs in
+    /// order. With nothing playing or paused there is no queue to add to,
+    /// so the song or collection starts instead, and what follows it when
+    /// it ends is what follows any play (see [`App::nothing_to_queue_behind`]).
     fn add_to_queue(&mut self, uri: String, label: String) {
-        if util::uri_kind(&uri) == Some("album") {
-            self.queue_album(uri, label);
+        if let Some(source) = CollectionSource::of(&uri) {
+            if self.nothing_to_queue_behind() {
+                self.play_request(PlayRequest::context(uri), false);
+                return;
+            }
+            self.queue_collection(source, uri, label);
             return;
         }
         if self.queued_moments_ago(&uri) {
             return;
         }
+        if self.nothing_to_queue_behind() && self.can_queue(&uri) {
+            self.play_request(PlayRequest::tracks(vec![uri]), false);
+            return;
+        }
         self.queue_one(uri, label, true);
+    }
+
+    /// Whether nothing is playing, paused or remembered to resume, here or
+    /// on another device, so Add to queue has no song to queue behind.
+    /// Spotify's own apps offer no Add to queue then; Spotifast starts the
+    /// song instead of sending an addition no device would play.
+    fn nothing_to_queue_behind(&self) -> bool {
+        self.now_playing().is_none()
+            && self
+                .queue
+                .get()
+                .is_none_or(|queue| queue.currently_playing.is_none())
     }
 
     /// Whether `uri` was queued so recently that asking again is the same
@@ -11390,77 +11492,154 @@ impl App {
             .any(|pending| pending.item.uri() == uri && pending.at.elapsed() < QUEUE_ADD_DEBOUNCE)
     }
 
-    fn queue_album(&mut self, uri: String, label: String) {
+    /// Queues a whole collection's songs in order. Songs already on screen
+    /// go at once; otherwise every page is read first and the songs are
+    /// added together, so a failed read adds no part of it.
+    fn queue_collection(&mut self, source: CollectionSource, uri: String, label: String) {
         if self
-            .last_album_queue
+            .last_collection_queue
             .as_ref()
             .is_some_and(|(previous, at)| previous == &uri && at.elapsed() < QUEUE_ADD_DEBOUNCE)
         {
             return;
         }
-        let Some(id) = util::uri_id(&uri).map(str::to_string) else {
-            return;
-        };
-        self.last_album_queue = Some((uri, Instant::now()));
-        if let Some(page) = self.album_pages.get(&id)
-            && page.tracks.is_complete()
-        {
-            self.queue_album_tracks(page.tracks.items.clone(), label);
+        self.last_collection_queue = Some((uri, Instant::now()));
+        if let Some(items) = self.loaded_collection_songs(&source) {
+            self.queue_collection_items(&source, items, label);
             return;
         }
         self.album_queue_serial = self.album_queue_serial.wrapping_add(1);
         let request = self.album_queue_serial;
-        self.pending_album_queues.insert(
+        self.request_collection_page(&source, 0, request);
+        self.pending_collection_queues.insert(
             request,
-            PendingAlbumQueue {
-                id: id.clone(),
+            PendingCollectionQueue {
+                source,
                 label: label.clone(),
                 target: self.target(),
                 offset: 0,
-                tracks: Vec::new(),
+                items: Vec::new(),
             },
         );
-        self.backend.api(ApiRequest::AlbumQueueTracks {
-            id,
-            offset: 0,
-            request,
-        });
-        // Translators: {name} is an album name.
+        // Translators: {name} is an album, playlist or artist name, or Liked Songs.
         self.toast(gettext(self.locale, "Loading {name} to queue…").replace("{name}", &label));
     }
 
-    fn receive_album_queue(
+    /// Every song of a collection whose page is fully loaded, in order.
+    fn loaded_collection_songs(&self, source: &CollectionSource) -> Option<Vec<PlayableItem>> {
+        match source {
+            CollectionSource::Album(id) => {
+                let page = self.album_pages.get(id)?;
+                page.tracks.is_complete().then(|| {
+                    page.tracks
+                        .items
+                        .iter()
+                        .cloned()
+                        .map(PlayableItem::Track)
+                        .collect()
+                })
+            }
+            CollectionSource::Other(QueueSource::Playlist(id)) => {
+                let page = self.playlist_pages.get(id)?;
+                page.items.is_complete().then(|| {
+                    page.items
+                        .items
+                        .iter()
+                        .filter_map(PlaylistItem::playable)
+                        .cloned()
+                        .collect()
+                })
+            }
+            CollectionSource::Other(QueueSource::LikedSongs) => {
+                let liked = &self.library.liked;
+                liked.is_complete().then(|| {
+                    liked
+                        .items
+                        .iter()
+                        .map(|saved| PlayableItem::Track(saved.track.clone()))
+                        .collect()
+                })
+            }
+            CollectionSource::Other(QueueSource::Artist(id)) => self
+                .artist_pages
+                .get(id)?
+                .top_tracks
+                .get()
+                .map(|tracks| tracks.iter().cloned().map(PlayableItem::Track).collect()),
+        }
+    }
+
+    fn request_collection_page(&self, source: &CollectionSource, offset: u32, request: u64) {
+        self.backend.api(match source {
+            CollectionSource::Album(id) => ApiRequest::AlbumQueueTracks {
+                id: id.clone(),
+                offset,
+                request,
+            },
+            CollectionSource::Other(source) => ApiRequest::QueueSourceItems {
+                source: source.clone(),
+                offset,
+                request,
+            },
+        });
+    }
+
+    fn receive_collection_queue(
         &mut self,
         request: u64,
         offset: u32,
-        result: crate::api::client::Result<crate::api::models::Page<Track>>,
+        result: crate::api::client::Result<crate::api::models::Page<PlayableItem>>,
     ) {
-        let Some(pending) = self.pending_album_queues.get(&request) else {
+        let Some(pending) = self.pending_collection_queues.get(&request) else {
             return;
         };
         if pending.offset != offset {
             return;
         }
-        let mut pending = self.pending_album_queues.remove(&request).unwrap();
+        let mut pending = self.pending_collection_queues.remove(&request).unwrap();
+        let album = matches!(pending.source, CollectionSource::Album(_));
         if pending.target != self.target() {
-            self.toast_error(gettext(
-                self.locale,
-                "Playback device changed. Add the album to queue again",
-            ));
+            self.toast_error(if album {
+                gettext(
+                    self.locale,
+                    "Playback device changed. Add the album to queue again",
+                )
+                .into_owned()
+            } else {
+                // Translators: {name} is a playlist or artist name, or Liked Songs.
+                gettext(
+                    self.locale,
+                    "Playback device changed. Add {name} to queue again",
+                )
+                .replace("{name}", &pending.label)
+            });
             return;
         }
+        let out_of_order = |app: &mut Self, label: &str| {
+            app.toast_error(if album {
+                gettext(
+                    app.locale,
+                    "Couldn't load the album's songs in order. Try again",
+                )
+                .into_owned()
+            } else {
+                // Translators: {name} is a playlist or artist name, or Liked Songs.
+                gettext(
+                    app.locale,
+                    "Couldn't load the songs of {name} in order. Try again",
+                )
+                .replace("{name}", label)
+            });
+        };
         let page = match result {
             Ok(page) if page.offset == offset => page,
             Ok(_) => {
-                self.toast_error(gettext(
-                    self.locale,
-                    "Couldn't load the album's songs in order. Try again",
-                ));
+                out_of_order(self, &pending.label);
                 return;
             }
             Err(error) => {
                 self.toast_error(
-                    // Translators: {name} is an album name and {error} is an error message.
+                    // Translators: {name} is an album, playlist or artist name, or Liked Songs, and {error} is an error message.
                     gettext(self.locale, "Couldn't add {name} to queue: {error}")
                         .replace("{name}", &pending.label)
                         .replace("{error}", &error.to_string()),
@@ -11470,46 +11649,76 @@ impl App {
         };
         let next = page.next_offset();
         if page.next.is_some() && next.is_none() {
-            self.toast_error(gettext(
-                self.locale,
-                "Couldn't load the album's songs in order. Try again",
-            ));
+            out_of_order(self, &pending.label);
             return;
         }
-        pending.tracks.extend(page.items);
+        pending.items.extend(page.items);
+        // A long playlist or Liked Songs stops being read once it holds as
+        // many songs as one addition takes.
+        let next = next.filter(|_| pending.items.len() < MAX_QUEUED_FROM_COLLECTION);
         if let Some(next) = next {
             if next <= offset {
-                self.toast_error(gettext(
-                    self.locale,
-                    "Couldn't load the album's songs in order. Try again",
-                ));
+                out_of_order(self, &pending.label);
                 return;
             }
             pending.offset = next;
-            self.backend.api(ApiRequest::AlbumQueueTracks {
-                id: pending.id.clone(),
-                offset: next,
-                request,
-            });
-            self.pending_album_queues.insert(request, pending);
+            self.request_collection_page(&pending.source, next, request);
+            self.pending_collection_queues.insert(request, pending);
         } else {
-            self.queue_album_tracks(pending.tracks, pending.label);
+            self.queue_collection_items(&pending.source, pending.items, pending.label);
         }
     }
 
+    #[cfg(test)]
     fn queue_album_tracks(&mut self, tracks: Vec<Track>, label: String) {
+        self.queue_collection_items(
+            &CollectionSource::Album(String::new()),
+            tracks.into_iter().map(PlayableItem::Track).collect(),
+            label,
+        );
+    }
+
+    /// Whether a collection's song can join the queue: an unavailable song
+    /// or a row without one cannot, and a local file only where this
+    /// computer's player queues it.
+    fn collection_song_queueable(&self, item: &PlayableItem) -> bool {
+        let uri = item.uri();
+        match item {
+            PlayableItem::Track(track) => {
+                if track.is_playable == Some(false) {
+                    false
+                } else if uri.starts_with(LOCAL_URI_PREFIX) {
+                    self.can_queue(uri)
+                } else {
+                    !track.is_local && util::uri_kind(uri) == Some("track")
+                }
+            }
+            PlayableItem::Episode(_) => util::uri_kind(uri) == Some("episode"),
+        }
+    }
+
+    /// Appends a collection's songs after the ones already queued, in its
+    /// order and with its repeats, up to [`MAX_QUEUED_FROM_COLLECTION`].
+    fn queue_collection_items(
+        &mut self,
+        source: &CollectionSource,
+        items: Vec<PlayableItem>,
+        label: String,
+    ) {
         let pending_start = self.pending_queue_adds.len();
         let mut uris = Vec::new();
-        for track in tracks {
-            if track.is_local
-                || track.is_playable == Some(false)
-                || util::uri_kind(&track.uri) != Some("track")
-            {
+        for item in items {
+            if uris.len() == MAX_QUEUED_FROM_COLLECTION {
+                break;
+            }
+            if !self.collection_song_queueable(&item) {
                 continue;
             }
-            let uri = track.uri.clone();
-            let name = track.name.clone();
-            if let Some(id) = util::uri_id(&uri) {
+            let uri = item.uri().to_string();
+            let name = item.name().to_string();
+            if let PlayableItem::Track(track) = item
+                && let Some(id) = util::uri_id(&uri)
+            {
                 self.remember_track_recording(&track);
                 self.track_cache.insert(id.to_string(), track);
             }
@@ -11517,17 +11726,23 @@ impl App {
             uris.push(uri);
         }
         if uris.is_empty() {
-            self.toast_error(gettext(
-                self.locale,
-                "This album has no playable songs to queue",
-            ));
+            self.toast_error(match source {
+                CollectionSource::Album(_) => {
+                    gettext(self.locale, "This album has no playable songs to queue").into_owned()
+                }
+                CollectionSource::Other(_) => {
+                    // Translators: {name} is a playlist or artist name, or Liked Songs.
+                    gettext(self.locale, "{name} has no playable songs to queue")
+                        .replace("{name}", &label)
+                }
+            });
             return;
         }
         let count = uris.len();
         self.toast(
             ngettext(
                 self.locale,
-                // Translators: {count} is a number of songs and {name} is an album name.
+                // Translators: {count} is a number of songs and {name} is an album, playlist or artist name, or Liked Songs.
                 "{count} song from {name} added to queue",
                 "{count} songs from {name} added to queue",
                 count as u32,
@@ -11555,6 +11770,13 @@ impl App {
             .into_iter()
             .filter(|(uri, _)| self.can_queue(uri))
             .collect();
+        // With nothing to queue behind, the picked songs play, in order.
+        if !songs.is_empty() && self.nothing_to_queue_behind() {
+            let uris: Vec<String> = songs.into_iter().map(|(uri, _)| uri).collect();
+            let (uris, index) = cap_uris(&uris, 0);
+            self.play_request(PlayRequest::tracks(uris).starting_at_index(index), false);
+            return;
+        }
         let repeats: Vec<bool> = songs
             .iter()
             .map(|(uri, _)| self.queued_moments_ago(uri))
@@ -15060,9 +15282,55 @@ fn local_load(request: &PlayRequest, shuffle: bool) -> LoadSpec {
     }
 }
 
-/// Returns the final track as the autoplay seed when a plain list ends.
+/// How long after a song should have ended a stop is still read as its
+/// list playing out, rather than as a state from long ago.
+const REMOTE_LIST_END_WINDOW: Duration = Duration::from_secs(90);
+
+/// The song another device stopped after when a plain list it was given,
+/// with any songs queued behind it, played out: it was playing with no
+/// context and should have ended by now, and the device now stands at the
+/// start of that song, or at nothing, without playing. A collection carries
+/// on by itself on the device, autoplay included; a list started through
+/// the Web API has no context to carry on from, Soloist's included (queue
+/// rule "When the queue runs out").
+fn remote_list_end(before: &RemoteSnapshot, after: &PlaybackState) -> Option<String> {
+    let playing = &before.state;
+    let item = playing.item.as_ref()?;
+    let duration = item.duration_ms();
+    if !playing.is_playing
+        || playing.context.is_some()
+        || playing.repeat_state == "track"
+        || playing.repeat_state == "context"
+        || util::uri_kind(item.uri()) != Some("track")
+        || duration == 0
+        || before.received_at.elapsed() > REMOTE_LIST_END_WINDOW
+    {
+        return None;
+    }
+    let elapsed = u32::try_from(before.received_at.elapsed().as_millis()).unwrap_or(u32::MAX);
+    let heard = playing.progress_ms.unwrap_or(0).saturating_add(elapsed);
+    if heard.saturating_add(5_000) < duration {
+        return None;
+    }
+    let same_device = playing.device.as_ref().map(|device| &device.id)
+        == after.device.as_ref().map(|device| &device.id);
+    let at_start = after
+        .item
+        .as_ref()
+        .is_none_or(|stopped| stopped.uri() == item.uri())
+        && after.progress_ms.unwrap_or(0) <= 1_000;
+    (same_device && at_start && !after.is_playing && after.context.is_none())
+        .then(|| item.uri().to_string())
+}
+
+/// Returns the song that played last as the autoplay seed when a plain
+/// list ends: the list's own last song, or, once that song has started
+/// (`list_ended`), the last of the songs queued behind it. A list leaves
+/// the engine nothing to continue from either way, and Spotify's apps
+/// carry on from what played (queue rule "When the queue runs out").
 fn autoplay_seed(
     list: Option<&[String]>,
+    list_ended: bool,
     autoplay: bool,
     before: &LocalState,
     after: &LocalState,
@@ -15075,7 +15343,7 @@ fn autoplay_seed(
         return None;
     }
     let track = before.track.as_ref()?;
-    if list?.last() != Some(&track.uri) || track.duration_ms == 0 {
+    if (list?.last() != Some(&track.uri) && !list_ended) || track.duration_ms == 0 {
         return None;
     }
     let near_end = before.position_now() + 3_000 >= track.duration_ms;
@@ -20377,7 +20645,7 @@ mod tests {
                     matches!(&requests[0], ApiRequest::AddManyToQueue { uris, .. } if uris == &expected)
                 );
             }
-            assert!(app.pending_album_queues.is_empty());
+            assert!(app.pending_collection_queues.is_empty());
             app.add_to_queue("spotify:track:after".into(), "After".into());
             let (_, queued) = queue_uris(&app);
             assert_eq!(
@@ -20444,7 +20712,458 @@ mod tests {
                 "spotify:track:context"
             ]
         );
-        assert!(app.pending_album_queues.is_empty());
+        assert!(app.pending_collection_queues.is_empty());
+        app.backend.shutdown();
+    }
+
+    /// Rule 2: a playlist's Add to queue reads every page first, then adds
+    /// its songs in order, repeats included, after the songs already queued
+    /// and before the context's own, with one notification. A row without a
+    /// song still counts towards the next page's offset.
+    #[test]
+    fn queue_playlist_reads_every_page_then_appends_after_the_songs_already_queued() {
+        let mut app = test_app("playlist-queue-pages");
+        app.queue = loaded_queue(
+            "spotify:track:current",
+            &["spotify:track:manual", "spotify:track:context"],
+        );
+        app.manual_queue.push("spotify:track:manual".into());
+        app.apply(
+            Action::AddToQueue {
+                uri: "spotify:playlist:mix".into(),
+                label: "Mix".into(),
+            },
+            &egui::Context::default(),
+        );
+        let request = app.album_queue_serial;
+        let requests = app.backend.take_queue_requests();
+        assert!(
+            matches!(
+                &requests[..],
+                [ApiRequest::QueueSourceItems {
+                    source: QueueSource::Playlist(id),
+                    offset: 0,
+                    ..
+                }] if id == "mix"
+            ),
+            "{requests:?}"
+        );
+        assert_eq!(
+            queue_uris(&app).1,
+            ["spotify:track:manual", "spotify:track:context"],
+            "no part of the playlist shows before all of it is read"
+        );
+        let song = |id: &str| PlayableItem::Track(album_queue_track(id));
+        app.handle_api(ApiResponse::QueueSourceItems {
+            request,
+            offset: 0,
+            result: Ok(crate::api::models::Page {
+                items: vec![song("one"), song("two")],
+                offset: 0,
+                limit: 3,
+                total: 4,
+                next: Some("next".into()),
+            }),
+        });
+        let requests = app.backend.take_queue_requests();
+        assert!(
+            matches!(
+                &requests[..],
+                [ApiRequest::QueueSourceItems { offset: 3, .. }]
+            ),
+            "{requests:?}"
+        );
+        app.handle_api(ApiResponse::QueueSourceItems {
+            request,
+            offset: 3,
+            result: Ok(crate::api::models::Page {
+                items: vec![song("one")],
+                offset: 3,
+                limit: 3,
+                total: 4,
+                next: None,
+            }),
+        });
+        assert_eq!(
+            queue_uris(&app).1,
+            [
+                "spotify:track:manual",
+                "spotify:track:one",
+                "spotify:track:two",
+                "spotify:track:one",
+                "spotify:track:context"
+            ]
+        );
+        let requests = app.backend.take_queue_requests();
+        assert!(
+            matches!(
+                &requests[..],
+                [ApiRequest::AddManyToQueue { uris, .. }]
+                    if *uris == ["spotify:track:one", "spotify:track:two", "spotify:track:one"]
+            ),
+            "{requests:?}"
+        );
+        assert_eq!(
+            app.toasts.last().map(|toast| toast.message.as_str()),
+            Some("3 songs from Mix added to queue")
+        );
+        assert!(app.pending_collection_queues.is_empty());
+        app.backend.shutdown();
+    }
+
+    /// Liked Songs and an artist already on screen queue at once: Liked
+    /// Songs in order, up to 500 songs, and an artist its popular songs.
+    #[test]
+    fn liked_songs_and_an_artist_on_screen_queue_at_once_up_to_500_songs() {
+        let ctx = egui::Context::default();
+        let mut app = test_app("collection-queue-loaded");
+        app.queue = loaded_queue("spotify:track:current", &["spotify:track:context"]);
+        app.library.liked = PagedList {
+            items: (0..600)
+                .map(|n| crate::api::models::SavedTrack {
+                    added_at: None,
+                    track: album_queue_track(&format!("liked{n}")),
+                })
+                .collect(),
+            loaded_once: true,
+            next_offset: None,
+            ..Default::default()
+        };
+        app.apply(
+            Action::AddToQueue {
+                uri: "spotify:user:me:collection".into(),
+                label: "Liked Songs".into(),
+            },
+            &ctx,
+        );
+        let requests = app.backend.take_queue_requests();
+        let [ApiRequest::AddManyToQueue { uris, .. }] = &requests[..] else {
+            panic!("one write of the loaded songs: {requests:?}");
+        };
+        assert_eq!(uris.len(), MAX_QUEUED_FROM_COLLECTION);
+        assert_eq!(uris[0], "spotify:track:liked0");
+        assert_eq!(uris[499], "spotify:track:liked499");
+        assert_eq!(
+            app.toasts.last().map(|toast| toast.message.as_str()),
+            Some("500 songs from Liked Songs added to queue")
+        );
+
+        app.artist_pages.insert(
+            "band".into(),
+            ArtistPage {
+                top_tracks: Loadable::Loaded(vec![
+                    album_queue_track("hit1"),
+                    album_queue_track("hit2"),
+                ]),
+                ..Default::default()
+            },
+        );
+        app.apply(
+            Action::AddToQueue {
+                uri: "spotify:artist:band".into(),
+                label: "Band".into(),
+            },
+            &ctx,
+        );
+        let (_, next) = queue_uris(&app);
+        assert_eq!(
+            next[next.len() - 3..],
+            [
+                "spotify:track:hit1",
+                "spotify:track:hit2",
+                "spotify:track:context"
+            ],
+            "the artist's songs follow Liked Songs, ahead of the context"
+        );
+        app.backend.shutdown();
+    }
+
+    /// An artist not on screen reads its popular songs, which come whole.
+    #[test]
+    fn an_artist_not_on_screen_queues_its_popular_songs() {
+        let mut app = test_app("artist-queue-read");
+        app.queue = loaded_queue("spotify:track:current", &["spotify:track:context"]);
+        app.add_to_queue("spotify:artist:band".into(), "Band".into());
+        let request = app.album_queue_serial;
+        let requests = app.backend.take_queue_requests();
+        assert!(
+            matches!(
+                &requests[..],
+                [ApiRequest::QueueSourceItems {
+                    source: QueueSource::Artist(id),
+                    offset: 0,
+                    ..
+                }] if id == "band"
+            ),
+            "{requests:?}"
+        );
+        app.handle_api(ApiResponse::QueueSourceItems {
+            request,
+            offset: 0,
+            result: Ok(crate::api::models::Page::whole(vec![
+                PlayableItem::Track(album_queue_track("hit1")),
+                PlayableItem::Track(Track {
+                    is_playable: Some(false),
+                    ..album_queue_track("gone")
+                }),
+                PlayableItem::Track(album_queue_track("hit2")),
+            ])),
+        });
+        assert_eq!(
+            queue_uris(&app).1,
+            [
+                "spotify:track:hit1",
+                "spotify:track:hit2",
+                "spotify:track:context"
+            ]
+        );
+        assert_eq!(
+            app.toasts.last().map(|toast| toast.message.as_str()),
+            Some("2 songs from Band added to queue")
+        );
+        app.backend.shutdown();
+    }
+
+    /// Every collection the menus offer Add to queue for takes it whole; a
+    /// podcast does not, as in Spotify's menus.
+    #[test]
+    fn add_to_queue_takes_albums_playlists_liked_songs_and_artists_whole() {
+        use crate::ui::widgets::queues_whole;
+        for uri in [
+            "spotify:album:a",
+            "spotify:playlist:p",
+            "spotify:artist:r",
+            "spotify:user:me:collection",
+        ] {
+            assert!(queues_whole(uri), "{uri}");
+            assert!(CollectionSource::of(uri).is_some(), "{uri}");
+        }
+        for uri in ["spotify:show:s", "spotify:track:t", "spotify:episode:e"] {
+            assert!(!queues_whole(uri), "{uri}");
+            assert!(CollectionSource::of(uri).is_none(), "{uri}");
+        }
+    }
+
+    /// With nothing playing, paused or remembered anywhere there is no queue
+    /// to add to: a song starts on its own, so autoplay follows it, and a
+    /// collection starts as itself, so it carries on as one.
+    #[test]
+    fn add_to_queue_with_nothing_playing_starts_it() {
+        let ctx = egui::Context::default();
+        for uri in ["spotify:track:song", "spotify:playlist:mix"] {
+            let mut app = test_app("queue-with-nothing-playing");
+            app.local_ready = true;
+            app.local.connected = true;
+            assert!(app.nothing_to_queue_behind());
+            app.apply(
+                Action::AddToQueue {
+                    uri: uri.into(),
+                    label: "Something".into(),
+                },
+                &ctx,
+            );
+            assert!(app.manual_queue.is_empty(), "{uri}: nothing is queued");
+            assert!(app.backend.take_queue_requests().is_empty(), "{uri}");
+            let commands = app.backend.take_player_commands();
+            assert!(
+                commands.iter().any(|command| matches!(
+                    command,
+                    PlayerCommand::Load(load)
+                        if load.context_uri.as_deref() == Some(uri) && load.uris.is_empty()
+                )),
+                "{uri} starts as its own context: {commands:?}"
+            );
+            app.backend.shutdown();
+        }
+    }
+
+    /// Queue rule "When the queue runs out": on this computer, songs
+    /// queued behind a plain list play after its last song, and autoplay
+    /// then carries on from the last of them instead of stopping.
+    #[test]
+    fn songs_queued_behind_a_list_are_followed_by_autoplay_from_the_last_of_them() {
+        let mut app = test_app("list-queue-autoplay");
+        app.local_ready = true;
+        app.local.connected = true;
+        app.local_list = Some(vec![
+            "spotify:track:first".into(),
+            "spotify:track:last".into(),
+        ]);
+        let state = |uri: &str, playback, position_ms, track_sequence| LocalState {
+            playback,
+            track: Some(crate::player::LocalTrack {
+                uri: uri.into(),
+                duration_ms: 200_000,
+                ..Default::default()
+            }),
+            position_ms,
+            connected: true,
+            track_sequence,
+            ..LocalState::default()
+        };
+        app.handle_local(state("spotify:track:last", Playback::Playing, 0, 1));
+        app.handle_local(state("spotify:track:queued", Playback::Playing, 0, 2));
+        app.handle_local(state("spotify:track:queued", Playback::Playing, 199_000, 2));
+        app.backend.take_player_commands();
+        app.handle_local(state("spotify:track:queued", Playback::Stopped, 0, 2));
+        let commands = app.backend.take_player_commands();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                PlayerCommand::Load(load)
+                    if load.autoplay && load.context_uri.as_deref() == Some("spotify:track:queued")
+            )),
+            "{commands:?}"
+        );
+        app.backend.shutdown();
+    }
+
+    fn remote_song(uri: &str) -> PlayableItem {
+        PlayableItem::Track(Track {
+            uri: uri.into(),
+            id: util::uri_id(uri).map(str::to_string),
+            duration_ms: 200_000,
+            ..Default::default()
+        })
+    }
+
+    fn remote_state(song: &str, playing: bool, progress_ms: u32) -> PlaybackState {
+        PlaybackState {
+            device: Some(Device {
+                id: Some("soloist".into()),
+                is_active: true,
+                ..Default::default()
+            }),
+            item: Some(remote_song(song)),
+            is_playing: playing,
+            progress_ms: Some(progress_ms),
+            repeat_state: "off".into(),
+            ..Default::default()
+        }
+    }
+
+    /// Queue rule "When the queue runs out": a plain list, with any songs
+    /// queued behind it, that plays out on another device such as Soloist
+    /// carries on with the radio of the song it stopped after, since the
+    /// device has no context to continue from.
+    #[test]
+    fn a_list_that_plays_out_on_another_device_carries_on_with_its_last_songs_radio() {
+        let mut app = test_app("remote-list-end-radio");
+        app.remote = Some(RemoteSnapshot {
+            state: remote_state("spotify:track:queued", true, 198_000),
+            received_at: Instant::now() - Duration::from_secs(2),
+        });
+        app.handle_api(ApiResponse::PlaybackState {
+            seq: app.remote_poll_seq,
+            result: Ok(Some(remote_state("spotify:track:queued", false, 0))),
+        });
+        let generation = app
+            .radio_pages
+            .get("spotify:track:queued")
+            .expect("the song's radio is asked for")
+            .generation;
+        assert!(app.backend.take_remote_play_requests().is_empty());
+        app.receive_radio(
+            "spotify:track:queued",
+            generation,
+            Ok(vec![
+                album_queue_track("queued"),
+                album_queue_track("r1"),
+                album_queue_track("r2"),
+            ]),
+        );
+        let requests = app.backend.take_remote_play_requests();
+        assert!(
+            requests.iter().any(|request| matches!(
+                request,
+                ApiRequest::Remote {
+                    action: RemoteAction::Play,
+                    play: Some(play),
+                    device_id: Some(device),
+                    ..
+                } if play.uris == ["spotify:track:r1", "spotify:track:r2"] && device == "soloist"
+            )),
+            "{requests:?}"
+        );
+        app.backend.shutdown();
+    }
+
+    /// Only a list that played out is followed: a pause mid-song, a pause
+    /// at the end, a collection, which carries on by itself, Repeat, or a
+    /// stop long ago are not.
+    #[test]
+    fn only_a_list_that_played_out_on_another_device_is_followed() {
+        let before = |state: PlaybackState, ago: u64| RemoteSnapshot {
+            state,
+            received_at: Instant::now() - Duration::from_secs(ago),
+        };
+        let stopped = remote_state("spotify:track:last", false, 0);
+        assert_eq!(
+            remote_list_end(
+                &before(remote_state("spotify:track:last", true, 198_000), 2),
+                &stopped
+            )
+            .as_deref(),
+            Some("spotify:track:last")
+        );
+        assert_eq!(
+            remote_list_end(
+                &before(remote_state("spotify:track:last", true, 60_000), 2),
+                &stopped
+            ),
+            None,
+            "a song stopped mid-way"
+        );
+        assert_eq!(
+            remote_list_end(
+                &before(remote_state("spotify:track:last", true, 198_000), 2),
+                &remote_state("spotify:track:last", false, 199_000)
+            ),
+            None,
+            "a pause at the end stays where it is"
+        );
+        let mut collection = remote_state("spotify:track:last", true, 198_000);
+        collection.context = Some(crate::api::models::Context {
+            uri: "spotify:album:a".into(),
+            kind: "album".into(),
+        });
+        assert_eq!(remote_list_end(&before(collection, 2), &stopped), None);
+        let mut repeating = remote_state("spotify:track:last", true, 198_000);
+        repeating.repeat_state = "context".into();
+        assert_eq!(remote_list_end(&before(repeating, 2), &stopped), None);
+        assert_eq!(
+            remote_list_end(
+                &before(remote_state("spotify:track:last", true, 198_000), 100),
+                &stopped
+            ),
+            None,
+            "a state from long ago"
+        );
+        assert_eq!(
+            remote_list_end(
+                &before(remote_state("spotify:track:last", true, 198_000), 2),
+                &remote_state("spotify:track:other", false, 0)
+            ),
+            None,
+            "another song"
+        );
+    }
+
+    /// With Autoplay off, a list that plays out on another device stops.
+    #[test]
+    fn autoplay_off_leaves_a_list_that_played_out_stopped() {
+        let mut app = test_app("remote-list-end-autoplay-off");
+        app.settings.autoplay = false;
+        app.remote = Some(RemoteSnapshot {
+            state: remote_state("spotify:track:queued", true, 198_000),
+            received_at: Instant::now() - Duration::from_secs(2),
+        });
+        app.handle_api(ApiResponse::PlaybackState {
+            seq: app.remote_poll_seq,
+            result: Ok(Some(remote_state("spotify:track:queued", false, 0))),
+        });
+        assert!(app.radio_pages.is_empty());
+        assert!(app.radio_follow.is_none());
         app.backend.shutdown();
     }
 
@@ -20627,7 +21346,7 @@ mod tests {
                 }),
             });
             assert!(app.manual_queue.is_empty());
-            assert!(app.pending_album_queues.is_empty());
+            assert!(app.pending_collection_queues.is_empty());
             assert!(app.backend.take_queue_requests().is_empty());
             assert!(app.backend.take_queued_tracks().is_empty());
             app.backend.shutdown();
@@ -34437,26 +35156,62 @@ mod tests {
         };
         let list: Vec<String> = vec!["spotify:track:first".into(), "spotify:track:last".into()];
         assert_eq!(
-            autoplay_seed(Some(&list), true, &playing, &stopped).as_deref(),
+            autoplay_seed(Some(&list), false, true, &playing, &stopped).as_deref(),
             Some("spotify:track:last")
         );
-        assert_eq!(autoplay_seed(Some(&list), false, &playing, &stopped), None);
-        assert_eq!(autoplay_seed(None, true, &playing, &stopped), None);
+        assert_eq!(
+            autoplay_seed(Some(&list), false, false, &playing, &stopped),
+            None
+        );
+        assert_eq!(autoplay_seed(None, false, true, &playing, &stopped), None);
         let mid_song = LocalState {
             position_ms: 60_000,
             ..playing.clone()
         };
-        assert_eq!(autoplay_seed(Some(&list), true, &mid_song, &stopped), None);
+        assert_eq!(
+            autoplay_seed(Some(&list), false, true, &mid_song, &stopped),
+            None
+        );
         let not_last = LocalState {
             track: track("spotify:track:first"),
             ..playing.clone()
         };
-        assert_eq!(autoplay_seed(Some(&list), true, &not_last, &stopped), None);
+        assert_eq!(
+            autoplay_seed(Some(&list), false, true, &not_last, &stopped),
+            None
+        );
         let dropped = LocalState {
             connected: false,
             ..stopped.clone()
         };
-        assert_eq!(autoplay_seed(Some(&list), true, &playing, &dropped), None);
+        assert_eq!(
+            autoplay_seed(Some(&list), false, true, &playing, &dropped),
+            None
+        );
+        // Once the list's last song has played, a song queued behind it is
+        // what autoplay carries on from.
+        let queued = LocalState {
+            track: track("spotify:track:queued"),
+            ..playing.clone()
+        };
+        let queued_stopped = LocalState {
+            track: track("spotify:track:queued"),
+            ..stopped.clone()
+        };
+        assert_eq!(
+            autoplay_seed(Some(&list), true, true, &queued, &queued_stopped).as_deref(),
+            Some("spotify:track:queued")
+        );
+        assert_eq!(
+            autoplay_seed(Some(&list), false, true, &queued, &queued_stopped),
+            None,
+            "a stop before the list's last song is not its end"
+        );
+        assert_eq!(
+            autoplay_seed(Some(&list), true, false, &queued, &queued_stopped),
+            None,
+            "Autoplay off"
+        );
     }
 
     fn snapshot_at(percent: u8) -> LocalState {

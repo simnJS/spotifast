@@ -67,10 +67,11 @@ plays as that context at the chosen song, so Spotify carries on from the
 whole context when it ends. A song started on its own, as a search result
 is, plays as its own context, and Spotify carries on from that song; this
 holds for the built-in player and for Soloist. A sorted or filtered view
-plays its shown rows as a plain list. On this computer's built-in player,
-Spotifast follows the end of such a list with Spotify's recommendations for
-its last song. Soloist has no command to choose what follows a list, so
-there Spotify picks it.
+plays its shown rows as a plain list, which leaves the player no context to
+carry on from. Since 0.22.0, when such a list ends, with any songs queued
+behind it, Spotifast carries on from the last song that played: on this
+computer's built-in player with Spotify's recommendations for it, and on
+another device, Soloist included, with that song's radio (rule 13).
 
 Since 0.9.0, starting another song on this computer keeps the
 selected Repeat mode, with Shuffle on or off. Loading a playlist no longer
@@ -129,6 +130,24 @@ not consume a queue row or restore an older queue saved on this computer.
    together after the songs already queued. A failed fetch adds no partial
    album. Clear queue and sign-out cancel an album still being fetched;
    changing playback devices asks you to add it again on the new device.
+
+   Since 0.22.0, a playlist, Liked Songs and an artist have **Add to queue**
+   too, wherever their menu opens: a right-click in Your Library, on a card
+   or a search result, or the **…** button on their page. A playlist and
+   Liked Songs add their playable songs in their own order, repeats
+   included; an artist adds its popular songs, in the order its page shows
+   them. Spotify's own apps offer this for albums, playlists and Liked Songs,
+   not for artists or podcasts. They load and append like an album: at once
+   when every song is on screen, otherwise together once every page is read,
+   with nothing added if a read fails. One addition takes at most the first
+   500 songs, as many as a play hands the player; Spotify's own apps take
+   the first 100. A local file joins only where a single one would.
+
+   With nothing playing or paused on any device, and no song to resume,
+   there is no queue to add to; Spotify's own apps offer no **Add to queue**
+   then. Since 0.22.0, **Add to queue** starts what was chosen instead: a song
+   plays on its own, so Autoplay follows it, and a playlist, album, Liked
+   Songs or artist plays from its start, so it carries on as itself.
 
    On another device, a rate limit delays additions instead of dropping them.
    Spotifast retries automatically after Spotify's requested wait and keeps
@@ -208,3 +227,15 @@ counts once, and the notification reports only the rows actually added.
     rewrites the queue by clearing it and re-adding the rest, so it is
     offered only while this computer is the active player. *Next up* rows
     have no such entry; they play from the current context.
+
+13. **When the queue runs out, playback carries on.** Your songs play
+    first, then the playlist or album carries on where it was, under
+    **Next from**. When it has ended as well, Repeat off and Autoplay on,
+    what follows comes from Spotify's recommendations for the last song that
+    played, a queued one included, as in Spotify's own apps. A playlist,
+    album, artist, Liked Songs or a song on its own carries on by itself.
+    A plain list, as a sorted or filtered view plays, does not: on this
+    computer's player Spotifast then loads Spotify's recommendations for that
+    last song, and on another device, Soloist included, it plays that song's
+    radio once the device stands stopped at the start of it, unless something
+    else was started meanwhile. With Autoplay off, playback stops there.

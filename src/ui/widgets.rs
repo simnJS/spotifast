@@ -1262,6 +1262,13 @@ fn item_menu_at(
     }
 }
 
+/// Whether Add to queue takes a collection whole: an album, a playlist,
+/// Liked Songs or an artist. A podcast is not offered, as in Spotify.
+pub fn queues_whole(uri: &str) -> bool {
+    uri.ends_with(":collection")
+        || matches!(util::uri_kind(uri), Some("album" | "playlist" | "artist"))
+}
+
 /// Menu for a context (playlist, album, artist, show).
 pub fn context_menu_items(
     ui: &mut Ui,
@@ -1292,7 +1299,9 @@ pub fn context_menu_items(
     {
         app.actions.push(Action::ShufflePlay(uri.to_string()));
     }
-    if kind == "album"
+    // An album, a playlist and Liked Songs queue their songs in order, as
+    // in Spotify's own menus; an artist queues its popular songs.
+    if queues_whole(uri)
         && menu_item(
             ui,
             &palette,
