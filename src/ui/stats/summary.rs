@@ -1,12 +1,16 @@
-//! What the Stats page shows for one range, read from the index by the
-//! queries in [`crate::stats::query`] on a worker thread, and the pure
-//! formatting the page and the share card use.
+//! What the Stats page shows for one range, and the pure formatting the
+//! page and the share card use. A [`Summary`] is the same whatever its
+//! origin: read from the local index by the queries in
+//! [`crate::stats::query`] on a worker thread ([`summarize`]), or made from
+//! the statistics server's answer in API mode ([`from_server`]).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::i18n::Locale;
 use crate::stats::Index;
 use crate::stats::query::{self, Count, Day, Delta, Item, Kind, Totals};
+use crate::stats_api::stats::{Period, RangeStats};
 
 /// The translation of `text`, owned.
 pub fn tr(locale: Locale, text: &'static str) -> String {
@@ -48,6 +52,16 @@ impl Span {
             Span::Months6 => tr(locale, "6 months"),
             Span::Months12 => tr(locale, "12 months"),
             Span::AllTime => tr(locale, "All time"),
+        }
+    }
+
+    /// The statistics server's period for the range.
+    pub fn period(self) -> Period {
+        match self {
+            Span::Weeks4 => Period::Weeks4,
+            Span::Months6 => Period::Months6,
+            Span::Months12 => Period::Year,
+            Span::AllTime => Period::Lifetime,
         }
     }
 
@@ -249,6 +263,206 @@ pub fn summarize(index: &Index, span: Span, now_ms: i64, zone: &jiff::tz::TimeZo
     }
 }
 
+/// Plays and time from the server, as the page counts them.
+fn server_count(plays: u64, ms: u64) -> Count {
+    Count {
+        streams: u32::try_from(plays).unwrap_or(u32::MAX),
+        ms,
+    }
+}
+
+/// How a rank the server gives moved: `previous` is the rank over the
+/// period of the same length before, `None` when it was not ranked then.
+/// All time has no period before.
+pub fn server_delta(span: Span, rank: u32, previous: Option<u32>) -> Delta {
+    if span == Span::AllTime {
+        return Delta::None;
+    }
+    match previous {
+        None => Delta::New,
+        Some(was) if was > rank => Delta::Up(was - rank),
+        Some(was) if was < rank => Delta::Down(rank - was),
+        Some(_) => Delta::Same,
+    }
+}
+
+/// A Spotify ID the server gives, unless it does not know it yet.
+fn known(id: Option<&String>) -> Option<String> {
+    id.map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+/// The day of `ms` in `zone`.
+fn day_of(ms: i64, zone: &jiff::tz::TimeZone) -> Option<jiff::civil::Date> {
+    jiff::Timestamp::from_millisecond(ms)
+        .ok()
+        .map(|at| at.to_zoned(zone.clone()).date())
+}
+
+/// Every day of the range in the server's answer, played or not, oldest
+/// first, as [`query::per_day`] gives them from the index: from the range's
+/// first day (all time, from the first day played) to today.
+fn server_days(stats: &RangeStats, span: Span, now_ms: i64, zone: &jiff::tz::TimeZone) -> Vec<Day> {
+    let mut played: BTreeMap<jiff::civil::Date, Count> = BTreeMap::new();
+    for bucket in &stats.days {
+        if let Some(day) = bucket.day(zone) {
+            let count = played.entry(day).or_default();
+            count.streams = count
+                .streams
+                .saturating_add(u32::try_from(bucket.plays).unwrap_or(u32::MAX));
+            count.ms = count.ms.saturating_add(bucket.ms_played);
+        }
+    }
+    let Some(today) = day_of(now_ms, zone) else {
+        return Vec::new();
+    };
+    let first_played = played.keys().next().copied();
+    let first = if span == Span::AllTime {
+        first_played.unwrap_or(today)
+    } else {
+        // The server counts six months and a year in calendar months, a
+        // day or two more than the page's range: those days show too.
+        let start = day_of(span.range().bounds(now_ms).0, zone).unwrap_or(today);
+        first_played.map_or(start, |first| first.min(start))
+    };
+    let last = played
+        .keys()
+        .next_back()
+        .copied()
+        .map_or(today, |last| last.max(today));
+    let mut days = Vec::new();
+    let mut day = first;
+    while day <= last {
+        days.push(Day {
+            date: day,
+            count: played.get(&day).copied().unwrap_or_default(),
+        });
+        match day.tomorrow() {
+            Ok(next) => day = next,
+            Err(_) => break,
+        }
+    }
+    days
+}
+
+/// What the page draws for `span` from the statistics server's answer, at
+/// `now_ms`: the same rows the index gives, with the days and hours in the
+/// time zone the server counted them in. Items the server cannot name by
+/// ID yet (right after an import) have none: their rows neither open nor
+/// play, and draw a placeholder for a missing picture.
+pub fn from_server(stats: &RangeStats, span: Span, now_ms: i64) -> Summary {
+    let zone =
+        jiff::tz::TimeZone::get(&stats.zone).unwrap_or_else(|_| jiff::tz::TimeZone::system());
+    let artists = stats
+        .artists
+        .iter()
+        .take(ARTISTS)
+        .map(|artist| ArtistRow {
+            id: known(artist.spotify_id.as_ref()),
+            name: artist.name.clone(),
+            image: artist.image_url.clone(),
+            rank: artist.rank,
+            count: server_count(artist.plays, artist.ms_played),
+            delta: server_delta(span, artist.rank, artist.previous_rank),
+        })
+        .collect();
+    let tracks = stats
+        .tracks
+        .iter()
+        .take(TRACKS)
+        .map(|track| {
+            let album = track.album.as_ref();
+            let uri = track
+                .uri
+                .clone()
+                .filter(|uri| {
+                    uri.strip_prefix("spotify:track:")
+                        .is_some_and(|id| !id.is_empty())
+                })
+                .or_else(|| {
+                    known(track.spotify_id.as_ref()).map(|id| format!("spotify:track:{id}"))
+                });
+            TrackRow {
+                uri,
+                name: track.name.clone(),
+                artists: track
+                    .artists
+                    .iter()
+                    .map(|artist| Credit {
+                        id: known(artist.spotify_id.as_ref()),
+                        name: artist.name.clone(),
+                    })
+                    .collect(),
+                album_id: album.and_then(|album| known(album.spotify_id.as_ref())),
+                image: track
+                    .image_url
+                    .clone()
+                    .or_else(|| album.and_then(|album| album.image_url.clone())),
+                rank: track.rank,
+                count: server_count(track.plays, track.ms_played),
+                delta: server_delta(span, track.rank, track.previous_rank),
+            }
+        })
+        .collect();
+    let albums = stats
+        .albums
+        .iter()
+        .take(ALBUMS)
+        .map(|album| AlbumRow {
+            id: known(album.spotify_id.as_ref()),
+            name: album.name.clone(),
+            artist: album
+                .artists
+                .first()
+                .map(|artist| artist.name.clone())
+                .filter(|name| !name.is_empty()),
+            image: album.image_url.clone(),
+            rank: album.rank,
+            count: server_count(album.plays, album.ms_played),
+            delta: server_delta(span, album.rank, album.previous_rank),
+        })
+        .collect();
+    let most = stats.genres.first().map_or(1, |genre| genre.plays.max(1));
+    let genres = stats
+        .genres
+        .iter()
+        .take(GENRES)
+        .map(|genre| GenreRow {
+            name: genre.genre.clone(),
+            count: server_count(genre.plays, genre.ms_played),
+            share: (genre.plays as f64 / most as f64).clamp(0.0, 1.0) as f32,
+        })
+        .collect();
+    let mut hours = [Count::default(); 24];
+    for hour in &stats.hours {
+        if let Some(slot) = hours.get_mut(usize::from(hour.hour)) {
+            *slot = server_count(hour.plays, hour.ms_played);
+        }
+    }
+    let totals = &stats.totals;
+    let distinct = |value: u64| usize::try_from(value).unwrap_or(usize::MAX);
+    Summary {
+        span,
+        totals: Totals {
+            streams: u32::try_from(totals.plays).unwrap_or(u32::MAX),
+            // The server keeps streams only.
+            skips: 0,
+            ms: totals.ms_played,
+            tracks: distinct(totals.distinct_tracks),
+            artists: distinct(totals.distinct_artists),
+            albums: distinct(totals.distinct_albums),
+        },
+        any_streams: stats.lifetime_plays > 0,
+        artists,
+        tracks,
+        albums,
+        genres,
+        days: server_days(stats, span, now_ms, &zone),
+        hours,
+    }
+}
+
 /// What the page asks for: one range of one index, at about one time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Key {
@@ -264,8 +478,14 @@ impl Key {
     pub const TICK_MS: i64 = 10 * 60 * 1000;
 
     pub fn new(index: &Arc<Index>, span: Span, now_ms: i64) -> Self {
+        Self::of(Arc::as_ptr(index) as usize, span, now_ms)
+    }
+
+    /// The key of whatever the summary is made from, at `address`: an
+    /// index, or the statistics server's answer.
+    pub fn of(address: usize, span: Span, now_ms: i64) -> Self {
         Self {
-            index: Arc::as_ptr(index) as usize,
+            index: address,
             span,
             tick: now_ms.div_euclid(Self::TICK_MS),
         }
@@ -528,6 +748,150 @@ mod tests {
         let years: Vec<Day> = (0..3000).map(|offset| days[offset % 365]).collect();
         assert!(buckets(&years, 120).len() <= 120);
         assert!(buckets(&[], 120).is_empty());
+    }
+
+    /// 2023-11-16T02:13:20Z: after the sample's two days, the 13th and
+    /// the 15th.
+    const LATER: i64 = 1_700_100_000_000;
+
+    fn server(period: Period) -> RangeStats {
+        crate::stats_api::stats::samples::range(period)
+    }
+
+    #[test]
+    fn the_page_shows_as_many_as_the_server_is_asked_for() {
+        use crate::stats_api::stats;
+        assert_eq!(ARTISTS, stats::ARTISTS as usize);
+        assert_eq!(TRACKS, stats::TRACKS as usize);
+        assert_eq!(ALBUMS, stats::ALBUMS as usize);
+        assert_eq!(GENRES, stats::GENRES as usize);
+        assert_eq!(Span::Months12.period(), Period::Year);
+        assert_eq!(Span::AllTime.period(), Period::Lifetime);
+    }
+
+    #[test]
+    fn the_servers_answer_becomes_the_same_summary_with_rank_moves() {
+        let summary = from_server(&server(Period::Months6), Span::Months6, LATER);
+        assert_eq!(
+            summary.totals,
+            Totals {
+                streams: 72,
+                skips: 0,
+                ms: 15_000_000,
+                tracks: 3,
+                artists: 2,
+                albums: 2,
+            }
+        );
+        assert!(summary.any_streams);
+        // Artists: the first stays first; the second fell from first.
+        assert_eq!(summary.artists[0].id.as_deref(), Some("a1"));
+        assert_eq!(summary.artists[0].delta, Delta::Same);
+        assert_eq!(summary.artists[1].delta, Delta::Down(1));
+        assert_eq!(summary.hero_image(), Some("https://i.scdn.co/image/b"));
+        // Tracks: up two places, then new.
+        let first = &summary.tracks[0];
+        assert_eq!(first.uri.as_deref(), Some("spotify:track:t1"));
+        assert_eq!(first.delta, Delta::Up(2));
+        assert_eq!(
+            first.count,
+            Count {
+                streams: 42,
+                ms: 9_000_000
+            }
+        );
+        assert_eq!(
+            first.artists,
+            vec![
+                Credit {
+                    id: Some("a1".into()),
+                    name: "Band".into()
+                },
+                Credit {
+                    id: None,
+                    name: "Guest".into()
+                },
+            ]
+        );
+        assert_eq!(first.album_id.as_deref(), Some("al1"));
+        assert_eq!(first.image.as_deref(), Some("https://i.scdn.co/image/a1"));
+        assert_eq!(summary.tracks[1].delta, Delta::New);
+        // Albums: new, then up two places; the second is not known by ID.
+        assert_eq!(summary.albums[0].delta, Delta::New);
+        assert_eq!(summary.albums[0].artist.as_deref(), Some("Band"));
+        assert_eq!(summary.albums[1].delta, Delta::Up(2));
+        assert_eq!(summary.albums[1].id, None);
+        assert_eq!(summary.albums[1].artist, None);
+        // Genres share the top genre's bar.
+        let genres: Vec<(&str, f32)> = summary
+            .genres
+            .iter()
+            .map(|genre| (genre.name.as_str(), genre.share))
+            .collect();
+        assert_eq!(genres, vec![("indie", 1.0), ("pop", 0.5)]);
+        assert_eq!(summary.hours[7].streams, 2);
+        assert_eq!(summary.hours[21].streams, 70);
+        assert_eq!(
+            summary.hours.iter().map(|hour| hour.streams).sum::<u32>(),
+            72
+        );
+    }
+
+    #[test]
+    fn songs_the_server_cannot_name_by_id_yet_do_not_play() {
+        let summary = from_server(&server(Period::Weeks4), Span::Weeks4, LATER);
+        let second = &summary.tracks[1];
+        assert_eq!(second.uri, None);
+        assert_eq!(second.album_id, None);
+        assert_eq!(second.image, None);
+        assert_eq!(second.artists[0].id, None);
+        let (uris, positions) = summary.playable();
+        assert_eq!(uris, vec!["spotify:track:t1".to_owned()]);
+        assert_eq!(positions, vec![Some(0), None]);
+        assert_eq!(summary.artists[1].id, None);
+        assert_eq!(summary.artists[1].image, None);
+    }
+
+    #[test]
+    fn the_servers_days_fill_the_whole_range_and_all_time_starts_on_the_first() {
+        let utc = jiff::tz::TimeZone::UTC;
+        let days = |summary: &Summary| -> Vec<(String, u32)> {
+            summary
+                .days
+                .iter()
+                .map(|day| (day.date.to_string(), day.count.streams))
+                .collect()
+        };
+        let all = from_server(&server(Period::Lifetime), Span::AllTime, LATER);
+        assert_eq!(
+            days(&all),
+            vec![
+                ("2023-11-13".to_owned(), 40),
+                ("2023-11-14".to_owned(), 0),
+                ("2023-11-15".to_owned(), 32),
+                ("2023-11-16".to_owned(), 0),
+            ]
+        );
+        // Lifetime has no period before to compare with.
+        assert!(all.tracks.iter().all(|track| track.delta == Delta::None));
+        assert!(all.genres.iter().all(|genre| genre.share <= 1.0));
+        // A fixed range has each of its days, played or not, as the index
+        // gives them.
+        let months = from_server(&server(Period::Months6), Span::Months6, LATER);
+        let local = query::per_day(&Index::default(), query::Range::Months6, LATER, &utc);
+        assert_eq!(months.days.len(), local.len());
+        assert_eq!(months.days[0].date, local[0].date);
+        assert_eq!(
+            months.days.iter().map(|day| day.count.streams).sum::<u32>(),
+            72
+        );
+        // Nothing played ever: an empty account, not an empty range.
+        let mut empty = server(Period::Weeks4);
+        empty.lifetime_plays = 0;
+        empty.days.clear();
+        let summary = from_server(&empty, Span::Weeks4, LATER);
+        assert!(!summary.any_streams);
+        assert!((28..=29).contains(&summary.days.len()));
     }
 
     #[test]

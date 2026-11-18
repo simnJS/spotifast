@@ -1,23 +1,19 @@
 //! Requests to the statistics server, with the account's token. Every one
-//! runs on the backend's runtime, never on the UI thread; none logs the
-//! token or carries it in a URL.
+//! runs on the backend's runtime, or on a blocking thread for an import,
+//! never on the UI thread; none logs the token or carries it in a URL.
 
-use std::io::Read as _;
 use std::path::Path;
-use std::time::Duration;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use super::{HistoryPage, Me, Status, Token};
+use super::import::{self, Report, Sent};
+use super::stats::{
+    self, Answer, Hours, Item, ItemFigures, ItemStats, Kind, List, Period, RangeStats, TopAlbum,
+    TopArtist, TopGenre, TopTrack, Totals,
+};
+use super::{Me, Status, Token};
 
-/// The largest export archive the server takes.
-const MAX_ARCHIVE_BYTES: u64 = 200 * 1024 * 1024;
-/// The largest single history file the server takes.
-const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
-/// A whole export can take a while to send on a slow line, longer than
-/// the shared client's thirty seconds.
-const UPLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// The most of the server's own error message shown.
 const MESSAGE_CHARS: usize = 200;
 
@@ -33,6 +29,8 @@ pub enum Error {
     TooLarge,
     /// The file could not be read.
     File(String),
+    /// The file is not one the server reads.
+    NotHistory,
     /// The server answered with this status and message.
     Status(u16, String),
     /// The server could not be reached.
@@ -49,10 +47,14 @@ impl std::fmt::Display for Error {
             ),
             Self::OtherAccount => f.write_str(
                 "The statistics server records another Spotify account than the one \
-                 signed in here, so its plays were not added.",
+                 signed in here, so its stats are not shown.",
             ),
             Self::TooLarge => f.write_str("The file is larger than the statistics server takes."),
             Self::File(error) => write!(f, "Couldn't read the file: {error}"),
+            Self::NotHistory => f.write_str(
+                "Your statistics server takes Spotify's export ZIP, or one of its \
+                 Streaming_History_Audio files.",
+            ),
             Self::Status(status, message) if message.is_empty() => {
                 write!(f, "The statistics server answered HTTP {status}.")
             }
@@ -88,31 +90,6 @@ struct TokenInfo {
     current: bool,
 }
 
-/// `POST /import`: the counts of one file, or `totals` for an archive.
-#[derive(Deserialize)]
-struct ImportReport {
-    #[serde(default)]
-    imported: Option<u64>,
-    #[serde(default)]
-    totals: Option<ImportTotals>,
-}
-
-#[derive(Deserialize)]
-struct ImportTotals {
-    #[serde(default)]
-    imported: u64,
-}
-
-impl ImportReport {
-    fn imported(&self) -> u64 {
-        self.totals
-            .as_ref()
-            .map(|totals| totals.imported)
-            .or(self.imported)
-            .unwrap_or(0)
-    }
-}
-
 /// A connection to the server with its token. No `Debug`: the token is
 /// a usable secret.
 #[derive(Clone)]
@@ -142,6 +119,29 @@ async fn check(response: reqwest::Response) -> Result<reqwest::Response, Error> 
 
 fn network(error: reqwest::Error) -> Error {
     Error::Network(error.without_url().to_string())
+}
+
+/// [`check`] for an answer of the blocking client.
+fn check_blocking(
+    response: reqwest::blocking::Response,
+) -> Result<reqwest::blocking::Response, Error> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(Error::Unauthorized);
+    }
+    let message = response
+        .json::<ErrorBody>()
+        .map(|body| body.error.chars().take(MESSAGE_CHARS).collect::<String>())
+        .unwrap_or_default();
+    Err(Error::Status(status.as_u16(), message))
+}
+
+/// Whether `id` can be a Spotify ID, which is safe in a path as it is.
+fn spotify_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 impl Client {
@@ -189,13 +189,102 @@ impl Client {
         self.get("/me/status", &[]).await
     }
 
-    /// `GET /history`: up to `limit` plays before `before`, newest first.
-    pub async fn history(&self, before: Option<i64>, limit: u32) -> Result<HistoryPage, Error> {
-        let mut query = vec![("limit", limit.to_string())];
-        if let Some(before) = before {
-            query.push(("before", before.to_string()));
+    /// Everything the Stats page shows for `period`, with the days and
+    /// hours in this computer's time zone, `zone`. The routes are asked
+    /// side by side; any failure fails the whole range.
+    pub async fn range(&self, period: Period, zone: &str) -> Result<RangeStats, Error> {
+        let range = || ("range", period.param().to_owned());
+        let top = |limit: u32| [range(), ("limit", limit.to_string())];
+        let summary = [range()];
+        let (top_artists, top_tracks, top_albums, top_genres) = (
+            top(stats::ARTISTS),
+            top(stats::TRACKS),
+            top(stats::ALBUMS),
+            top(stats::GENRES),
+        );
+        let days = [
+            range(),
+            ("bucket", "day".to_owned()),
+            ("tz", zone.to_owned()),
+        ];
+        let hours = [range(), ("tz", zone.to_owned())];
+        let lifetime = async {
+            if period == Period::Lifetime {
+                Ok(None)
+            } else {
+                self.get::<Totals>("/stats/summary", &[("range", "lifetime".to_owned())])
+                    .await
+                    .map(Some)
+            }
+        };
+        let (totals, lifetime, artists, tracks, albums, genres, days, hours) = tokio::try_join!(
+            self.get::<Totals>("/stats/summary", &summary),
+            lifetime,
+            self.get::<List<TopArtist>>("/stats/top/artists", &top_artists),
+            self.get::<List<TopTrack>>("/stats/top/tracks", &top_tracks),
+            self.get::<List<TopAlbum>>("/stats/top/albums", &top_albums),
+            self.get::<List<TopGenre>>("/stats/top/genres", &top_genres),
+            self.get::<List<stats::DayBucket>>("/stats/listening-time", &days),
+            self.get::<Hours>("/stats/hours", &hours),
+        )?;
+        Ok(RangeStats {
+            period,
+            lifetime_plays: lifetime.as_ref().map_or(totals.plays, |all| all.plays),
+            totals,
+            artists: artists.into_vec(),
+            tracks: tracks.into_vec(),
+            albums: albums.into_vec(),
+            genres: genres.into_vec(),
+            days: days.into_vec(),
+            hours: hours.hours,
+            zone: zone.to_owned(),
+        })
+    }
+
+    /// `GET /stats/item/{kind}/{id}`; `None` when the server has no play
+    /// of it (HTTP 404).
+    async fn item_stats(&self, item: &Item) -> Result<Option<ItemStats>, Error> {
+        if !spotify_id(&item.id) {
+            return Ok(None);
         }
-        self.get("/history", &query).await
+        let path = format!("/stats/item/{}/{}", item.kind.path(), item.id);
+        match self.get::<ItemStats>(&path, &[]).await {
+            Ok(stats) => Ok(Some(stats)),
+            Err(Error::Status(404, _)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// An item's figures; for a song, with its main `artist`'s all-time
+    /// rank.
+    pub async fn item(&self, item: &Item, artist: Option<&str>) -> Result<ItemFigures, Error> {
+        let artist_rank = async {
+            let Some(id) = artist.filter(|_| item.kind == Kind::Track) else {
+                return Ok(None);
+            };
+            let artist = Item {
+                kind: Kind::Artist,
+                id: id.to_owned(),
+            };
+            Ok(self
+                .item_stats(&artist)
+                .await?
+                .and_then(|stats| stats.rank_lifetime))
+        };
+        let (stats, artist_rank) = tokio::try_join!(self.item_stats(item), artist_rank)?;
+        Ok(ItemFigures { stats, artist_rank })
+    }
+
+    /// What a page asked for.
+    pub async fn fetch(&self, fetch: &stats::Fetch, zone: &str) -> Result<Answer, Error> {
+        Ok(match fetch {
+            stats::Fetch::Range(period) => {
+                Answer::Range(std::sync::Arc::new(self.range(*period, zone).await?))
+            }
+            stats::Fetch::Item { item, artist } => Answer::Item(std::sync::Arc::new(
+                self.item(item, artist.as_deref()).await?,
+            )),
+        })
     }
 
     /// Revokes the token on the server: finds which of the account's tokens
@@ -215,133 +304,204 @@ impl Client {
         check(response).await.map(|_| ())
     }
 
-    /// Sends a streaming history to `POST /import`; the plays the server
-    /// took in.
-    pub async fn upload(&self, upload: Upload) -> Result<u64, Error> {
-        let response = self
-            .http
+    /// Sends the streaming history at `path` to `POST /import` through
+    /// `http`, reporting the bytes sent as they go, and reads the server's
+    /// report. Blocking: run it on a blocking thread, with a client built
+    /// there.
+    pub fn import(
+        &self,
+        http: &reqwest::blocking::Client,
+        path: &Path,
+        progress: impl FnMut(Sent) + Send + 'static,
+    ) -> Result<Report, Error> {
+        let mut progress = progress;
+        let upload = import::open(path)?.ok_or(Error::NotHistory)?;
+        let name = upload.name.clone();
+        progress(Sent {
+            bytes: 0,
+            total: upload.len,
+        });
+        let body = reqwest::blocking::Body::sized(
+            import::Progress::new(upload.file, upload.len, progress),
+            upload.len,
+        );
+        let response = http
             .post(format!("{}/import", self.server))
             .bearer_auth(self.token.as_str())
             .header("Content-Type", upload.content_type)
             .header("Accept", "application/json")
-            .timeout(UPLOAD_TIMEOUT)
-            .body(upload.body)
+            .timeout(import::TIMEOUT)
+            .body(body)
             .send()
-            .await
             .map_err(network)?;
-        let report: ImportReport = check(response)
-            .await?
-            .json()
-            .await
-            .map_err(|_| Error::Invalid)?;
-        Ok(report.imported())
+        let body = check_blocking(response)?.bytes().map_err(network)?;
+        Report::parse(&body, &name)
     }
-}
-
-/// A streaming history file read for `POST /import`.
-pub struct Upload {
-    body: Vec<u8>,
-    content_type: &'static str,
-}
-
-/// The content types the server takes.
-const ZIP: &str = "application/zip";
-const JSON: &str = "application/json";
-
-/// The content type the server takes `path` as, from its first bytes and
-/// its name: an export ZIP, or one extended history JSON file.
-fn upload_kind(name: &str, first: &[u8]) -> Option<(&'static str, u64)> {
-    if first.starts_with(b"PK\x03\x04") {
-        Some((ZIP, MAX_ARCHIVE_BYTES))
-    } else if name.starts_with("Streaming_History_Audio") && name.ends_with(".json") {
-        Some((JSON, MAX_FILE_BYTES))
-    } else {
-        None
-    }
-}
-
-/// Reads the streaming history at `path` for the server: an export ZIP as
-/// it is, or a `Streaming_History_Audio_*.json` file on its own. `Ok(None)`
-/// for any other file, which the server would refuse. Blocking: run it off
-/// the runtime's threads.
-pub fn read_upload(path: &Path) -> Result<Option<Upload>, Error> {
-    let io = |error: std::io::Error| Error::File(error.to_string());
-    let mut file = std::fs::File::open(path).map_err(io)?;
-    let mut first = [0u8; 4];
-    let read = file.read(&mut first).map_err(io)?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    let Some((content_type, limit)) = upload_kind(name, &first[..read]) else {
-        return Ok(None);
-    };
-    if file.metadata().map_err(io)?.len() > limit {
-        return Err(Error::TooLarge);
-    }
-    drop(file);
-    let body = std::fs::read(path).map_err(io)?;
-    Ok(Some(Upload { body, content_type }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::{Arc, Mutex};
 
-    #[test]
-    fn uploads_send_an_archive_or_an_extended_history_file_only() {
-        assert_eq!(
-            upload_kind("my_spotify_data.zip", b"PK\x03\x04"),
-            Some((ZIP, MAX_ARCHIVE_BYTES))
-        );
-        assert_eq!(
-            upload_kind("Streaming_History_Audio_2023_4.json", b"[{\"t"),
-            Some((JSON, MAX_FILE_BYTES))
-        );
-        // The older account-data history is not one the server reads.
-        assert_eq!(upload_kind("StreamingHistory_music_0.json", b"[{\"e"), None);
-        assert_eq!(upload_kind("notes.txt", b"hell"), None);
+    /// What the one-request server below received.
+    #[derive(Debug, Default)]
+    struct Received {
+        request_line: String,
+        headers: Vec<String>,
+        body: Vec<u8>,
     }
 
-    #[test]
-    fn an_upload_reads_an_export_and_leaves_other_files() {
+    /// Answers one request on a port of this computer with `status` and
+    /// `body`, and keeps what it received.
+    fn serve_once(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, std::thread::JoinHandle<Received>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut received = Received::default();
+            reader.read_line(&mut received.request_line).unwrap();
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let line = line.trim_end().to_owned();
+                if line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse().unwrap();
+                }
+                received.headers.push(line.to_ascii_lowercase());
+            }
+            received.body = vec![0; length];
+            reader.read_exact(&mut received.body).unwrap();
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            stream.flush().unwrap();
+            received
+        });
+        (address, handle)
+    }
+
+    fn client(server: String) -> Client {
+        Client::new(
+            reqwest::Client::new(),
+            server,
+            Token::new("secret-token").unwrap(),
+        )
+    }
+
+    fn blocking() -> reqwest::blocking::Client {
+        reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+    }
+
+    fn export(dir: &std::path::Path, bytes: usize) -> std::path::PathBuf {
+        let path = dir.join("my_spotify_data.zip");
+        let mut data = b"PK\x03\x04".to_vec();
+        data.resize(bytes, 9);
+        std::fs::write(&path, data).unwrap();
+        path
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "spotifast-stats-server-upload-{:016x}",
+            "spotifast-stats-server-{name}-{:016x}",
             rand::random::<u64>()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let extended = dir.join("Streaming_History_Audio_2024.json");
-        std::fs::write(&extended, b"[]").unwrap();
-        let upload = read_upload(&extended).unwrap().unwrap();
-        assert_eq!(upload.content_type, JSON);
-        assert_eq!(upload.body, b"[]");
-        let other = dir.join("StreamingHistory_music_0.json");
-        std::fs::write(&other, b"[]").unwrap();
-        assert!(read_upload(&other).unwrap().is_none());
-        assert!(matches!(
-            read_upload(&dir.join("missing.zip")),
-            Err(Error::File(_))
-        ));
+        dir
+    }
+
+    #[test]
+    fn an_import_streams_the_file_reports_its_bytes_and_reads_the_report() {
+        let (server, handle) = serve_once(
+            "200 OK",
+            r#"{"files": [{"name": "Streaming_History_Audio_2024.json", "received": 3,
+                "imported": 2, "skipped_short": 1, "skipped_not_track": 0,
+                "skipped_duplicate": 0}],
+               "totals": {"received": 3, "imported": 2, "skipped_short": 1,
+                "skipped_not_track": 0, "skipped_duplicate": 0},
+               "ignored_files": ["ReadMeFirst.pdf"]}"#,
+        );
+        let dir = temp_dir("import");
+        let path = export(&dir, 300_000);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&sent);
+        let report = client(server)
+            .import(&blocking(), &path, move |progress| {
+                seen.lock().unwrap().push(progress)
+            })
+            .unwrap();
+        let received = handle.join().unwrap();
+        assert!(received.request_line.starts_with("POST /import "));
+        assert!(
+            received
+                .headers
+                .contains(&"content-type: application/zip".to_owned())
+        );
+        assert!(
+            received
+                .headers
+                .contains(&"authorization: bearer secret-token".to_owned())
+        );
+        assert_eq!(received.body.len(), 300_000);
+        assert!(received.body.starts_with(b"PK\x03\x04"));
+        let sent = sent.lock().unwrap();
+        let last = sent.last().unwrap();
+        assert_eq!((last.bytes, last.total), (300_000, 300_000));
+        // Once before the first byte, then a hundred times at most.
+        assert_eq!(sent[0].bytes, 0);
+        assert!(sent.len() <= 102);
+        assert_eq!(report.totals.imported, 2);
+        assert_eq!(report.files[0].counts.skipped_short, 1);
+        assert_eq!(report.ignored_files, vec!["ReadMeFirst.pdf".to_owned()]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn the_import_report_counts_a_file_or_an_archive() {
-        let single: ImportReport = serde_json::from_str(
-            r#"{"received": 10, "imported": 7, "skipped_short": 2,
-                "skipped_not_track": 1, "skipped_duplicate": 0}"#,
-        )
-        .unwrap();
-        assert_eq!(single.imported(), 7);
-        let archive: ImportReport = serde_json::from_str(
-            r#"{"files": [{"name": "a.json", "received": 3, "imported": 3,
-                 "skipped_short": 0, "skipped_not_track": 0, "skipped_duplicate": 0}],
-                "totals": {"received": 3, "imported": 3, "skipped_short": 0,
-                 "skipped_not_track": 0, "skipped_duplicate": 0},
-                "ignored_files": ["Userdata.json"]}"#,
-        )
-        .unwrap();
-        assert_eq!(archive.imported(), 3);
+    fn an_import_says_why_the_server_refused_it() {
+        let (server, handle) = serve_once("400 Bad Request", r#"{"error": "invalid zip"}"#);
+        let dir = temp_dir("import-refused");
+        let path = export(&dir, 1_000);
+        let refused = client(server).import(&blocking(), &path, |_| {});
+        handle.join().unwrap();
+        assert_eq!(refused, Err(Error::Status(400, "invalid zip".into())));
+        let (server, handle) = serve_once("401 Unauthorized", "{}");
+        let refused = client(server).import(&blocking(), &path, |_| {});
+        handle.join().unwrap();
+        assert_eq!(refused, Err(Error::Unauthorized));
+        // A file the server does not read is not sent.
+        let other = dir.join("StreamingHistory_music_0.json");
+        std::fs::write(&other, b"[]").unwrap();
+        assert_eq!(
+            client("http://127.0.0.1:9".into()).import(&blocking(), &other, |_| {}),
+            Err(Error::NotHistory)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_a_spotify_id_goes_into_an_items_path() {
+        assert!(spotify_id("4uLU6hMCjMI75M1A2tKUQC"));
+        assert!(!spotify_id(""));
+        assert!(!spotify_id("../me"));
+        assert!(!spotify_id("a b"));
     }
 
     #[test]

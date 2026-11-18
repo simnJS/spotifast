@@ -20,7 +20,7 @@ Spotifast follows each platform's conventions. On Linux:
 | Legacy playback credential | `~/.local/state/spotifast/credentials/` | Removed after migration or sign-out |
 | Proxy password | System credential store | Clear the password and apply the manual proxy settings |
 | Statistics server token | System credential store | Use Disconnect in Settings > Statistics server |
-| Statistics server cursor | `~/.local/state/spotifast/stats/<account>/stats-server.json` | Yes, the next pull reads the server's whole history again |
+| Statistics server cursor (0.20.0 only) | `~/.local/state/spotifast/stats/<account>/stats-server.json` | Yes, no longer read |
 | Legacy proxy password | `~/.local/state/spotifast/proxy_password` | Removed after protected migration |
 | Last session | `~/.local/state/spotifast/session.json` | Yes |
 | Play history | `~/.local/state/spotifast/history.json` | Yes |

@@ -457,7 +457,9 @@ remaining shows for that refresh; the shelf keeps what it showed before.
 
 Spotifast keeps a log of what the account plays, for its listening stats,
 on this computer only. Nothing is sent anywhere but Spotify's own Web API,
-unless you connect a [statistics server](#statistics-server).
+unless you connect a [statistics server](#statistics-server). While one is
+connected, every figure comes from the server instead, and the log
+described here is neither read nor written.
 
 - **Logger.** At sign-in, after the computer wakes, and every twenty
   minutes while Spotifast runs, it asks for
@@ -480,13 +482,15 @@ unless you connect a [statistics server](#statistics-server).
 - **Import.** The streaming history Spotify's privacy page sends on request
   (the "Extended streaming history" ZIP, one of its JSON files, or the
   older account data's `StreamingHistory_music_*.json`) is read from the
-  disk. It is uploaded only to a connected statistics server, as described
-  below.
+  disk into the log. While a statistics server is connected it goes to the
+  server instead, as described below.
 
 The log is stored per account under the state folder, in `stats/`, readable
 by the user only: segments of one JSON line per play, each written whole and
-atomically, and a `metadata.json` cache. A play Spotify, the local history,
-an import and a statistics server all report is kept once.
+atomically, and a `metadata.json` cache. A play Spotify, the local history
+and an import all report is kept once. Plays that versions 0.20.0 and
+earlier pulled from a statistics server stay in the log as their own
+source.
 
 ### Statistics server
 
@@ -515,34 +519,51 @@ computer (`http://127.0.0.1`, `http://localhost`).
   keeps only the address and whether a connection is made, so the token is
   read back at start. It travels in the `Authorization` header of each
   request to the server, never in an address.
-- **Pulling plays.** At start, right after connecting, at every stats
+- **API mode.** While connected, every figure Spotifast shows comes from
+  the server: the Stats page and its **Share** image, and **Your stats** on
+  artist and album pages and in the Now Playing panel. The Stats page says
+  **Source:** with the server's address (**Source: Local** otherwise). The
+  logger stops reading recently played and nothing is written to the local
+  log, which stays on the disk as it was and comes back on **Disconnect**.
+  Each figure is fetched by the backend the first time a page shows it, and
+  kept until the next refresh; the figures on show stay while new ones come,
+  and a failure is shown in their place only when there are none.
+- **The Stats page's range** (`range` = `4w`, `6m`, `1y` or `lifetime`) is
+  asked side by side: `GET /stats/summary` for the range and for
+  `lifetime` (which tells an empty account from an empty range),
+  `GET /stats/top/artists` (`limit=10`), `/stats/top/tracks` (`limit=50`),
+  `/stats/top/albums` (`limit=10`) and `/stats/top/genres` (`limit=10`),
+  each item with its `rank` and `previous_rank` for the ▲▼ and NEW marks,
+  `GET /stats/listening-time?bucket=day&tz=<zone>` and
+  `GET /stats/hours?tz=<zone>`, where the zone is the computer's IANA time
+  zone (UTC when it has no name). An item the server cannot name by ID yet,
+  as for a while after an import, shows without a picture and neither opens
+  nor plays; the genres section is left out while the server knows none.
+- **An item's figures** come from `GET /stats/item/{track|artist|album}/{id}`:
+  streams, time listened, first listen, all-time and four-week ranks, and an
+  artist's or album's most played songs. For the song playing, the main
+  artist's all-time rank comes from that artist's own request. A `404`
+  means no play: nothing shows.
+- **Refreshing.** At start, right after connecting, and at every stats
   refresh (every twenty minutes, after waking, and **Sync now**), Spotifast
-  asks `GET /me` and `GET /me/status`, then reads `GET /history` newest
-  first, two hundred plays a page, until it meets the newest play it pulled
-  before. Where it stopped is kept beside the account's play log, in
-  `stats-server.json`. When the server holds more plays than the pulls
-  brought, because history was imported into it meanwhile, the next pull
-  reads them all once more and the merge drops what the log already has.
-  The plays go into the same log, as their own source, and merge with the
-  logger's, the local history's and the imports' like any other: a play
-  the server read from Spotify has Spotify's `played_at` and the track's
-  length, like the logger's; one imported into it ends on a whole second and
-  carries the time really played, which replaces an estimate. The server's
-  account must be the Spotify account signed in here: the plays of another
-  account are never added.
-- **Importing.** While connected, the file chosen on the Stats page is also
-  sent to `POST /import`, an export ZIP whole (up to 200 MB) or one
-  `Streaming_History_Audio_*.json` file (up to 64 MB). The older
-  `StreamingHistory_music_*.json` files stay on this computer: the server
-  does not read them. The local import happens either way.
+  asks `GET /me` and `GET /me/status`, then asks again for the figures on
+  show. The server's account must be the Spotify account signed in here:
+  another account's figures are never shown.
+- **Importing.** The file chosen on the Stats page is sent to
+  `POST /import` as it is, an export ZIP (`application/zip`, up to 200 MB)
+  or one `Streaming_History_Audio_*.json` file (`application/json`, up to
+  64 MB), streamed from the disk with the bytes sent shown as they go. The
+  server answers a report per file (new plays, plays it already had,
+  entries skipped), which the card lists. The older
+  `StreamingHistory_music_*.json` files are refused: the server does not
+  read them. Nothing is imported into the local log.
 - **Settings** shows the account's display name, when the server last read
-  Spotify, how many plays it holds and when Spotifast last pulled them. The
-  Stats page's import card says **Synced from** the server, with the time of
-  the last pull.
+  Spotify, how many plays it holds and when Spotifast last checked.
 - **Disconnect** forgets the token here at once and asks the server to
-  revoke it (`GET /auth/tokens`, then `DELETE /auth/token/{id}`). Plays
-  already pulled stay in the local stats. A token the server refuses is
-  forgotten the same way, and Settings asks to connect again.
+  revoke it (`GET /auth/tokens`, then `DELETE /auth/token/{id}`). The
+  stats are the local log's again, brought up to date at once. A token the
+  server refuses is forgotten the same way, and Settings asks to connect
+  again.
 
 ## Album queueing
 

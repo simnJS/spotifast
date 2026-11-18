@@ -2583,10 +2583,11 @@ pub fn album(app: &mut App, ui: &mut egui::Ui, id: &str) {
     app.album_pages.insert(id.to_string(), page);
 }
 
-/// The owner's own figures for this album from the local listening stats,
-/// in one compact card under its songs: streams, time listened, first
-/// listen and the most played song, which plays from the album on click.
-/// Left out when the log has no stream of it.
+/// The owner's own figures for this album from their listening stats (the
+/// log on this computer, or the statistics server in API mode), in one
+/// compact card under its songs: streams, time listened, first listen and
+/// the most played song, which plays from the album on click. Left out
+/// when there is no stream of it.
 fn your_album_stats(app: &mut App, ui: &mut egui::Ui, album: &Album, items: &[TableItem]) {
     use super::widgets::your_stats::{self, Shown, Subject};
     let shown = your_stats::for_subject(app, ui.ctx(), Subject::Album(album.id.clone()));
@@ -2606,9 +2607,16 @@ fn your_album_stats(app: &mut App, ui: &mut egui::Ui, album: &Album, items: &[Ta
             palette.text,
         );
         ui.add_space(12.0);
-        let Shown::Ready(figures) = &shown else {
-            your_stats::draw_skeleton(ui, &palette, 4, 18.0);
-            return;
+        let figures = match &shown {
+            Shown::Ready(figures) => figures,
+            Shown::Failed(error) => {
+                your_stats::draw_error(ui, &palette, locale, error);
+                return;
+            }
+            Shown::Loading | Shown::Hidden => {
+                your_stats::draw_skeleton(ui, &palette, 4, 18.0);
+                return;
+            }
         };
         // Kept to one line: no four-week rank here.
         let tiles = your_stats::tiles(locale, figures, &gettext(locale, "Your top albums"), false);

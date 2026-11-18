@@ -4930,20 +4930,23 @@ mod tests {
 }
 
 /// The owner's own listening figures for a song, an artist or an album,
-/// read from the local stats store ([`crate::stats`]) for the artist page,
-/// the album page and the Now Playing panel.
+/// for the artist page, the album page and the Now Playing panel: read
+/// from the local stats store ([`crate::stats`]), or in API mode from the
+/// statistics server ([`crate::stats_api::stats`]).
 ///
-/// The figures are worked out away from the interface thread, once per
-/// item and per indexed log, and kept until the log is indexed again.
-/// Nothing shows for an item the log has no stream of.
+/// The local figures are worked out away from the interface thread, once
+/// per item and per indexed log, and kept until the log is indexed again.
+/// The server's are fetched by the backend, once per item and per refresh.
+/// Nothing shows for an item that has no stream.
 pub(crate) mod your_stats {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     use crate::i18n::{Locale, gettext, ngettext};
-    use crate::model::Loadable;
-    use crate::stats::Index;
+    use crate::model::{Action, Loadable};
     use crate::stats::query::{self, Item, Kind, Range};
+    use crate::stats::{Index, Origin};
+    use crate::stats_api::stats::{self as server, Fetch, ItemFigures};
     use crate::theme::{self, Palette};
     use crate::util;
 
@@ -5002,6 +5005,9 @@ pub(crate) mod your_stats {
         Loading,
         /// No log, or nothing streamed: nothing at all.
         Hidden,
+        /// The statistics server could not answer: why, in the figures'
+        /// place.
+        Failed(String),
         Ready(Arc<Figures>),
     }
 
@@ -5122,9 +5128,133 @@ pub(crate) mod your_stats {
 
     type Shared = Arc<Mutex<Cache>>;
 
+    /// The server's item for `subject`: a song by the ID in its URI.
+    pub fn server_item(subject: &Subject) -> Option<server::Item> {
+        let (kind, id) = match subject {
+            Subject::Track(uri) => (server::Kind::Track, uri.strip_prefix("spotify:track:")?),
+            Subject::Artist(id) => (server::Kind::Artist, id.as_str()),
+            Subject::Album(id) => (server::Kind::Album, id.as_str()),
+        };
+        (!id.is_empty()).then(|| server::Item {
+            kind,
+            id: id.to_owned(),
+        })
+    }
+
+    /// The owner's figures for `subject` from the server's answer, or
+    /// `None` when it has no stream of it. For a song, `artist` is its main
+    /// artist's name, shown with the rank the server gave. Songs the server
+    /// cannot name by ID yet are left out of the most played: they could
+    /// not be played.
+    pub fn server_figures(
+        answer: &ItemFigures,
+        subject: &Subject,
+        artist: Option<&str>,
+    ) -> Option<Figures> {
+        let stats = answer.stats.as_ref().filter(|stats| stats.plays > 0)?;
+        let (songs, album_id) = match subject {
+            Subject::Track(_) => (0, None),
+            Subject::Artist(_) => (TOP_TRACKS, None),
+            Subject::Album(id) => (1, Some(id.clone())),
+        };
+        let top_tracks = stats
+            .top_tracks
+            .iter()
+            .filter_map(|song| {
+                let id = song.spotify_id.as_deref().map(str::trim)?;
+                (!id.is_empty()).then(|| TopTrack {
+                    uri: format!("spotify:track:{id}"),
+                    name: song.name.clone(),
+                    artists: Vec::new(),
+                    album_id: album_id.clone(),
+                    album_name: None,
+                    album_image: None,
+                    duration_ms: None,
+                    streams: u32::try_from(song.plays).unwrap_or(u32::MAX),
+                })
+            })
+            .take(songs)
+            .collect();
+        Some(Figures {
+            streams: u32::try_from(stats.plays).unwrap_or(u32::MAX),
+            ms: stats.ms_played,
+            first_ms: stats.first_played_at,
+            rank_all: stats.rank_lifetime,
+            rank_weeks4: stats.rank_4w,
+            artist: match (subject, artist, answer.artist_rank) {
+                (Subject::Track(_), Some(name), Some(rank)) if !name.is_empty() => {
+                    Some((name.to_owned(), rank))
+                }
+                _ => None,
+            },
+            top_tracks,
+        })
+    }
+
+    /// What to show from the server's answer for an item, in API mode.
+    pub fn shown_from_server(
+        slot: Option<&server::Slot<ItemFigures>>,
+        subject: &Subject,
+        artist: Option<&str>,
+    ) -> Shown {
+        let Some(slot) = slot else {
+            return Shown::Loading;
+        };
+        match (slot.get(), &slot.error) {
+            (Some(answer), _) => server_figures(answer, subject, artist)
+                .map_or(Shown::Hidden, |figures| Shown::Ready(Arc::new(figures))),
+            (None, Some(error)) => Shown::Failed(error.to_string()),
+            (None, None) => Shown::Loading,
+        }
+    }
+
     /// The figures to show for `subject` now, starting their work if they
     /// have none yet.
-    pub fn for_subject(app: &crate::app::App, ctx: &egui::Context, subject: Subject) -> Shown {
+    pub fn for_subject(app: &mut crate::app::App, ctx: &egui::Context, subject: Subject) -> Shown {
+        shown_for(app, ctx, subject, None)
+    }
+
+    /// The figures to show for the song `uri` now, with where its main
+    /// `artist` stands among the owner's.
+    pub fn for_song(
+        app: &mut crate::app::App,
+        ctx: &egui::Context,
+        uri: String,
+        artist: Option<&crate::api::models::ArtistRef>,
+    ) -> Shown {
+        shown_for(app, ctx, Subject::Track(uri), artist)
+    }
+
+    fn shown_for(
+        app: &mut crate::app::App,
+        ctx: &egui::Context,
+        subject: Subject,
+        artist: Option<&crate::api::models::ArtistRef>,
+    ) -> Shown {
+        match app.stats.origin() {
+            Origin::Local => from_log(app, ctx, subject),
+            Origin::Server(_) => {
+                let Some(item) = server_item(&subject) else {
+                    return Shown::Hidden;
+                };
+                let fetch = Fetch::Item {
+                    item: item.clone(),
+                    artist: artist.and_then(|artist| artist.id.clone()),
+                };
+                if app.stats.server.answers.wants(&fetch) {
+                    app.actions.push(Action::FetchServerStats(fetch));
+                }
+                shown_from_server(
+                    app.stats.server.answers.item(&item),
+                    &subject,
+                    artist.map(|artist| artist.name.as_str()),
+                )
+            }
+        }
+    }
+
+    /// The figures to show for `subject` from the local log.
+    fn from_log(app: &crate::app::App, ctx: &egui::Context, subject: Subject) -> Shown {
         let log = &app.stats.index;
         let Loadable::Loaded(index) = log else {
             return shown(log, None);
@@ -5308,6 +5438,24 @@ pub(crate) mod your_stats {
                     theme::text(ui, label, theme::regular(13.0), palette.secondary);
                 });
             }
+        });
+    }
+
+    /// Why the statistics server's figures are missing, in their place:
+    /// the app's alert icon and the message in the subdued colour.
+    pub fn draw_error(ui: &mut egui::Ui, palette: &Palette, locale: Locale, error: &str) {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            theme::icon(ui, theme::Icon::CircleAlert, 16.0, palette.danger);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(super::sanitize_error_message(error, locale))
+                        .font(theme::regular(13.0))
+                        .color(palette.secondary),
+                )
+                .wrap()
+                .selectable(false),
+            );
         });
     }
 
@@ -5558,7 +5706,7 @@ pub(crate) mod your_stats {
         }
 
         /// Asks until the work is done, as frames would.
-        fn settled(app: &crate::app::App, ctx: &egui::Context, subject: &Subject) -> Shown {
+        fn settled(app: &mut crate::app::App, ctx: &egui::Context, subject: &Subject) -> Shown {
             for _ in 0..500 {
                 let shown = for_subject(app, ctx, subject.clone());
                 if shown != Shown::Loading {
@@ -5575,29 +5723,193 @@ pub(crate) mod your_stats {
             let ctx = egui::Context::default();
             let artist = Subject::Artist("x".into());
             // No log read: nothing shows, and no work starts.
-            assert_eq!(for_subject(&app, &ctx, artist.clone()), Shown::Hidden);
+            assert_eq!(for_subject(&mut app, &ctx, artist.clone()), Shown::Hidden);
             app.stats.index = Loadable::Loading;
-            assert_eq!(for_subject(&app, &ctx, artist.clone()), Shown::Loading);
+            assert_eq!(for_subject(&mut app, &ctx, artist.clone()), Shown::Loading);
             app.stats.index = Loadable::Loaded(Arc::new(sample()));
-            let Shown::Ready(figures) = settled(&app, &ctx, &artist) else {
+            let Shown::Ready(figures) = settled(&mut app, &ctx, &artist) else {
                 panic!("the artist's figures arrive");
             };
             assert_eq!(figures.streams, 6);
             // Kept: asked again, the same figures come back at once.
             assert_eq!(
-                for_subject(&app, &ctx, artist.clone()),
+                for_subject(&mut app, &ctx, artist.clone()),
                 Shown::Ready(Arc::clone(&figures))
             );
             assert_eq!(
-                settled(&app, &ctx, &Subject::Artist("z".into())),
+                settled(&mut app, &ctx, &Subject::Artist("z".into())),
                 Shown::Hidden
             );
             // A fresh log is worked out again.
             app.stats.index = Loadable::Loaded(Arc::new(index(&[play(1, "a", "x", "xa", 60_000)])));
-            let Shown::Ready(fresh) = settled(&app, &ctx, &artist) else {
+            let Shown::Ready(fresh) = settled(&mut app, &ctx, &artist) else {
                 panic!("the fresh figures arrive");
             };
             assert_eq!(fresh.streams, 1);
+            // The log asked nothing of a statistics server.
+            assert!(app.actions.is_empty());
+        }
+
+        fn server_answer(top: &[(Option<&str>, &str, u64)]) -> ItemFigures {
+            ItemFigures {
+                stats: Some(crate::stats_api::stats::ItemStats {
+                    plays: 120,
+                    ms_played: 7_200_000,
+                    first_played_at: Some(NOW - 100 * DAY),
+                    last_played_at: Some(NOW),
+                    rank_lifetime: Some(3),
+                    rank_4w: None,
+                    top_tracks: top
+                        .iter()
+                        .map(|(id, name, plays)| crate::stats_api::stats::ItemTrack {
+                            spotify_id: id.map(str::to_owned),
+                            name: (*name).to_owned(),
+                            plays: *plays,
+                            ms_played: 1,
+                        })
+                        .collect(),
+                }),
+                artist_rank: Some(7),
+            }
+        }
+
+        #[test]
+        fn the_servers_answer_gives_the_same_figures() {
+            let top = [
+                (Some("t1"), "One", 40),
+                (None, "Imported", 30),
+                (Some("t2"), "Two", 20),
+                (Some("t3"), "Three", 10),
+                (Some("t4"), "Four", 5),
+            ];
+            let answer = server_answer(&top);
+            let artist = server_figures(&answer, &Subject::Artist("x".into()), None).unwrap();
+            assert_eq!(artist.streams, 120);
+            assert_eq!(artist.ms, 7_200_000);
+            assert_eq!(artist.first_ms, Some(NOW - 100 * DAY));
+            assert_eq!((artist.rank_all, artist.rank_weeks4), (Some(3), None));
+            assert_eq!(artist.artist, None);
+            // Three songs, without the one the server cannot name by ID.
+            let songs: Vec<(&str, u32)> = artist
+                .top_tracks
+                .iter()
+                .map(|song| (song.uri.as_str(), song.streams))
+                .collect();
+            assert_eq!(
+                songs,
+                vec![
+                    ("spotify:track:t1", 40),
+                    ("spotify:track:t2", 20),
+                    ("spotify:track:t3", 10),
+                ]
+            );
+            let album = server_figures(&answer, &Subject::Album("al".into()), None).unwrap();
+            assert_eq!(album.top_tracks.len(), 1);
+            assert_eq!(album.top_tracks[0].album_id.as_deref(), Some("al"));
+            let song = server_figures(
+                &answer,
+                &Subject::Track("spotify:track:t1".into()),
+                Some("Band"),
+            )
+            .unwrap();
+            assert_eq!(song.artist, Some(("Band".into(), 7)));
+            assert!(song.top_tracks.is_empty());
+            // No play on the server: nothing shows.
+            assert_eq!(
+                server_figures(&ItemFigures::default(), &Subject::Artist("x".into()), None),
+                None
+            );
+        }
+
+        #[test]
+        fn the_server_is_asked_once_per_item_and_its_failure_shows() {
+            use crate::stats_api::stats::{Answer, Kind as ServerKind};
+            let mut app = test_app();
+            let ctx = egui::Context::default();
+            // A local log is on show, then the server is connected.
+            app.stats.index = Loadable::Loaded(Arc::new(sample()));
+            app.stats
+                .server
+                .connecting(crate::stats_api::DEFAULT_SERVER.into());
+            app.stats
+                .server
+                .receive(crate::stats_api::Update::Restored {
+                    server: crate::stats_api::DEFAULT_SERVER.into(),
+                });
+            let artist = Subject::Artist("x".into());
+            // Asked for, never read from the log.
+            assert_eq!(for_subject(&mut app, &ctx, artist.clone()), Shown::Loading);
+            let item = server_item(&artist).unwrap();
+            assert_eq!(item.kind, ServerKind::Artist);
+            let fetch = Fetch::Item {
+                item: item.clone(),
+                artist: None,
+            };
+            assert!(matches!(
+                app.actions.as_slice(),
+                [Action::FetchServerStats(asked)] if *asked == fetch
+            ));
+            app.actions.clear();
+            app.stats.server.answers.fetching(&fetch);
+            // On its way: not asked twice.
+            assert_eq!(for_subject(&mut app, &ctx, artist.clone()), Shown::Loading);
+            assert!(app.actions.is_empty());
+            app.stats.server.answers.receive(
+                &fetch,
+                Err(crate::stats_api::client::Error::Network("offline".into())),
+                1,
+            );
+            let Shown::Failed(error) = for_subject(&mut app, &ctx, artist.clone()) else {
+                panic!("the failure shows");
+            };
+            assert!(error.contains("offline"));
+            app.stats.server.answers.refresh();
+            app.stats.server.answers.fetching(&fetch);
+            app.stats.server.answers.receive(
+                &fetch,
+                Ok(Answer::Item(Arc::new(server_answer(&[(
+                    Some("t1"),
+                    "One",
+                    4,
+                )])))),
+                2,
+            );
+            let Shown::Ready(figures) = for_subject(&mut app, &ctx, artist.clone()) else {
+                panic!("the server's figures arrive");
+            };
+            assert_eq!(figures.streams, 120);
+            // A song asks with its main artist, whose rank comes along.
+            let band = crate::api::models::ArtistRef {
+                id: Some("band".into()),
+                name: "Band".into(),
+                uri: None,
+            };
+            app.actions.clear();
+            assert_eq!(
+                for_song(&mut app, &ctx, "spotify:track:t1".into(), Some(&band)),
+                Shown::Loading
+            );
+            assert!(matches!(
+                app.actions.as_slice(),
+                [Action::FetchServerStats(Fetch::Item { artist: Some(id), .. })] if id == "band"
+            ));
+            // A local file has no figures on the server.
+            app.actions.clear();
+            assert_eq!(
+                for_subject(
+                    &mut app,
+                    &ctx,
+                    Subject::Track("spotify:local:a:b:c:1".into())
+                ),
+                Shown::Hidden
+            );
+            assert!(app.actions.is_empty());
+            // Disconnected: the log is read again.
+            app.stats.server.disconnect();
+            assert!(matches!(
+                settled(&mut app, &ctx, &artist),
+                Shown::Ready(figures) if figures.streams == 6
+            ));
         }
 
         #[test]

@@ -1817,7 +1817,7 @@ fn ago(locale: crate::i18n::Locale, now_ms: i64, at_ms: i64) -> String {
 }
 
 /// Where the statistics server stands: when it last read Spotify, how
-/// many plays it holds, and the last pull.
+/// many plays it holds, and the last check.
 fn stats_server_status(state: &crate::stats_api::State, locale: crate::i18n::Locale) -> String {
     let now = jiff::Timestamp::now().as_millisecond();
     let mut parts: Vec<String> = Vec::new();
@@ -1911,8 +1911,11 @@ fn stats_server_section(app: &mut App, ui: &mut egui::Ui, needle: &str) -> bool 
                 None => gettext(locale, "Connected").into_owned(),
             },
             // Translators: {server} is the statistics server's address.
-            gettext(locale, "Your listening stats add the plays {server} records.")
-                .replace("{server}", &host),
+            gettext(
+                locale,
+                "Your listening stats come from {server}, and your streaming history is imported into it. The stats kept on this computer come back once you disconnect.",
+            )
+            .replace("{server}", &host),
         ),
     };
     let rows = [
@@ -2011,7 +2014,7 @@ fn stats_server_section(app: &mut App, ui: &mut egui::Ui, needle: &str) -> bool 
                 });
             });
             filtered_row(ui, &palette, needle, &title, &rows[2], |ui| {
-                let syncing = app.stats.index.is_loading();
+                let syncing = app.stats.server.checking || app.stats.server.answers.fetching_any();
                 let sync = ui
                     .add_enabled_ui(!syncing, |ui| {
                         theme::soft_button(

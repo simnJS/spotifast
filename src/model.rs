@@ -1667,8 +1667,12 @@ pub enum Action {
     ChooseLocalFilesFolder,
     /// Bring the listening stats up to date now (see [`crate::stats`]).
     RefreshStats,
-    /// Import Spotify's streaming history into the listening stats: the
-    /// file given, or the one picked in a file dialog when `None`.
+    /// Fetch figures a page shows from the statistics server, in API mode
+    /// (see [`crate::stats_api::stats`]).
+    FetchServerStats(crate::stats_api::stats::Fetch),
+    /// Import Spotify's streaming history into the listening stats, or into
+    /// the statistics server in API mode: the file given, or the one picked
+    /// in a file dialog when `None`.
     ImportStreamingHistory(Option<std::path::PathBuf>),
     /// Connect to the statistics server in Settings through the browser.
     ConnectStatsServer,

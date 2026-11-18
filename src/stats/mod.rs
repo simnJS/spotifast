@@ -1,7 +1,14 @@
-//! Local listening statistics, in the manner of stats.fm, kept on this
-//! computer only.
+//! Listening statistics, in the manner of stats.fm.
 //!
-//! These sources feed one per-account log of plays:
+//! The figures come from one of two places ([`Origin`]): the log kept on
+//! this computer, or, while one is connected in Settings, the statistics
+//! server ([`crate::stats_api`]), which reads recently-played every few
+//! minutes even while this computer is off and answers every figure
+//! itself ("API mode"). In API mode the log is neither read nor written:
+//! it stays on the disk as it was and is shown again once the server is
+//! disconnected.
+//!
+//! These sources feed the local per-account log of plays:
 //!
 //! - the logger ([`logger`]), which reads `/me/player/recently-played` every
 //!   twenty minutes, at start and after waking, and so catches the plays of
@@ -9,10 +16,7 @@
 //!   that Spotify's answer leaves out;
 //! - an import ([`import`]) of the "Extended streaming history" ZIP (or its
 //!   JSON files, or the older account-data `StreamingHistory_music_*.json`)
-//!   Spotify's privacy page sends on request;
-//! - when one is connected in Settings, the statistics server
-//!   ([`crate::stats_api`]), which reads recently-played every few minutes
-//!   even while this computer is off, pulled at each refresh.
+//!   Spotify's privacy page sends on request.
 //!
 //! The log lives under the state folder ([`store`]), one directory per
 //! account, as append-only segments of JSON lines that are each written
@@ -59,10 +63,20 @@ pub enum Source {
     Spotify,
     /// A play Spotifast itself saw ([`crate::history`]).
     Local,
-    /// The statistics server's `/history` ([`crate::stats_api`]): what it
-    /// read from recently-played, with the track's duration for the time
-    /// played, and what was imported into it, with the time played.
+    /// A statistics server's `/history`, which earlier versions pulled into
+    /// the log: what it read from recently-played, with the track's
+    /// duration for the time played, and what was imported into it, with
+    /// the time played. Logs that hold such plays still read.
     Server,
+}
+
+/// Where the figures shown come from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// The log kept on this computer.
+    Local,
+    /// The statistics server at this address: API mode.
+    Server(String),
 }
 
 impl Source {
@@ -248,6 +262,15 @@ impl StatsState {
         }
     }
 
+    /// Where the figures shown come from: the statistics server while one
+    /// is connected, the local log otherwise.
+    pub fn origin(&self) -> Origin {
+        match self.server.connected() {
+            Some(server) => Origin::Server(server.to_owned()),
+            None => Origin::Local,
+        }
+    }
+
     /// Marks the stats as being read, keeping what is shown for the same
     /// account.
     pub fn loading(&mut self, account_id: &str) {
@@ -257,5 +280,69 @@ impl StatsState {
         } else if self.index.get().is_none() {
             self.index = crate::model::Loadable::Loading;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stats_api::{self, DEFAULT_SERVER, Me};
+
+    fn me() -> Me {
+        Me {
+            id: 1,
+            spotify_id: "me".into(),
+            display_name: "Me".into(),
+        }
+    }
+
+    #[test]
+    fn the_figures_come_from_the_server_only_while_it_is_connected() {
+        let mut stats = StatsState::default();
+        let local = Arc::new(Index::default());
+        stats.receive(
+            Update::Loaded {
+                account_id: "me".into(),
+                index: Arc::clone(&local),
+            },
+            Some("me"),
+        );
+        assert_eq!(stats.origin(), Origin::Local);
+        // Connecting is not connected yet: the log stays on show.
+        stats.server.authorizing(DEFAULT_SERVER.into());
+        assert_eq!(stats.origin(), Origin::Local);
+        stats.receive(
+            Update::Server(stats_api::Update::Connected {
+                server: DEFAULT_SERVER.into(),
+                account: me(),
+            }),
+            Some("me"),
+        );
+        assert_eq!(stats.origin(), Origin::Server(DEFAULT_SERVER.into()));
+        // A failed check keeps API mode.
+        stats.receive(
+            Update::Server(stats_api::Update::Failed("offline".into())),
+            Some("me"),
+        );
+        assert_eq!(stats.origin(), Origin::Server(DEFAULT_SERVER.into()));
+        // The log's index is kept meanwhile, so disconnecting shows it again.
+        stats.receive(
+            Update::Server(stats_api::Update::Disconnected(None)),
+            Some("me"),
+        );
+        assert_eq!(stats.origin(), Origin::Local);
+        assert!(Arc::ptr_eq(stats.index.get().unwrap(), &local));
+        // Restored at start.
+        stats.server.connecting(DEFAULT_SERVER.into());
+        assert_eq!(stats.origin(), Origin::Local);
+        stats.receive(
+            Update::Server(stats_api::Update::Restored {
+                server: DEFAULT_SERVER.into(),
+            }),
+            Some("me"),
+        );
+        assert_eq!(stats.origin(), Origin::Server(DEFAULT_SERVER.into()));
+        stats.server.disconnect();
+        assert_eq!(stats.origin(), Origin::Local);
     }
 }

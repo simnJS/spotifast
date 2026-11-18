@@ -68,9 +68,11 @@ Spotifast connects only to the services below.
   server, `https://spotapi.simnjs.fr` unless you type another address.
   Nothing goes to it until you connect. You sign in on its page in your
   browser, where Spotify asks you to approve it; the server then reads your
-  listening from Spotify itself. Spotifast reads back the plays it recorded,
-  its status and the account's display name, and sends it the streaming
-  history you import on the Stats page. The token it issues stays in the
+  listening from Spotify itself. While it is connected, Spotifast shows the
+  listening stats the server computes instead of the ones kept on this
+  computer, reads its status and the account's display name, and sends it
+  the streaming history you import on the Stats page. It also sends the
+  computer's time zone name, so days and hours are your own. The token it issues stays in the
   system credential store and is never written to the log. **Disconnect**
   forgets it here and revokes it on the server. See
   [How It Connects](/how-it-connects/#statistics-server).

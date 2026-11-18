@@ -997,11 +997,14 @@ pub enum Command {
         result: Result<Vec<crate::api::models::Track>, String>,
     },
     /// Bring the listening stats up to date: Spotify's recently played and
-    /// the local history into the log, then index it (see [`crate::stats`]).
-    /// Sent at sign-in, after waking, on demand, and every twenty minutes.
+    /// the local history into the log, then index it (see [`crate::stats`]);
+    /// in API mode, check the statistics server's account and ask again for
+    /// the figures on show. Sent at sign-in, after waking, on demand, and
+    /// every twenty minutes.
     RefreshStats,
     /// Import Spotify's streaming history (the ZIP or one of its JSON
-    /// files) into the signed-in account's stats.
+    /// files) into the signed-in account's stats, or into the statistics
+    /// server in API mode.
     ImportStreamingHistory(std::path::PathBuf),
     /// The streaming history file dialog, built on the UI thread.
     ChooseStreamingHistory {
@@ -1032,10 +1035,24 @@ pub enum Command {
         server: String,
         result: Result<crate::credentials::Loaded, crate::credentials::Error>,
     },
-    /// Internal: a pull from the statistics server ended.
+    /// Internal: a check of the statistics server's account ended.
     StatsServerSynced {
         generation: u64,
         result: Result<crate::stats_api::Synced, crate::stats_api::client::Error>,
+    },
+    /// Fetch figures from the statistics server, in API mode.
+    StatsServerFetch(crate::stats_api::stats::Fetch),
+    /// Internal: a fetch from the statistics server ended.
+    StatsServerFetched {
+        generation: u64,
+        server: String,
+        fetch: crate::stats_api::stats::Fetch,
+        result: Result<crate::stats_api::stats::Answer, crate::stats_api::client::Error>,
+    },
+    /// Internal: an import into the statistics server ended.
+    StatsServerImported {
+        generation: u64,
+        result: Result<crate::stats_api::import::Report, crate::stats_api::client::Error>,
     },
     /// Internal: an audiobook lookup finished for the session it started in.
     AudiobookShowsResolved {
@@ -1987,8 +2004,15 @@ struct Worker {
     canvas: Arc<crate::canvas::Library>,
     /// The listening stats' open log; refreshes and imports take turns.
     stats: Arc<tokio::sync::Mutex<crate::stats::service::Service>>,
-    /// The statistics server connected to, with its token.
+    /// The statistics server connected to, with its token: API mode.
     stats_server: Option<crate::stats_api::Connection>,
+    /// The Spotify account the statistics server records, once it said.
+    stats_server_account: Option<String>,
+    /// The saved connection is being read back: whether the stats are local
+    /// or the server's is not known yet.
+    stats_server_restoring: bool,
+    /// A refresh asked for while the connection was read back.
+    stats_refresh_deferred: bool,
     /// Bumped by each connection, restoration and disconnection of the
     /// statistics server, so an answer about an older one changes nothing.
     stats_server_generation: u64,
@@ -2098,6 +2122,9 @@ impl Worker {
             new_releases: Arc::new(crate::new_releases::NewReleases::new(http.clone())),
             stats: Arc::default(),
             stats_server: None,
+            stats_server_account: None,
+            stats_server_restoring: false,
+            stats_refresh_deferred: false,
             stats_server_generation: 0,
             stats_server_login: None,
             canvas: Arc::new(crate::canvas::Library::new(http.clone())),
@@ -2140,8 +2167,19 @@ impl Worker {
         }
     }
 
-    /// Refreshes the signed-in account's listening stats, off this loop.
-    fn refresh_stats(&self) {
+    /// Refreshes the signed-in account's listening stats, off this loop: the
+    /// local log, or in API mode the statistics server's figures. While the
+    /// saved connection is read back the refresh waits, so the log is not
+    /// written when the server turns out to be connected.
+    fn refresh_stats(&mut self) {
+        if self.stats_server_restoring {
+            self.stats_refresh_deferred = true;
+            return;
+        }
+        if let Some(client) = self.stats_server_client() {
+            self.refresh_server_stats(client);
+            return;
+        }
         let Some(account) = self.api.account() else {
             return;
         };
@@ -2150,31 +2188,102 @@ impl Worker {
         let history = self.dirs.history_file();
         let stats = Arc::clone(&self.stats);
         let source = StatsWeb(Arc::clone(&self.api));
-        let server = self.stats_server_client();
-        let generation = self.stats_server_generation;
-        let commands = self.commands.clone();
         let events = self.events.clone();
         let waker = self.waker.clone();
         tokio::spawn(async move {
             let result = stats
                 .lock()
                 .await
-                .refresh(&account_id, dir, history, &source, server.as_ref())
+                .refresh(&account_id, dir, history, &source)
                 .await;
             let update = match result {
-                Ok(refreshed) => {
-                    if let Some(result) = refreshed.server {
-                        let _ = commands.send(Command::StatsServerSynced { generation, result });
-                    }
-                    crate::stats::Update::Loaded {
-                        account_id,
-                        index: refreshed.index,
-                    }
-                }
+                Ok(index) => crate::stats::Update::Loaded { account_id, index },
                 Err(error) => crate::stats::Update::Failed { account_id, error },
             };
             let _ = events.send(Event::Stats(update));
             waker.wake();
+        });
+    }
+
+    /// A refresh in API mode: checks the server's account and its poller,
+    /// then has the interface ask again for the figures on show. The local
+    /// log is left as it is.
+    fn refresh_server_stats(&self, client: crate::stats_api::client::Client) {
+        let generation = self.stats_server_generation;
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let (account, status) = tokio::try_join!(client.me(), client.status())?;
+                Ok::<_, crate::stats_api::client::Error>(crate::stats_api::Synced {
+                    at_ms: jiff::Timestamp::now().as_millisecond(),
+                    account,
+                    status,
+                })
+            }
+            .await;
+            let _ = commands.send(Command::StatsServerSynced { generation, result });
+        });
+    }
+
+    /// Whether the statistics server records another Spotify account than
+    /// the one signed in here, as far as both are known.
+    fn stats_server_other_account(&self) -> bool {
+        match (&self.stats_server_account, self.api.account()) {
+            (Some(server), Some(signed_in)) => server.as_str() != signed_in.as_str(),
+            _ => false,
+        }
+    }
+
+    /// Fetches figures a page asked for from the statistics server.
+    fn fetch_server_stats(&self, fetch: crate::stats_api::stats::Fetch) {
+        let Some(client) = self.stats_server_client() else {
+            return;
+        };
+        let server = client.server().to_owned();
+        if self.stats_server_other_account() {
+            self.emit_stats_server(crate::stats_api::Update::Fetched {
+                server,
+                fetch,
+                result: Err(crate::stats_api::client::Error::OtherAccount),
+                at_ms: jiff::Timestamp::now().as_millisecond(),
+            });
+            return;
+        }
+        let generation = self.stats_server_generation;
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let zone = crate::stats_api::stats::zone();
+            let result = client.fetch(&fetch, &zone).await;
+            let _ = commands.send(Command::StatsServerFetched {
+                generation,
+                server,
+                fetch,
+                result,
+            });
+        });
+    }
+
+    /// Hands the interface the figures fetched for the connection still in
+    /// place. A token the server refuses is forgotten.
+    fn on_server_stats_fetched(
+        &mut self,
+        generation: u64,
+        server: String,
+        fetch: crate::stats_api::stats::Fetch,
+        result: Result<crate::stats_api::stats::Answer, crate::stats_api::client::Error>,
+    ) {
+        if generation != self.stats_server_generation || self.stats_server.is_none() {
+            return;
+        }
+        if matches!(result, Err(crate::stats_api::client::Error::Unauthorized)) {
+            self.stats_server_refused();
+            return;
+        }
+        self.emit_stats_server(crate::stats_api::Update::Fetched {
+            server,
+            fetch,
+            result,
+            at_ms: jiff::Timestamp::now().as_millisecond(),
         });
     }
 
@@ -2202,6 +2311,8 @@ impl Worker {
         if let Some(login) = self.stats_server_login.take() {
             login.abort();
         }
+        // A connection read back at start that this replaces never answers.
+        self.stats_server_settled();
         let server = match crate::stats_api::normalize_server(&server) {
             Ok(server) => server,
             Err(error) => {
@@ -2264,6 +2375,7 @@ impl Worker {
                         notice(error);
                     }
                 });
+                self.stats_server_account = Some(account.spotify_id.clone());
                 self.emit_stats_server(crate::stats_api::Update::Connected {
                     server: connection.server.clone(),
                     account,
@@ -2280,6 +2392,7 @@ impl Worker {
     fn restore_stats_server(&mut self, server: String) {
         self.stats_server_generation += 1;
         let generation = self.stats_server_generation;
+        self.stats_server_restoring = true;
         let lease = self.credentials.lease(CredentialSlot::StatsServer);
         let commands = self.commands.clone();
         tokio::spawn(async move {
@@ -2301,6 +2414,7 @@ impl Worker {
         if generation != self.stats_server_generation {
             return;
         }
+        self.stats_server_restoring = false;
         let saved = match result {
             Ok(loaded) => {
                 if let Some(error) = loaded.warning {
@@ -2312,9 +2426,10 @@ impl Worker {
                 }
             }
             // A locked store: Settings keeps the connection for the next
-            // start.
+            // start, and the stats are the log's meanwhile.
             Err(error) => {
                 self.emit_stats_server(crate::stats_api::Update::Failed(error.to_string()));
+                self.stats_server_settled();
                 return;
             }
         };
@@ -2325,14 +2440,29 @@ impl Worker {
                     server: connection.server.clone(),
                 });
                 self.stats_server = Some(connection);
+                // The refresh checks the account and asks for the figures.
+                self.stats_refresh_deferred = false;
                 self.refresh_stats();
             }
             // No token for that server any more.
-            _ => self.emit_stats_server(crate::stats_api::Update::Disconnected(None)),
+            _ => {
+                self.emit_stats_server(crate::stats_api::Update::Disconnected(None));
+                self.stats_server_settled();
+            }
+        }
+    }
+
+    /// The saved connection is no longer being read back: a refresh that
+    /// waited for it runs now.
+    fn stats_server_settled(&mut self) {
+        self.stats_server_restoring = false;
+        if std::mem::take(&mut self.stats_refresh_deferred) {
+            self.refresh_stats();
         }
     }
 
     /// Forgets the statistics server here, and revokes its token there.
+    /// The stats are the log's again.
     fn disconnect_stats_server(&mut self) {
         self.stats_server_generation += 1;
         if let Some(login) = self.stats_server_login.take() {
@@ -2348,19 +2478,35 @@ impl Worker {
         }
         self.forget_stats_server();
         self.emit_stats_server(crate::stats_api::Update::Disconnected(None));
+        self.stats_server_restoring = false;
+        self.stats_refresh_deferred = false;
+        self.refresh_stats();
     }
 
     /// Forgets the connection in memory and in the credential store.
     fn forget_stats_server(&mut self) {
         self.stats_server = None;
+        self.stats_server_account = None;
         if let Err(error) = self.credentials.revoke(CredentialSlot::StatsServer) {
             self.emit(Event::Error(error.to_string()));
         }
         self.delete_stored_grant(CredentialSlot::StatsServer);
     }
 
-    /// Tells the interface how a pull went. A token the server refuses is
-    /// forgotten: it cannot work again.
+    /// The server refused the token: it cannot work again, so it is
+    /// forgotten, and the stats are the log's again.
+    fn stats_server_refused(&mut self) {
+        self.stats_server_generation += 1;
+        self.forget_stats_server();
+        self.emit_stats_server(crate::stats_api::Update::Disconnected(Some(
+            crate::stats_api::client::Error::Unauthorized.to_string(),
+        )));
+        self.refresh_stats();
+    }
+
+    /// Tells the interface how a check of the server's account went, then
+    /// has it ask again for the figures on show. A token the server
+    /// refuses is forgotten.
     fn on_stats_server_synced(
         &mut self,
         generation: u64,
@@ -2370,70 +2516,102 @@ impl Worker {
             return;
         }
         match result {
-            Ok(synced) => self.emit_stats_server(crate::stats_api::Update::Synced(synced)),
+            Ok(synced) => {
+                self.stats_server_account = Some(synced.account.spotify_id.clone());
+                self.emit_stats_server(crate::stats_api::Update::Synced(synced));
+                if self.stats_server_other_account() {
+                    self.emit_stats_server(crate::stats_api::Update::Failed(
+                        crate::stats_api::client::Error::OtherAccount.to_string(),
+                    ));
+                }
+            }
             Err(crate::stats_api::client::Error::Unauthorized) => {
-                self.stats_server_generation += 1;
-                self.forget_stats_server();
-                self.emit_stats_server(crate::stats_api::Update::Disconnected(Some(
-                    crate::stats_api::client::Error::Unauthorized.to_string(),
-                )));
+                self.stats_server_refused();
+                return;
             }
             Err(error) => {
                 self.emit_stats_server(crate::stats_api::Update::Failed(error.to_string()));
             }
         }
+        self.emit_stats_server(crate::stats_api::Update::Refreshed);
     }
 
-    /// Sends the streaming history being imported to the statistics server
-    /// as well, so it holds it too. A file the server does not read stays
-    /// on this computer only.
-    fn upload_streaming_history(
+    /// Hands the interface the server's report of an import. A token the
+    /// server refuses is forgotten.
+    fn on_stats_server_imported(
+        &mut self,
+        generation: u64,
+        result: Result<crate::stats_api::import::Report, crate::stats_api::client::Error>,
+    ) {
+        if generation != self.stats_server_generation {
+            return;
+        }
+        if matches!(result, Err(crate::stats_api::client::Error::Unauthorized))
+            && self.stats_server.is_some()
+        {
+            self.stats_server_refused();
+            return;
+        }
+        self.emit_stats_server(crate::stats_api::Update::Imported(
+            result.map_err(|error| error.to_string()),
+        ));
+    }
+
+    /// Imports the streaming history at `path` into the statistics server,
+    /// in API mode: the file is streamed to it from the disk on a blocking
+    /// thread, with the bytes sent reported as they go, and the server's
+    /// report comes back. Nothing is imported into the local log.
+    fn import_into_server(
         &self,
         client: crate::stats_api::client::Client,
         path: std::path::PathBuf,
     ) {
+        if self.stats_server_other_account() {
+            self.emit_stats_server(crate::stats_api::Update::Imported(Err(
+                crate::stats_api::client::Error::OtherAccount.to_string(),
+            )));
+            return;
+        }
+        let proxy = self.engine_config.proxy.clone();
+        let generation = self.stats_server_generation;
+        let commands = self.commands.clone();
         let events = self.events.clone();
         let waker = self.waker.clone();
-        tokio::spawn(async move {
-            let read =
-                tokio::task::spawn_blocking(move || crate::stats_api::client::read_upload(&path))
-                    .await
-                    .unwrap_or_else(|error| {
-                        Err(crate::stats_api::client::Error::File(error.to_string()))
-                    });
-            let upload = match read {
-                Ok(Some(upload)) => upload,
-                Ok(None) => return,
-                Err(error) => {
-                    send_stats_server(
-                        &events,
-                        &waker,
-                        crate::stats_api::Update::Uploaded(Err(error.to_string())),
-                    );
-                    return;
-                }
-            };
-            send_stats_server(&events, &waker, crate::stats_api::Update::Uploading);
-            let result = client
-                .upload(upload)
-                .await
-                .map_err(|error| error.to_string());
-            send_stats_server(&events, &waker, crate::stats_api::Update::Uploaded(result));
+        send_stats_server(
+            &events,
+            &waker,
+            crate::stats_api::Update::Importing(crate::stats_api::import::Sent::default()),
+        );
+        tokio::task::spawn_blocking(move || {
+            let result = crate::http::build_blocking(&proxy, crate::stats_api::import::TIMEOUT)
+                .map_err(crate::stats_api::client::Error::Network)
+                .and_then(|http| {
+                    client.import(&http, &path, move |sent| {
+                        send_stats_server(
+                            &events,
+                            &waker,
+                            crate::stats_api::Update::Importing(sent),
+                        );
+                    })
+                });
+            let _ = commands.send(Command::StatsServerImported { generation, result });
         });
     }
 
     /// Imports a streaming history into the signed-in account's stats,
-    /// reporting progress as each file is read.
+    /// reporting progress as each file is read; in API mode, into the
+    /// statistics server instead.
     fn import_streaming_history(&self, path: std::path::PathBuf) {
+        if let Some(client) = self.stats_server_client() {
+            self.import_into_server(client, path);
+            return;
+        }
         let Some(account) = self.api.account() else {
             self.emit(Event::Stats(crate::stats::Update::ImportFinished(Err(
                 "Sign in to import a streaming history.".into(),
             ))));
             return;
         };
-        if let Some(client) = self.stats_server_client() {
-            self.upload_streaming_history(client, path.clone());
-        }
         let account_id = account.as_str().to_owned();
         let dir = self.dirs.stats_dir(&account_id);
         let stats = Arc::clone(&self.stats);
@@ -2808,6 +2986,16 @@ impl Worker {
                 } => self.on_stats_server_restored(generation, server, result),
                 Command::StatsServerSynced { generation, result } => {
                     self.on_stats_server_synced(generation, result);
+                }
+                Command::StatsServerFetch(fetch) => self.fetch_server_stats(fetch),
+                Command::StatsServerFetched {
+                    generation,
+                    server,
+                    fetch,
+                    result,
+                } => self.on_server_stats_fetched(generation, server, fetch, result),
+                Command::StatsServerImported { generation, result } => {
+                    self.on_stats_server_imported(generation, result);
                 }
                 Command::ChooseStreamingHistory { selected } => {
                     let commands = self.commands.clone();

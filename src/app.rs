@@ -5829,12 +5829,27 @@ impl App {
     }
 
     /// Asks the backend to bring the signed-in account's listening stats up
-    /// to date; what is shown stays until the new index arrives.
+    /// to date; what is shown stays until the new index, or in API mode the
+    /// server's new answers, arrive.
     fn refresh_stats(&mut self) {
         if let Some(account) = self.user_id().map(str::to_owned) {
-            self.stats.loading(&account);
+            match self.stats.origin() {
+                crate::stats::Origin::Local => self.stats.loading(&account),
+                crate::stats::Origin::Server(_) => self.stats.server.check(),
+            }
             self.backend.send(Command::RefreshStats);
         }
+    }
+
+    /// Asks the statistics server for figures a page shows, in API mode,
+    /// unless they are on their way or came since the last refresh.
+    fn fetch_server_stats(&mut self, fetch: crate::stats_api::stats::Fetch) {
+        let server = &mut self.stats.server;
+        if server.phase != crate::stats_api::Phase::Connected || !server.answers.wants(&fetch) {
+            return;
+        }
+        server.answers.fetching(&fetch);
+        self.backend.send(Command::StatsServerFetch(fetch));
     }
 
     /// Asks for the verified account's cached library, replacing any read
@@ -6217,8 +6232,12 @@ impl App {
                 }
             }
             Page::Settings => self.refresh_autostart(),
+            // In API mode the page asks for the server's figures itself.
             Page::Stats => {
-                if self.stats.index.get().is_none() && !self.stats.index.is_loading() {
+                if self.stats.origin() == crate::stats::Origin::Local
+                    && self.stats.index.get().is_none()
+                    && !self.stats.index.is_loading()
+                {
                     self.refresh_stats();
                 }
             }
@@ -13693,8 +13712,18 @@ impl App {
             Action::CloseWindow => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Action::ChooseLocalFilesFolder => self.backend.choose_local_files_folder(),
             Action::RefreshStats => self.refresh_stats(),
+            Action::FetchServerStats(fetch) => self.fetch_server_stats(fetch),
             Action::ImportStreamingHistory(Some(path)) => {
-                self.stats.importing = Some(crate::stats::ImportProgress::default());
+                match self.stats.origin() {
+                    crate::stats::Origin::Local => {
+                        self.stats.importing = Some(crate::stats::ImportProgress::default());
+                    }
+                    crate::stats::Origin::Server(_) => {
+                        self.stats.server.importing =
+                            Some(crate::stats_api::import::Sent::default());
+                        self.stats.server.imported = None;
+                    }
+                }
                 self.backend.send(Command::ImportStreamingHistory(path));
             }
             Action::ImportStreamingHistory(None) => self.backend.choose_streaming_history(),
@@ -23131,6 +23160,90 @@ mod tests {
             app.home.shortcuts.get(HomeFacet::All),
             Some(&vec![HomeShortcut::LikedSongs])
         );
+        app.backend.shutdown();
+    }
+
+    /// The Stats page shows the log's figures, the statistics server's
+    /// alone while it is connected, and the log's again once it is not.
+    #[test]
+    fn the_stats_page_takes_its_figures_from_the_server_only_in_api_mode() {
+        use crate::stats_api::stats::{Answer, Fetch, Period, samples};
+        use crate::stats_api::{DEFAULT_SERVER, Update as ServerUpdate};
+        let draw = |ctx: &egui::Context, app: &mut App| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.frame_ui(ui));
+            output.textures_delta.clear();
+        };
+        // The log's figures are read on a worker thread.
+        let settle = |ctx: &egui::Context, app: &mut App| {
+            for _ in 0..500 {
+                draw(ctx, app);
+                if let Some(image) = crate::ui::stats::hero_image(ctx) {
+                    return Some(image);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            None
+        };
+        let mut app = test_app("stats-page-origin");
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        crate::demo::populate(&mut app);
+        let now = jiff::Timestamp::now().as_millisecond();
+        let log = Arc::new(crate::demo::stats_index(now));
+        app.stats.index = Loadable::Loaded(Arc::clone(&log));
+        app.apply(Action::Open(Page::Stats), &ctx);
+        let local = settle(&ctx, &mut app).expect("the log's figures show");
+        assert!(!local.contains("i.scdn.co"));
+
+        app.stats.server.connecting(DEFAULT_SERVER.into());
+        app.stats.receive(
+            crate::stats::Update::Server(ServerUpdate::Restored {
+                server: DEFAULT_SERVER.into(),
+            }),
+            None,
+        );
+        draw(&ctx, &mut app);
+        // The page asked the server for its range, and shows nothing of
+        // the log meanwhile.
+        let weeks = Fetch::Range(Period::Weeks4);
+        assert!(
+            app.stats
+                .server
+                .answers
+                .range(Period::Weeks4)
+                .is_some_and(|slot| slot.fetching)
+        );
+        assert!(!app.stats.server.answers.wants(&weeks));
+        assert_eq!(crate::ui::stats::hero_image(&ctx), None);
+        app.stats.receive(
+            crate::stats::Update::Server(ServerUpdate::Fetched {
+                server: DEFAULT_SERVER.into(),
+                fetch: weeks,
+                result: Ok(Answer::Range(Arc::new(samples::range(Period::Weeks4)))),
+                at_ms: now,
+            }),
+            None,
+        );
+        draw(&ctx, &mut app);
+        assert_eq!(
+            crate::ui::stats::hero_image(&ctx).as_deref(),
+            Some("https://i.scdn.co/image/b")
+        );
+        // The log was left as it was.
+        assert!(Arc::ptr_eq(app.stats.index.get().unwrap(), &log));
+
+        app.stats.receive(
+            crate::stats::Update::Server(ServerUpdate::Disconnected(None)),
+            None,
+        );
+        assert_eq!(settle(&ctx, &mut app), Some(local));
         app.backend.shutdown();
     }
 

@@ -5,15 +5,19 @@
 //!
 //! Settings connects to it through the browser ([`loopback`]) or with a
 //! pasted token, kept in the credential store ([`Connection`]). While
-//! connected, every stats refresh (at start, after connecting and every
-//! twenty minutes) pulls the plays the server recorded since the last pull
-//! ([`sync`]) into the local log, where they merge with the logger's and
-//! the imports' like any other source ([`crate::stats::Source::Server`]).
+//! connected, Spotifast is in API mode: every listening figure it shows
+//! comes from the server's statistics routes ([`stats`]), and a streaming
+//! history is imported into the server ([`import`]), never into the log
+//! kept on this computer. That log stays on the disk as it was, untouched,
+//! and is shown again once the server is disconnected. Each refresh (at
+//! start, after connecting and every twenty minutes) checks the account
+//! and the server's poller, then asks again for the figures on show.
 //! Every request runs on the backend's runtime ([`client`]).
 
 pub mod client;
+pub mod import;
 pub mod loopback;
-pub mod sync;
+pub mod stats;
 
 use serde::{Deserialize, Serialize};
 
@@ -120,41 +124,11 @@ pub struct Status {
     pub plays_count: i64,
 }
 
-/// One play of `GET /history`.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct HistoryItem {
-    /// When it was played, in milliseconds since the Unix epoch.
-    pub played_at: i64,
-    /// How long it was played, as the server knows it.
-    #[serde(default)]
-    pub ms_played: i64,
-    /// The Spotify ID of the track.
-    pub spotify_id: String,
-    pub name: String,
-    /// The track's first artist.
-    #[serde(default)]
-    pub artist_name: String,
-    #[serde(default)]
-    pub album_name: String,
-}
-
-/// A page of `GET /history`, newest first.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
-pub struct HistoryPage {
-    #[serde(default)]
-    pub items: Vec<HistoryItem>,
-    /// The `before` of the next page; `None` after the last one.
-    #[serde(default)]
-    pub next_before: Option<i64>,
-}
-
-/// A pull that went through.
+/// A check of the account and of the server's poller that went through.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Synced {
     /// When it finished.
     pub at_ms: i64,
-    /// The plays new to the local log.
-    pub added: usize,
     pub account: Me,
     pub status: Status,
 }
@@ -178,17 +152,27 @@ pub enum Update {
     Connected { server: String, account: Me },
     /// The saved connection was read back at start.
     Restored { server: String },
-    /// A pull went through.
+    /// A check of the account and the poller went through.
     Synced(Synced),
     /// Something failed. A connection already made stays.
     Failed(String),
     /// The connection is gone; with why, when the server refused it.
     Disconnected(Option<String>),
-    /// The streaming history being imported is also on its way to the
-    /// server.
-    Uploading,
-    /// That upload ended: the plays the server took in, or why it did not.
-    Uploaded(Result<u64, String>),
+    /// A refresh: the figures on show are asked for again.
+    Refreshed,
+    /// The answer to a page's [`stats::Fetch`] from `server`, at `at_ms`.
+    Fetched {
+        server: String,
+        fetch: stats::Fetch,
+        result: Result<stats::Answer, client::Error>,
+        at_ms: i64,
+    },
+    /// How far the streaming history being imported into the server has
+    /// got.
+    Importing(import::Sent),
+    /// How the import ended: the server's report, or why it did not go
+    /// through.
+    Imported(Result<import::Report, String>),
 }
 
 /// The statistics server as the interface holds it (`app.stats.server`).
@@ -199,16 +183,20 @@ pub struct State {
     pub server: Option<String>,
     /// The server's account, once it answered.
     pub account: Option<Me>,
-    /// The server's poller, as of the last pull.
+    /// The server's poller, as of the last check.
     pub status: Option<Status>,
-    /// The last pull that went through.
+    /// The last check that went through.
     pub synced: Option<Synced>,
     /// The last failure, until something goes through.
     pub error: Option<String>,
-    /// An upload to the server is on its way.
-    pub uploading: bool,
-    /// How the last upload ended.
-    pub uploaded: Option<Result<u64, String>>,
+    /// A refresh asked for here is checking the account.
+    pub checking: bool,
+    /// The figures the server answered, per range and per item.
+    pub answers: stats::Answers,
+    /// An import into the server on its way: the bytes sent so far.
+    pub importing: Option<import::Sent>,
+    /// How the last import ended.
+    pub imported: Option<Result<import::Report, String>>,
 }
 
 impl State {
@@ -227,12 +215,13 @@ impl State {
                 self.error = None;
             }
             Update::Synced(synced) => {
-                // A pull that ended after a disconnection says nothing now.
+                // A check that ended after a disconnection says nothing now.
                 if self.phase == Phase::Connected {
                     self.account = Some(synced.account.clone());
                     self.status = Some(synced.status.clone());
                     self.synced = Some(synced);
                     self.error = None;
+                    self.checking = false;
                 }
             }
             Update::Failed(error) => {
@@ -240,6 +229,7 @@ impl State {
                     self.phase = Phase::Disconnected;
                 }
                 self.error = Some(error);
+                self.checking = false;
             }
             Update::Disconnected(reason) => {
                 *self = Self {
@@ -247,14 +237,40 @@ impl State {
                     ..Self::default()
                 };
             }
-            Update::Uploading => {
-                self.uploading = true;
-                self.uploaded = None;
+            Update::Refreshed => {
+                self.checking = false;
+                self.answers.refresh();
             }
-            Update::Uploaded(result) => {
-                self.uploading = false;
-                self.uploaded = Some(result);
+            Update::Fetched {
+                server,
+                fetch,
+                result,
+                at_ms,
+            } => {
+                // Answers of a server no longer connected are not this one's.
+                if self.connected() == Some(server.as_str()) {
+                    self.answers.receive(&fetch, result, at_ms);
+                }
             }
+            Update::Importing(sent) => {
+                self.importing = Some(sent);
+                self.imported = None;
+            }
+            Update::Imported(result) => {
+                self.importing = None;
+                // The figures on show do not count the new plays yet.
+                if result.is_ok() {
+                    self.answers.refresh();
+                }
+                self.imported = Some(result);
+            }
+        }
+    }
+
+    /// Shows a refresh asked for here the moment it starts.
+    pub fn check(&mut self) {
+        if self.phase == Phase::Connected {
+            self.checking = true;
         }
     }
 
@@ -384,28 +400,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_history_page_reads_with_and_without_a_next_cursor() {
-        let page: HistoryPage = serde_json::from_str(
-            r#"{"items": [
-                {"played_at": 1700000300123, "ms_played": 201000, "spotify_id": "t2",
-                 "name": "Second", "artist_name": "Band", "album_name": "Album"},
-                {"played_at": 1700000000000, "ms_played": 95000, "spotify_id": "t1",
-                 "name": "First", "artist_name": "Band", "album_name": "Album"}
-               ], "next_before": 1700000000000}"#,
-        )
-        .unwrap();
-        assert_eq!(page.items.len(), 2);
-        assert_eq!(page.items[0].played_at, 1_700_000_300_123);
-        assert_eq!(page.items[0].ms_played, 201_000);
-        assert_eq!(page.items[1].spotify_id, "t1");
-        assert_eq!(page.next_before, Some(1_700_000_000_000));
-        let last: HistoryPage =
-            serde_json::from_str(r#"{"items": [], "next_before": null}"#).unwrap();
-        assert!(last.items.is_empty());
-        assert_eq!(last.next_before, None);
-    }
-
     fn me() -> Me {
         Me {
             id: 1,
@@ -431,25 +425,102 @@ mod tests {
             account: me(),
         });
         assert_eq!(state.connected(), Some(DEFAULT_SERVER));
-        // A failed pull keeps the connection.
+        // A failed check keeps the connection.
+        state.check();
+        assert!(state.checking);
         state.receive(Update::Failed("offline".into()));
         assert_eq!(state.phase, Phase::Connected);
+        assert!(!state.checking);
         let synced = Synced {
             at_ms: 10,
-            added: 2,
             account: me(),
             status: Status::default(),
         };
+        state.check();
         state.receive(Update::Synced(synced.clone()));
         assert_eq!(state.error, None);
+        assert!(!state.checking);
         assert_eq!(state.synced, Some(synced.clone()));
 
         state.disconnect();
         assert_eq!(state.phase, Phase::Disconnected);
-        // A pull that ends after it changes nothing.
+        // A check that ends after it changes nothing.
         state.receive(Update::Synced(synced));
         assert_eq!(state.synced, None);
         state.receive(Update::Disconnected(Some("refused".into())));
         assert_eq!(state.error.as_deref(), Some("refused"));
+    }
+
+    fn range() -> stats::Answer {
+        stats::Answer::Range(std::sync::Arc::new(stats::samples::range(
+            stats::Period::Weeks4,
+        )))
+    }
+
+    #[test]
+    fn answers_belong_to_the_server_connected_and_go_with_it() {
+        let weeks = stats::Fetch::Range(stats::Period::Weeks4);
+        let mut state = State::default();
+        state.connecting(DEFAULT_SERVER.into());
+        state.receive(Update::Restored {
+            server: DEFAULT_SERVER.into(),
+        });
+        state.answers.fetching(&weeks);
+        // An answer of another server is dropped.
+        state.receive(Update::Fetched {
+            server: "https://elsewhere.example".into(),
+            fetch: weeks.clone(),
+            result: Ok(range()),
+            at_ms: 1,
+        });
+        assert!(
+            state
+                .answers
+                .range(stats::Period::Weeks4)
+                .unwrap()
+                .get()
+                .is_none()
+        );
+        state.receive(Update::Fetched {
+            server: DEFAULT_SERVER.into(),
+            fetch: weeks.clone(),
+            result: Ok(range()),
+            at_ms: 2,
+        });
+        assert!(
+            state
+                .answers
+                .range(stats::Period::Weeks4)
+                .unwrap()
+                .get()
+                .is_some()
+        );
+        assert!(!state.answers.wants(&weeks));
+        // A refresh, and an import that went through, ask again.
+        state.receive(Update::Refreshed);
+        assert!(state.answers.wants(&weeks));
+        state.answers.fetching(&weeks);
+        state.receive(Update::Fetched {
+            server: DEFAULT_SERVER.into(),
+            fetch: weeks.clone(),
+            result: Ok(range()),
+            at_ms: 3,
+        });
+        assert!(!state.answers.wants(&weeks));
+        state.receive(Update::Importing(import::Sent {
+            bytes: 5,
+            total: 10,
+        }));
+        assert_eq!(state.importing.map(|sent| sent.bytes), Some(5));
+        state.receive(Update::Imported(Err("refused".into())));
+        assert_eq!(state.importing, None);
+        assert!(!state.answers.wants(&weeks));
+        state.receive(Update::Imported(Ok(import::Report::default())));
+        assert!(state.answers.wants(&weeks));
+        // Disconnecting forgets them all, and a new connection starts with none.
+        state.receive(Update::Disconnected(None));
+        assert!(state.answers.range(stats::Period::Weeks4).is_none());
+        state.connecting(DEFAULT_SERVER.into());
+        assert!(state.answers.range(stats::Period::Weeks4).is_none());
     }
 }

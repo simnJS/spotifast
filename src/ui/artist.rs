@@ -1187,9 +1187,10 @@ fn concerts_section(app: &mut App, ui: &mut egui::Ui, artist_id: &str, concerts:
     }
 }
 
-/// Your stats: the owner's own figures for this artist from the local
-/// listening stats, in a card like About's, with their three most played
-/// songs of the artist. Left out when the log has no stream of them.
+/// Your stats: the owner's own figures for this artist from their
+/// listening stats (the log on this computer, or the statistics server in
+/// API mode), in a card like About's, with their three most played songs
+/// of the artist. Left out when there is no stream of them.
 fn your_stats(app: &mut App, ui: &mut egui::Ui, artist: &Artist, page: &crate::model::ArtistPage) {
     use super::widgets::your_stats::{self, Shown, Subject};
     let shown = your_stats::for_subject(app, ui.ctx(), Subject::Artist(artist.id.clone()));
@@ -1205,9 +1206,16 @@ fn your_stats(app: &mut App, ui: &mut egui::Ui, artist: &Artist, page: &crate::m
         ui.set_max_width(width);
         your_stats::frame(&palette, 24).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let Shown::Ready(figures) = &shown else {
-                your_stats::draw_skeleton(ui, &palette, 4, 24.0);
-                return;
+            let figures = match &shown {
+                Shown::Ready(figures) => figures,
+                Shown::Failed(error) => {
+                    your_stats::draw_error(ui, &palette, locale, error);
+                    return;
+                }
+                Shown::Loading | Shown::Hidden => {
+                    your_stats::draw_skeleton(ui, &palette, 4, 24.0);
+                    return;
+                }
             };
             let tiles =
                 your_stats::tiles(locale, figures, &gettext(locale, "Your top artists"), true);
@@ -1233,7 +1241,19 @@ fn your_stats(app: &mut App, ui: &mut egui::Ui, artist: &Artist, page: &crate::m
                     known
                         .and_then(|tracks| tracks.iter().find(|track| track.uri == top.uri))
                         .cloned()
-                        .unwrap_or_else(|| your_stats::track(top))
+                        .unwrap_or_else(|| {
+                            let mut song = your_stats::track(top);
+                            // The server names the songs only: they are
+                            // this artist's.
+                            if song.artists.is_empty() {
+                                song.artists.push(crate::api::models::ArtistRef {
+                                    id: Some(artist.id.clone()),
+                                    name: artist.name.clone(),
+                                    ..Default::default()
+                                });
+                            }
+                            song
+                        })
                 })
                 .map(PlayableItem::Track)
                 .collect();

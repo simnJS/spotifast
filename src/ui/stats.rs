@@ -1,12 +1,16 @@
-//! The Stats page: the listening figures Spotifast keeps on this computer,
-//! in the manner of stats.fm and in Spotify's look. Range chips, a hero of
-//! big numbers over the top artist's colour, the top artists, tracks,
-//! albums and genres with how their ranks moved, two charts, the import of
-//! Spotify's full history and the logger's last sync, and a Share button
-//! that saves the range's top as an image ([`crate::share_card`]).
+//! The Stats page: the listening figures, in the manner of stats.fm and in
+//! Spotify's look. Range chips, a hero of big numbers over the top artist's
+//! colour, where the figures come from, the top artists, tracks, albums and
+//! genres with how their ranks moved, two charts, the import of Spotify's
+//! full history and the last sync, and a Share button that saves the
+//! range's top as an image ([`crate::share_card`]).
 //!
-//! Every figure comes from [`crate::stats::query`], read on a worker
-//! thread (`jobs`) whenever the index or the range changes.
+//! The figures come from the log kept on this computer, read by
+//! [`crate::stats::query`] on a worker thread (`jobs`) whenever the index
+//! or the range changes; or, in API mode, from the statistics server's
+//! answer for the range ([`crate::stats_api::stats`]), which the backend
+//! fetches. Either becomes the same [`Summary`], so every section and the
+//! share card draw the same way.
 
 mod charts;
 mod jobs;
@@ -19,7 +23,8 @@ use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, Sense, Ui, Vec2, po
 use crate::app::App;
 use crate::i18n::Locale;
 use crate::model::{Action, Loadable, Page};
-use crate::stats::Index;
+use crate::stats::{Index, Origin};
+use crate::stats_api::stats::Fetch;
 use crate::theme::{self, Icon, Palette};
 
 use super::widgets;
@@ -48,6 +53,9 @@ struct View {
     requested: bool,
     sharing: Option<Pending<jobs::Shared>>,
     all_tracks: bool,
+    /// Where the figures on show came from: another origin's are not
+    /// shown as this one's, not even for a frame.
+    origin: Option<Origin>,
 }
 
 type Shared = Arc<Mutex<View>>;
@@ -76,6 +84,15 @@ fn now_ms() -> i64 {
     jiff::Timestamp::now().as_millisecond()
 }
 
+/// What the page has for the chosen range.
+enum Shown {
+    /// Still being read: the skeleton.
+    Loading,
+    /// The read failed and there is nothing to show instead.
+    Failed(String),
+    Ready(Arc<Summary>),
+}
+
 pub fn page(app: &mut App, ui: &mut Ui) {
     let shared = view(ui.ctx());
     let mut view = lock(&shared);
@@ -83,42 +100,51 @@ pub fn page(app: &mut App, ui: &mut Ui) {
 
     let palette = app.palette;
     let locale = app.locale;
-    let index = match &app.stats.index {
-        Loadable::Loaded(index) => Some(Arc::clone(index)),
+    let origin = app.stats.origin();
+    if view.origin.as_ref() != Some(&origin) {
+        view.origin = Some(origin.clone());
+        view.shown = None;
+        view.reading = None;
+    }
+    let shown = match &origin {
+        Origin::Local => local(app, ui.ctx(), &mut view),
+        Origin::Server(_) => server(app, &mut view),
+    };
+    let summary = match &shown {
+        Shown::Ready(summary) => Some(Arc::clone(summary)),
         _ => None,
     };
-    if matches!(app.stats.index, Loadable::NotLoaded) && !view.requested {
-        view.requested = true;
-        app.actions.push(Action::RefreshStats);
-    }
-    let summary = index
-        .as_ref()
-        .and_then(|index| current(ui.ctx(), &mut view, index));
 
     hero(app, ui, &view, summary.as_deref());
-    ui.add_space(20.0);
+    ui.add_space(12.0);
+    source_line(app, ui, &origin);
+    ui.add_space(16.0);
     action_bar(app, ui, &mut view, summary.as_deref());
     ui.add_space(24.0);
 
-    match (&app.stats.index, summary) {
-        (Loadable::Failed(error), _) => {
-            let error = error.clone();
-            failed(app, ui, &error);
-        }
-        (Loadable::Loaded(_), Some(summary)) if !summary.any_streams => {
+    match shown {
+        Shown::Failed(error) => failed(app, ui, &error),
+        Shown::Ready(summary) if !summary.any_streams => {
+            let note = match &origin {
+                Origin::Local => tr(
+                    locale,
+                    "Play some music, or import your streaming history below.",
+                ),
+                Origin::Server(_) => tr(
+                    locale,
+                    "Your statistics server has no plays yet. Import your streaming history below.",
+                ),
+            };
             widgets::empty_state(
                 ui,
                 &palette,
                 Icon::TrendingUp,
                 &tr(locale, "No listening stats yet"),
-                &tr(
-                    locale,
-                    "Play some music, or import your streaming history below.",
-                ),
+                &note,
             );
             ui.add_space(32.0);
         }
-        (Loadable::Loaded(_), Some(summary)) if summary.totals.streams == 0 => {
+        Shown::Ready(summary) if summary.totals.streams == 0 => {
             widgets::empty_state(
                 ui,
                 &palette,
@@ -128,10 +154,77 @@ pub fn page(app: &mut App, ui: &mut Ui) {
             );
             ui.add_space(32.0);
         }
-        (Loadable::Loaded(_), Some(summary)) => sections(app, ui, &mut view, &summary),
-        _ => skeleton(ui, &palette, locale),
+        Shown::Ready(summary) => sections(app, ui, &mut view, &summary, &origin),
+        Shown::Loading => skeleton(ui, &palette, locale),
     }
-    import_card(app, ui, &mut view);
+    import_card(app, ui, &mut view, &origin);
+}
+
+/// The range's figures from the log kept on this computer.
+fn local(app: &mut App, ctx: &egui::Context, view: &mut View) -> Shown {
+    let index = match &app.stats.index {
+        Loadable::Loaded(index) => Some(Arc::clone(index)),
+        _ => None,
+    };
+    if matches!(app.stats.index, Loadable::NotLoaded) && !view.requested {
+        view.requested = true;
+        app.actions.push(Action::RefreshStats);
+    }
+    let summary = index.as_ref().and_then(|index| current(ctx, view, index));
+    match (&app.stats.index, summary) {
+        (Loadable::Failed(error), _) => Shown::Failed(error.clone()),
+        (Loadable::Loaded(_), Some(summary)) => Shown::Ready(summary),
+        _ => Shown::Loading,
+    }
+}
+
+/// The range's figures from the statistics server, in API mode: asked for
+/// when the page first shows the range and after each refresh, and kept
+/// on show while the next answer comes.
+fn server(app: &mut App, view: &mut View) -> Shown {
+    let period = view.span.period();
+    let fetch = Fetch::Range(period);
+    if app.stats.server.answers.wants(&fetch) {
+        app.actions.push(Action::FetchServerStats(fetch));
+    }
+    let Some(slot) = app.stats.server.answers.range(period) else {
+        return Shown::Loading;
+    };
+    let Some(answer) = slot.get() else {
+        return slot
+            .error
+            .as_ref()
+            .map_or(Shown::Loading, |error| Shown::Failed(error.to_string()));
+    };
+    let now = now_ms();
+    let key = Key::of(Arc::as_ptr(answer) as usize, view.span, now);
+    if view.shown.as_ref().is_none_or(|(shown, _)| *shown != key) {
+        let summary = summary::from_server(answer, view.span, now);
+        view.shown = Some((key, Arc::new(summary)));
+    }
+    view.shown.as_ref().map_or(Shown::Loading, |(_, summary)| {
+        Shown::Ready(Arc::clone(summary))
+    })
+}
+
+/// Where the figures come from: "Source: Local", or the statistics
+/// server's address in API mode.
+fn source_line(app: &App, ui: &mut Ui, origin: &Origin) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let (icon, text) = match origin {
+        Origin::Local => (Icon::Laptop, tr(locale, "Source: Local")),
+        Origin::Server(server) => (
+            Icon::Globe,
+            // Translators: {server} is the statistics server's address.
+            tr(locale, "Source: {server}").replace("{server}", crate::stats_api::host(server)),
+        ),
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        theme::icon(ui, icon, 14.0, palette.secondary);
+        theme::text(ui, text, theme::regular(13.5), palette.secondary);
+    });
 }
 
 /// Takes in the dialogs' and the share's answers.
@@ -439,7 +532,7 @@ fn section(ui: &mut Ui, palette: &Palette, title: &str, note: Option<&str>) {
     ui.add_space(10.0);
 }
 
-fn sections(app: &mut App, ui: &mut Ui, view: &mut View, summary: &Summary) {
+fn sections(app: &mut App, ui: &mut Ui, view: &mut View, summary: &Summary, origin: &Origin) {
     let palette = app.palette;
     let locale = app.locale;
     if !summary.artists.is_empty() {
@@ -465,6 +558,17 @@ fn sections(app: &mut App, ui: &mut Ui, view: &mut View, summary: &Summary) {
     );
     charts::per_day(ui, &palette, locale, &summary.days);
     ui.add_space(28.0);
+    let hours = |ui: &mut Ui| {
+        section(ui, &palette, &tr(locale, "Listening by hour of day"), None);
+        charts::per_hour(ui, &palette, locale, &summary.hours);
+    };
+    // The server may know no genre yet (it reads the artists' details
+    // slowly): the section is left out until it does.
+    if summary.genres.is_empty() && matches!(origin, Origin::Server(_)) {
+        hours(ui);
+        ui.add_space(32.0);
+        return;
+    }
     // Genres and hours side by side when the page is wide enough.
     let wide = ui.available_width() >= 760.0;
     let genres = |app: &mut App, ui: &mut Ui| {
@@ -482,10 +586,6 @@ fn sections(app: &mut App, ui: &mut Ui, view: &mut View, summary: &Summary) {
         } else {
             genre_bars(app, ui, summary);
         }
-    };
-    let hours = |ui: &mut Ui| {
-        section(ui, &palette, &tr(locale, "Listening by hour of day"), None);
-        charts::per_hour(ui, &palette, locale, &summary.hours);
     };
     if wide {
         ui.columns(2, |columns| {
@@ -922,8 +1022,9 @@ fn capitalized(text: &str) -> String {
 }
 
 /// How to get the full history, the import and its progress, and the
-/// logger's last sync.
-fn import_card(app: &mut App, ui: &mut Ui, view: &mut View) {
+/// last sync. In API mode the history goes to the statistics server, and
+/// nothing is imported into the log kept on this computer.
+fn import_card(app: &mut App, ui: &mut Ui, view: &mut View, origin: &Origin) {
     let palette = app.palette;
     let locale = app.locale;
     Frame::new()
@@ -939,23 +1040,24 @@ fn import_card(app: &mut App, ui: &mut Ui, view: &mut View) {
                 theme::bold(20.0),
                 palette.text,
             );
-            let explanation = if app.stats.server.connected().is_some() {
-                tr(
+            let explanation = match origin {
+                // Translators: {server} is the statistics server's address.
+                Origin::Server(server) => tr(
                     locale,
                     "Spotify keeps every play since your account began. On your Spotify \
                      account page, open Privacy, ask to download your data and tick \
                      \"Extended streaming history\". Spotify emails the ZIP within a few \
-                     days. Choose it (or its JSON files) here: it is read on this computer \
-                     and sent to your statistics server too.",
+                     days. Choose it (or one of its Streaming_History_Audio files) here: \
+                     it is sent to {server}, which adds it to your stats.",
                 )
-            } else {
-                tr(
+                .replace("{server}", crate::stats_api::host(server)),
+                Origin::Local => tr(
                     locale,
                     "Spotify keeps every play since your account began. On your Spotify \
                      account page, open Privacy, ask to download your data and tick \
                      \"Extended streaming history\". Spotify emails the ZIP within a few \
                      days. Choose it (or its JSON files) here: it stays on this computer.",
-                )
+                ),
             };
             ui.add(
                 egui::Label::new(
@@ -977,153 +1079,267 @@ fn import_card(app: &mut App, ui: &mut Ui, view: &mut View) {
                 app.actions.push(Action::OpenUrl(PRIVACY_URL.to_owned()));
             }
             ui.add_space(8.0);
-            let importing = app.stats.importing.clone();
-            ui.horizontal_wrapped(|ui| {
-                let busy = importing.is_some();
-                let choose = ui
-                    .add_enabled_ui(!busy, |ui| {
-                        theme::pill_button(ui, &palette, &tr(locale, "Choose file…"), true)
-                    })
-                    .inner;
-                if choose.clicked() {
-                    // The backend asks for the file in its native dialog.
-                    app.actions.push(Action::ImportStreamingHistory(None));
+            match origin {
+                Origin::Local => {
+                    local_import(app, ui);
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    sync_line(app, ui, view);
                 }
-                if let Some(progress) = &importing {
-                    theme::spinner(ui, 16.0, palette.accent);
-                    theme::text(
-                        ui,
-                        tr(locale, "Reading file {done} of {total} · {plays} plays")
-                            .replace("{done}", &progress.files_done.to_string())
-                            .replace("{total}", &progress.files_total.to_string())
-                            .replace("{plays}", &summary::count(progress.plays_read as u64)),
-                        theme::regular(13.5),
-                        palette.secondary,
-                    );
-                } else if let Some(result) = &app.stats.last_import {
-                    let (icon, color, text) = match result {
-                        Ok(done) => (
-                            Icon::CircleCheck,
-                            palette.accent,
-                            tr(
-                                locale,
-                                "Added {added} plays from {files} files ({known} already known)",
-                            )
-                            .replace("{added}", &summary::count(done.added as u64))
-                            .replace("{files}", &done.files.to_string())
-                            .replace("{known}", &summary::count(done.duplicates as u64)),
-                        ),
-                        Err(error) => (
-                            Icon::CircleAlert,
-                            palette.danger,
-                            widgets::sanitize_error_message(error, locale).into_owned(),
-                        ),
-                    };
-                    theme::icon(ui, icon, 16.0, color);
-                    theme::text(ui, text, theme::regular(13.5), palette.secondary);
+                Origin::Server(server) => {
+                    let host = crate::stats_api::host(server).to_owned();
+                    server_import(app, ui, &host);
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    server_sync_line(app, ui, view);
                 }
-            });
-            upload_line(app, ui);
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(6.0);
-            sync_line(app, ui, view);
-            server_line(app, ui);
+            }
         });
     ui.add_space(24.0);
 }
 
-/// How sending the imported history to the statistics server goes.
-fn upload_line(app: &App, ui: &mut Ui) {
+/// The Choose file button, which the backend answers with its native
+/// dialog, disabled while an import is on its way.
+fn choose_file(app: &mut App, ui: &mut Ui, busy: bool) {
+    let choose = ui
+        .add_enabled_ui(!busy, |ui| {
+            theme::pill_button(ui, &app.palette, &tr(app.locale, "Choose file…"), true)
+        })
+        .inner;
+    if choose.clicked() {
+        app.actions.push(Action::ImportStreamingHistory(None));
+    }
+}
+
+/// The import into the log kept on this computer, and how it went.
+fn local_import(app: &mut App, ui: &mut Ui) {
     let palette = app.palette;
     let locale = app.locale;
-    let state = &app.stats.server;
-    let host = state
-        .server
-        .as_deref()
-        .map(crate::stats_api::host)
-        .unwrap_or_default();
-    let (icon, color, text) = if state.uploading {
-        (
-            None,
-            palette.accent,
-            // Translators: {server} is the statistics server's address.
-            tr(locale, "Sending it to {server}…").replace("{server}", host),
-        )
-    } else {
-        match &state.uploaded {
-            Some(Ok(plays)) => (
-                Some(Icon::CircleCheck),
-                palette.accent,
-                crate::i18n::ngettext(
-                    locale,
-                    // Translators: {server} is the statistics server's address.
-                    "{server} took in {count} new play",
-                    "{server} took in {count} new plays",
-                    u32::try_from(*plays).unwrap_or(u32::MAX),
-                )
-                .replace("{server}", host)
-                .replace("{count}", &summary::count(*plays)),
-            ),
-            Some(Err(error)) => (Some(Icon::CircleAlert), palette.danger, error.clone()),
-            None => return,
-        }
-    };
+    let importing = app.stats.importing.clone();
     ui.horizontal_wrapped(|ui| {
-        match icon {
-            Some(icon) => {
-                theme::icon(ui, icon, 16.0, color);
-            }
-            None => {
-                theme::spinner(ui, 16.0, color);
-            }
+        choose_file(app, ui, importing.is_some());
+        if let Some(progress) = &importing {
+            theme::spinner(ui, 16.0, palette.accent);
+            theme::text(
+                ui,
+                tr(locale, "Reading file {done} of {total} · {plays} plays")
+                    .replace("{done}", &progress.files_done.to_string())
+                    .replace("{total}", &progress.files_total.to_string())
+                    .replace("{plays}", &summary::count(progress.plays_read as u64)),
+                theme::regular(13.5),
+                palette.secondary,
+            );
+        } else if let Some(result) = &app.stats.last_import {
+            let (icon, color, text) = match result {
+                Ok(done) => (
+                    Icon::CircleCheck,
+                    palette.accent,
+                    tr(
+                        locale,
+                        "Added {added} plays from {files} files ({known} already known)",
+                    )
+                    .replace("{added}", &summary::count(done.added as u64))
+                    .replace("{files}", &done.files.to_string())
+                    .replace("{known}", &summary::count(done.duplicates as u64)),
+                ),
+                Err(error) => (
+                    Icon::CircleAlert,
+                    palette.danger,
+                    widgets::sanitize_error_message(error, locale).into_owned(),
+                ),
+            };
+            theme::icon(ui, icon, 16.0, color);
+            theme::text(ui, text, theme::regular(13.5), palette.secondary);
         }
-        theme::text(ui, text, theme::regular(13.5), palette.secondary);
     });
 }
 
-/// Where the plays of the statistics server come from, and when they last
-/// came, while one is connected.
-fn server_line(app: &App, ui: &mut Ui) {
+/// `12.3 MB`, for the bytes sent.
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+}
+
+/// What sending the history to the statistics server says while it goes:
+/// the bytes sent, then the server reading it.
+fn sending(locale: Locale, host: &str, sent: crate::stats_api::import::Sent) -> String {
+    if sent.total == 0 {
+        // Translators: {server} is the statistics server's address.
+        tr(locale, "Sending it to {server}…").replace("{server}", host)
+    } else if sent.done() {
+        // Translators: {server} is the statistics server's address.
+        tr(locale, "{server} is reading it…").replace("{server}", host)
+    } else {
+        // Translators: {server} is the statistics server's address; {sent} and {total} are sizes, like "12.3 MB".
+        tr(locale, "Sending it to {server}: {sent} of {total}")
+            .replace("{server}", host)
+            .replace("{sent}", &megabytes(sent.bytes))
+            .replace("{total}", &megabytes(sent.total))
+    }
+}
+
+/// The last part of an archive entry's path: the file's own name.
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// One file of the server's report: `Streaming_History_Audio_2021.json:
+/// 940 new · 15 already there · 45 skipped`.
+fn file_line(locale: Locale, file: &crate::stats_api::import::FileReport) -> String {
+    let counts = &file.counts;
+    // Translators: {file} is a file name; {new}, {known} and {skipped} are numbers of plays.
+    tr(
+        locale,
+        "{file}: {new} new · {known} already there · {skipped} skipped",
+    )
+    .replace("{file}", file_name(&file.name))
+    .replace("{new}", &summary::count(counts.imported))
+    .replace("{known}", &summary::count(counts.skipped_duplicate))
+    .replace("{skipped}", &summary::count(counts.skipped()))
+}
+
+/// The import into the statistics server: the bytes sent, then the
+/// server's report, per file.
+fn server_import(app: &mut App, ui: &mut Ui, host: &str) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let importing = app.stats.server.importing;
+    let imported = app.stats.server.imported.clone();
+    ui.horizontal_wrapped(|ui| {
+        choose_file(app, ui, importing.is_some());
+        if let Some(sent) = importing {
+            theme::spinner(ui, 16.0, palette.accent);
+            theme::text(
+                ui,
+                sending(locale, host, sent),
+                theme::regular(13.5),
+                palette.secondary,
+            );
+        } else if let Some(result) = &imported {
+            let (icon, color, text) = match result {
+                Ok(report) => (
+                    Icon::CircleCheck,
+                    palette.accent,
+                    crate::i18n::ngettext(
+                        locale,
+                        // Translators: {server} is the statistics server's address.
+                        "{server} took in {count} new play",
+                        "{server} took in {count} new plays",
+                        u32::try_from(report.totals.imported).unwrap_or(u32::MAX),
+                    )
+                    .replace("{server}", host)
+                    .replace("{count}", &summary::count(report.totals.imported)),
+                ),
+                Err(error) => (
+                    Icon::CircleAlert,
+                    palette.danger,
+                    widgets::sanitize_error_message(error, locale).into_owned(),
+                ),
+            };
+            theme::icon(ui, icon, 16.0, color);
+            theme::text(ui, text, theme::regular(13.5), palette.secondary);
+        }
+    });
+    if let Some(sent) = importing.filter(|sent| sent.total > 0 && !sent.done()) {
+        // The share sent, as a thin bar in the genres' style.
+        let width = ui.available_width().min(420.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(width, 6.0), Sense::hover());
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(3), palette.surface_hover);
+        let done = Rect::from_min_size(rect.min, vec2(rect.width() * sent.fraction(), 6.0));
+        ui.painter()
+            .rect_filled(done, CornerRadius::same(3), palette.accent);
+    }
+    if let Some(Ok(report)) = &imported {
+        for file in &report.files {
+            theme::text(
+                ui,
+                file_line(locale, file),
+                theme::regular(12.5),
+                palette.secondary,
+            );
+        }
+        if !report.ignored_files.is_empty() {
+            let left = report.ignored_files.len();
+            theme::text(
+                ui,
+                crate::i18n::ngettext(
+                    locale,
+                    // Translators: {count} is a number of files of Spotify's export that hold no music history.
+                    "{count} other file of the export was left out",
+                    "{count} other files of the export were left out",
+                    u32::try_from(left).unwrap_or(u32::MAX),
+                )
+                .replace("{count}", &left.to_string()),
+                theme::regular(12.5),
+                palette.dim,
+            );
+        }
+    }
+}
+
+/// When the statistics server's figures for the range came, and Sync now,
+/// which checks the account and asks for them again. A failed refresh
+/// keeps the figures on show and says why.
+fn server_sync_line(app: &mut App, ui: &mut Ui, view: &View) {
     let palette = app.palette;
     let locale = app.locale;
     let state = &app.stats.server;
-    let Some(server) = state.connected() else {
-        return;
-    };
-    let host = crate::stats_api::host(server);
-    ui.add_space(4.0);
-    ui.horizontal_wrapped(|ui| {
-        let text = match (&state.synced, &state.error) {
-            (_, Some(error)) => {
-                theme::icon(ui, Icon::CircleAlert, 14.0, palette.danger);
-                error.clone()
-            }
-            (Some(synced), None) => {
-                theme::icon(ui, Icon::CircleCheck, 14.0, palette.secondary);
-                format!(
-                    "{} · {}",
-                    // Translators: {server} is the statistics server's address.
-                    tr(locale, "Synced from {server}").replace("{server}", host),
-                    summary::updated(locale, now_ms() - synced.at_ms)
-                )
-            }
-            (None, None) => {
-                theme::icon(ui, Icon::Refresh, 14.0, palette.secondary);
-                // Translators: {server} is the statistics server's address.
-                tr(locale, "Connected to {server}").replace("{server}", host)
-            }
-        };
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(text)
-                    .font(theme::regular(13.5))
-                    .color(palette.secondary),
-            )
-            .wrap()
-            .selectable(false),
-        );
+    let slot = state.answers.range(view.span.period());
+    let syncing = state.checking || slot.is_some_and(|slot| slot.fetching);
+    let came = slot.and_then(|slot| slot.value.as_ref().map(|(_, at)| *at));
+    // The figures' own failure shows in their place when there are none.
+    let error = state.error.clone().or_else(|| {
+        slot.filter(|slot| slot.value.is_some())
+            .and_then(|slot| slot.error.as_ref())
+            .map(ToString::to_string)
     });
+    let busy = state.importing.is_some();
+    ui.horizontal_wrapped(|ui| {
+        if syncing {
+            theme::spinner(ui, 16.0, palette.accent);
+            theme::text(
+                ui,
+                tr(locale, "Syncing…"),
+                theme::regular(13.5),
+                palette.secondary,
+            );
+        } else if let Some(at) = came {
+            theme::icon(ui, Icon::Refresh, 14.0, palette.secondary);
+            theme::text(
+                ui,
+                summary::updated(locale, now_ms() - at),
+                theme::regular(13.5),
+                palette.secondary,
+            );
+            // The "ago" moves on while the page stays open.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs(30));
+        }
+        let sync = ui
+            .add_enabled_ui(!syncing && !busy, |ui| {
+                theme::soft_button(ui, &palette, None, &tr(locale, "Sync now"), false)
+            })
+            .inner;
+        if sync.clicked() {
+            app.actions.push(Action::RefreshStats);
+        }
+    });
+    if let Some(error) = error {
+        ui.horizontal_wrapped(|ui| {
+            theme::icon(ui, Icon::CircleAlert, 14.0, palette.danger);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(widgets::sanitize_error_message(&error, locale))
+                        .font(theme::regular(13.5))
+                        .color(palette.secondary),
+                )
+                .wrap()
+                .selectable(false),
+            );
+        });
+    }
     theme::text(
         ui,
         tr(
@@ -1231,6 +1447,87 @@ mod tests {
             image.size,
             [crate::share_card::WIDTH, crate::share_card::HEIGHT]
         );
+    }
+
+    #[test]
+    fn the_share_card_of_api_mode_carries_the_servers_figures() {
+        let now = 1_700_100_000_000;
+        let stats =
+            crate::stats_api::stats::samples::range(crate::stats_api::stats::Period::Weeks4);
+        let summary = summary::from_server(&stats, Span::Weeks4, now);
+        let today = jiff::civil::date(2026, 11, 18);
+        let (card, urls) = share_card(Locale::default(), &summary, None, None, today);
+        assert_eq!(card.range, "Last 4 weeks");
+        assert_eq!(card.figures[0].0, summary::count(15_000_000 / 60_000));
+        assert_eq!(card.figures[1].0, "72");
+        assert_eq!(card.artists[0].title, "Band");
+        assert_eq!(card.artists[1].title, "Solo");
+        assert_eq!(card.tracks[0].title, "First");
+        assert_eq!(card.tracks[0].subtitle, "Band, Guest");
+        // An item the server has no picture of yet draws a placeholder.
+        assert_eq!(
+            urls,
+            vec![
+                Some("https://i.scdn.co/image/b".to_owned()),
+                None,
+                Some("https://i.scdn.co/image/a1".to_owned()),
+                None,
+            ]
+        );
+        let image = crate::share_card::render(&card);
+        assert_eq!(
+            image.size,
+            [crate::share_card::WIDTH, crate::share_card::HEIGHT]
+        );
+    }
+
+    #[test]
+    fn sending_to_the_server_says_how_far_it_got_and_what_it_took_in() {
+        use crate::stats_api::import::{Counts, FileReport, Sent};
+        let locale = Locale::default();
+        let host = "spotapi.simnjs.fr";
+        assert_eq!(
+            sending(locale, host, Sent::default()),
+            "Sending it to spotapi.simnjs.fr…"
+        );
+        assert_eq!(
+            sending(
+                locale,
+                host,
+                Sent {
+                    bytes: 12_345_678,
+                    total: 98_700_000
+                }
+            ),
+            "Sending it to spotapi.simnjs.fr: 12.3 MB of 98.7 MB"
+        );
+        assert_eq!(
+            sending(
+                locale,
+                host,
+                Sent {
+                    bytes: 10,
+                    total: 10
+                }
+            ),
+            "spotapi.simnjs.fr is reading it…"
+        );
+        let file = FileReport {
+            name: "Spotify Extended Streaming History/Streaming_History_Audio_2021_3.json".into(),
+            counts: Counts {
+                received: 12_000,
+                imported: 10_940,
+                skipped_short: 900,
+                skipped_not_track: 45,
+                skipped_duplicate: 115,
+            },
+        };
+        assert_eq!(
+            file_line(locale, &file),
+            "Streaming_History_Audio_2021_3.json: 10,940 new · 115 already there · 945 skipped"
+        );
+        assert_eq!(file_name(r"C:\export\a.json"), "a.json");
+        assert_eq!(file_name("a.json"), "a.json");
     }
 
     #[test]

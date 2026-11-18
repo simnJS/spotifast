@@ -972,17 +972,25 @@ fn concert_row(app: &mut App, ui: &mut egui::Ui, concert: &Concert) {
 }
 
 /// Your stats: how often the owner played this song and since when, and
-/// where its artist stands among theirs, from the local listening stats.
-/// Left out when the log has no stream of the song.
+/// where its artist stands among theirs, from their listening stats (the
+/// log on this computer, or the statistics server in API mode). Left out
+/// when there is no stream of the song.
 fn your_stats(app: &mut App, ui: &mut egui::Ui, now: &NowPlaying) {
-    use super::widgets::your_stats::{self, Shown, Subject};
+    use super::widgets::your_stats::{self, Shown};
     let palette = app.palette;
     let locale = app.locale;
-    match your_stats::for_subject(app, ui.ctx(), Subject::Track(now.uri.clone())) {
+    match your_stats::for_song(app, ui.ctx(), now.uri.clone(), now.artists.first()) {
         Shown::Hidden => {}
         Shown::Loading => {
             ui.add_space(SECTION_GAP);
             skeleton(ui, &palette);
+        }
+        Shown::Failed(error) => {
+            section(ui, palette.surface, |ui| {
+                section_title(ui, &palette, &gettext(locale, "Your stats"), None);
+                ui.add_space(8.0);
+                your_stats::draw_error(ui, &palette, locale, &error);
+            });
         }
         Shown::Ready(figures) => {
             section(ui, palette.surface, |ui| {
