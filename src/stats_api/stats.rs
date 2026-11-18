@@ -707,7 +707,9 @@ mod tests {
         .unwrap();
         assert_eq!(empty, Totals::default());
 
-        let paris = jiff::tz::TimeZone::get("Europe/Paris").unwrap();
+        // Paris in November, without a time zone database (the Nix build
+        // has none).
+        let paris = jiff::tz::TimeZone::fixed(jiff::tz::offset(1));
         let days = serde_json::from_str::<List<DayBucket>>(
             // Midnight in Paris on 14 November 2023, then midnight UTC on
             // the 15th (an older server), then a named day.
@@ -725,7 +727,7 @@ mod tests {
             .collect();
         assert_eq!(named, ["2023-11-14", "2023-11-15", "2023-11-17"]);
         // West of UTC, midnight UTC is still the right day.
-        let new_york = jiff::tz::TimeZone::get("America/New_York").unwrap();
+        let new_york = jiff::tz::TimeZone::fixed(jiff::tz::offset(-5));
         assert_eq!(days[1].day(&new_york).unwrap().to_string(), "2023-11-15");
 
         let hours: Hours = serde_json::from_str(
