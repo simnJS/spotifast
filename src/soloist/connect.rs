@@ -961,14 +961,14 @@ mod tests {
         let q1 = QueueTrack::row("spotify:track:q1", "q1", "");
 
         let next = queue
-            .moving(&[c2.clone()], &Place::Before(q1.clone()))
+            .moving(std::slice::from_ref(&c2), &Place::Before(q1.clone()))
             .unwrap();
         assert_eq!(uids(&next), ["c2", "q1", "q2", "c1", "c1-again"]);
         assert!(next[0].is_queued());
         assert_eq!(next[0].json()["provider"], "queue");
 
         let next = queue
-            .moving(&[q1.clone()], &Place::After(c2.clone()))
+            .moving(std::slice::from_ref(&q1), &Place::After(c2.clone()))
             .unwrap();
         assert_eq!(uids(&next), ["q2", "c1", "c2", "q1", "c1-again"]);
         assert!(next[3].is_queued());
@@ -979,12 +979,12 @@ mod tests {
         assert_eq!(uids(&next), ["q1", "c2", "c1", "q2", "c1-again"]);
 
         assert_eq!(
-            queue.moving(&[c2.clone()], &Place::After(c2.clone())),
+            queue.moving(std::slice::from_ref(&c2), &Place::After(c2.clone())),
             Ok(queue.next.clone())
         );
         let gone = QueueTrack::row("spotify:track:gone", "gone", "");
         assert_eq!(
-            queue.moving(&[gone.clone()], &Place::After(q1)),
+            queue.moving(std::slice::from_ref(&gone), &Place::After(q1)),
             Err(ConnectError::NotInQueue)
         );
         assert_eq!(
