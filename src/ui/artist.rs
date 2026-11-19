@@ -443,7 +443,8 @@ fn artist_actions(app: &mut App, ui: &mut egui::Ui, artist: &Artist) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 24.0;
         play_button(app, ui, artist, 56.0);
-        let shuffle = app.playing_context_shuffle();
+        // The artist's own mode, as in Spotify's apps.
+        let shuffle = app.collection_shuffle(&artist.uri);
         if theme::icon_button(
             ui,
             Icon::Shuffle,
@@ -468,7 +469,10 @@ fn artist_actions(app: &mut App, ui: &mut egui::Ui, artist: &Artist) {
         )
         .clicked()
         {
-            app.actions.push(Action::SetShuffle(!shuffle));
+            app.actions.push(Action::SetCollectionShuffle {
+                uri: artist.uri.clone(),
+                shuffle: !shuffle,
+            });
         }
         if theme::pill_button(
             ui,
@@ -518,6 +522,11 @@ fn popular(
                 .map(|track| track.uri.clone())
                 .collect::<Vec<_>>()
                 .into();
+            // TODO(connect): Spotify plays a Popular row as the artist, with
+            // `skip_to` the song, so the artist carries on after the ten
+            // (queue-vs-spotify finding 11). The Web API takes no offset
+            // for an artist; it needs the Connect `play` of
+            // `crate::soloist::connect`, which lands separately.
             let context = RowContext::Uris(Arc::clone(&uris));
             let items: Vec<PlayableItem> =
                 tracks.iter().cloned().map(PlayableItem::Track).collect();

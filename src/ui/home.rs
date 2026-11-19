@@ -1845,6 +1845,9 @@ fn top_artists(app: &mut App, ui: &mut Ui) {
 }
 
 /// The rows of a song list on Home, played as one list.
+// TODO(connect): Spotify's apps play these with the list's own context, so
+// autoplay follows natively (queue-vs-spotify finding 11). That needs the
+// Connect `play` of `crate::soloist::connect`, which lands separately.
 fn song_rows(app: &mut App, ui: &mut Ui, tracks: &[crate::api::models::Track], limit: usize) {
     let uris: Arc<[String]> = tracks
         .iter()

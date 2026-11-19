@@ -139,6 +139,35 @@ struct PushedVolume {
     poll_seq: u64,
 }
 
+/// The shuffle mode a start on another device plays in, until the device
+/// reports the start: Spotify's player applies a collection's own stored
+/// mode when it starts one, which may not be the one it was started in.
+#[derive(Clone, Debug)]
+struct StartShuffle {
+    /// The context started, `None` for a list of songs.
+    context: Option<String>,
+    /// The song it starts at, when known.
+    track: Option<String>,
+    shuffle: bool,
+    at: Instant,
+}
+
+/// How long a start's shuffle mode waits for the device to report it.
+const START_SHUFFLE_WINDOW: Duration = Duration::from_secs(20);
+
+/// How many collections' shuffle modes are remembered.
+const SHUFFLE_MODES_KEPT: usize = 500;
+
+/// Whether a context keeps a shuffle mode of its own, as each playlist,
+/// album, artist, podcast and Liked Songs does in Spotify's apps.
+fn keeps_shuffle_mode(uri: &str) -> bool {
+    uri.ends_with(":collection")
+        || matches!(
+            util::uri_kind(uri),
+            Some("playlist" | "album" | "artist" | "show")
+        )
+}
+
 /// A shuffled play held until its context's length is read.
 struct ShuffleLengthWait {
     serial: u64,
@@ -823,8 +852,13 @@ pub struct App {
         std::path::PathBuf,
         std::sync::Arc<HashMap<String, std::path::PathBuf>>,
     )>,
-    /// Requested shuffle mode, applied to every context until changed.
+    /// The playback's shuffle mode as last chosen or reported, which a list
+    /// or a lone song starts in. A collection starts in its own.
     shuffle_wanted: bool,
+    /// Each collection's own shuffle mode, by context URI, newest first.
+    shuffle_modes: Vec<(String, bool)>,
+    /// The mode a start on another device plays in, until it reports it.
+    start_shuffle: Option<StartShuffle>,
     /// The repeat mode saved by the last run, which the first local load
     /// starts with: the engine starts at off.
     repeat_wanted: RepeatMode,
@@ -1501,6 +1535,21 @@ impl App {
             played_row: None,
             local_files: None,
             shuffle_wanted: session.shuffle_on,
+            shuffle_modes: {
+                // A session from before modes were kept per collection
+                // still resumes its last collection in the mode it had.
+                let mut modes = session.shuffle_modes.clone();
+                if modes.is_empty()
+                    && let Some(context) = session
+                        .last_context
+                        .as_deref()
+                        .filter(|context| keeps_shuffle_mode(context))
+                {
+                    modes.push((context.to_string(), session.shuffle_on));
+                }
+                modes
+            },
+            start_shuffle: None,
             repeat_wanted: RepeatMode::from_api(&session.repeat),
             shuffle_set_at: None,
             unavailable_at: Vec::new(),
@@ -2270,6 +2319,125 @@ impl App {
 
     pub fn playing_context_shuffle(&self) -> bool {
         self.shuffle_wanted
+    }
+
+    /// The shuffle mode a collection's page shows and its Play starts in,
+    /// as in Spotify's apps: the playback's while it plays, as the player
+    /// bar shows it, else the one remembered for it. A collection never
+    /// shuffled here starts in order. A page that is no collection, as a
+    /// radio is, follows the playback's.
+    pub fn collection_shuffle(&self, uri: &str) -> bool {
+        if self.collection_playing(uri)
+            && let Some(now) = self.now_playing()
+        {
+            return now.shuffle;
+        }
+        if !keeps_shuffle_mode(uri) {
+            return self.shuffle_wanted;
+        }
+        self.remembered_shuffle(uri).unwrap_or(false)
+    }
+
+    /// Whether `uri` is the collection playing, or the one the remembered
+    /// song resumes in.
+    fn collection_playing(&self, uri: &str) -> bool {
+        self.shown_context_uri().as_deref() == Some(uri)
+    }
+
+    /// The context of what plays, or of the remembered song while nothing
+    /// does.
+    fn shown_context_uri(&self) -> Option<String> {
+        self.playing_context_uri().or_else(|| {
+            self.resume_only()
+                .then(|| self.resume_context.clone())
+                .flatten()
+        })
+    }
+
+    fn remembered_shuffle(&self, uri: &str) -> Option<bool> {
+        self.shuffle_modes
+            .iter()
+            .find(|(known, _)| known == uri)
+            .map(|(_, shuffle)| *shuffle)
+    }
+
+    /// Remembers a collection's own mode, as the newest.
+    fn remember_shuffle(&mut self, uri: &str, shuffle: bool) {
+        if !keeps_shuffle_mode(uri)
+            || self
+                .shuffle_modes
+                .first()
+                .is_some_and(|(known, on)| known == uri && *on == shuffle)
+        {
+            return;
+        }
+        self.shuffle_modes.retain(|(known, _)| known != uri);
+        self.shuffle_modes.insert(0, (uri.to_string(), shuffle));
+        self.shuffle_modes.truncate(SHUFFLE_MODES_KEPT);
+        self.session_dirty = true;
+    }
+
+    /// A collection page's Shuffle button. It sets that collection's own
+    /// mode for its next Play, and changes the playback only when that
+    /// collection is the one playing: another collection playing is left
+    /// alone, as in Spotify's apps.
+    fn set_collection_shuffle(&mut self, uri: String, shuffle: bool) {
+        if self.collection_playing(&uri) && self.now_playing().is_some() {
+            self.set_shuffle(shuffle);
+        }
+        self.remember_shuffle(&uri, shuffle);
+    }
+
+    /// Follows the shuffle mode another device reports. Once it reports a
+    /// start, a mode other than the one the start played in is set again,
+    /// once: Spotify's player applies a collection's own stored mode when
+    /// it starts one. Otherwise the mode it reports for the playing
+    /// collection becomes that collection's, whoever set it.
+    fn follow_remote_shuffle(&mut self) {
+        if matches!(self.target(), Target::Local) {
+            return;
+        }
+        let Some(remote) = self.remote.as_ref() else {
+            return;
+        };
+        let context = remote
+            .state
+            .context
+            .as_ref()
+            .map(|context| crate::link::canonical_context_uri(&context.uri));
+        let item = remote
+            .state
+            .item
+            .as_ref()
+            .map(|item| item.uri().to_string());
+        let reported = remote.state.shuffle_state;
+        if let Some(start) = &self.start_shuffle {
+            if start.at.elapsed() > START_SHUFFLE_WINDOW {
+                self.start_shuffle = None;
+            } else {
+                let landed = context == start.context
+                    && start
+                        .track
+                        .as_ref()
+                        .is_none_or(|track| item.as_ref() == Some(track));
+                if !landed {
+                    // What the device reports is still the old playback's.
+                    return;
+                }
+                let wanted = start.shuffle;
+                self.start_shuffle = None;
+                if reported != wanted {
+                    self.set_shuffle(wanted);
+                }
+                return;
+            }
+        }
+        if self.shuffle_held() {
+            return;
+        }
+        if let Some(context) = context {
+            self.remember_shuffle(&context, reported);
+        }
     }
 
     /// A shuffle change made here shows as made until the player has had
@@ -3893,8 +4061,12 @@ impl App {
                 .shuffle_set_at
                 .is_none_or(|at| at.elapsed() > Duration::from_secs(5))
         {
-            // Accept shuffle changes made by another client.
+            // Accept shuffle changes made by another client, for the
+            // playing collection too.
             self.shuffle_wanted = state.shuffle;
+            if let Some(uri) = self.shown_context_uri() {
+                self.remember_shuffle(&uri, state.shuffle);
+            }
         }
         if state.playback != self.local.playback {
             self.optimistic_playing = None;
@@ -8257,6 +8429,7 @@ impl App {
                         {
                             self.shuffle_wanted = current;
                         }
+                        self.follow_remote_shuffle();
                         if let Some(context) = self
                             .remote
                             .as_ref()
@@ -10606,23 +10779,64 @@ impl App {
     }
 
     /// Where a shuffled play of `context_uri` begins, as an offset by
-    /// track URI or by position: a random one of the rows the app holds,
-    /// or, when it holds none, a random position within the length the
-    /// app knows. Neither, and the play carries no offset at all:
-    /// librespot then picks its own random track; the Web API, which
-    /// would start at track one, first has the length read (see
-    /// [`Self::start_play_with`]).
+    /// track URI or by position, drawn across the whole collection as
+    /// Spotify's player draws it: a random one of its rows when the app
+    /// holds them all, else a random position within its known length on
+    /// another device. This computer's player draws across the whole
+    /// context itself when given no offset. With no length known, another
+    /// device first has it read (see [`Self::start_play_with`]); a context
+    /// that cannot be measured starts at a random row held, or where
+    /// Spotify chooses.
     fn shuffle_start(&self, context_uri: &str) -> (Option<String>, Option<u32>) {
-        if let Some(uri) = self.random_track_in(context_uri) {
+        if self.context_rows_complete(context_uri)
+            && let Some(uri) = self.random_track_in(context_uri)
+        {
             return (Some(uri), None);
         }
-        if matches!(self.target(), Target::Remote(Some(_)))
-            && let Some(len) = self.context_len(context_uri)
-            && len > 0
-        {
-            return (None, Some(rand::random_range(0..len)));
+        let len = self
+            .context_len(context_uri)
+            .or_else(|| self.loaded_context_total(context_uri))
+            .filter(|len| *len > 0);
+        match self.target() {
+            Target::Remote(Some(_)) => match len {
+                Some(len) => (None, Some(rand::random_range(0..len))),
+                None if crate::backend::measures_length(context_uri) => (None, None),
+                None => (self.random_track_in(context_uri), None),
+            },
+            Target::Local => (None, None),
+            Target::Remote(None) => (self.random_track_in(context_uri), None),
         }
-        (None, None)
+    }
+
+    /// Whether the app holds every row of a playlist, album or Liked Songs.
+    fn context_rows_complete(&self, context_uri: &str) -> bool {
+        if let Some(id) = context_uri.strip_prefix("spotify:playlist:") {
+            self.playlist_pages
+                .get(id)
+                .is_some_and(|page| page.items.is_complete())
+        } else if let Some(id) = context_uri.strip_prefix("spotify:album:") {
+            self.album_pages
+                .get(id)
+                .is_some_and(|page| page.tracks.is_complete())
+        } else if context_uri.ends_with(":collection") {
+            self.library.liked.is_complete()
+        } else {
+            false
+        }
+    }
+
+    /// How many rows a loaded playlist, album or Liked Songs page says the
+    /// collection holds.
+    fn loaded_context_total(&self, context_uri: &str) -> Option<u32> {
+        if let Some(id) = context_uri.strip_prefix("spotify:playlist:") {
+            self.playlist_pages.get(id)?.items.total
+        } else if let Some(id) = context_uri.strip_prefix("spotify:album:") {
+            self.album_pages.get(id)?.tracks.total
+        } else if context_uri.ends_with(":collection") {
+            self.library.liked.total
+        } else {
+            None
+        }
     }
 
     /// Start a playlist at its first available row, not an unspecified place
@@ -10696,16 +10910,29 @@ impl App {
             self.clear_play_pending();
             return;
         }
-        // Shuffle applies across contexts until disabled. A selected row still
-        // starts first; otherwise choose a random starting track.
+        // A collection starts in its own mode, as in Spotify's apps, and
+        // Shuffle play turns its mode on; a list or a lone song starts in
+        // the playback's. A selected row still starts first; otherwise
+        // choose a random starting track.
         let mut request = request;
         self.queue_shuffle_pending = None;
-        if shuffle_first {
-            self.shuffle_wanted = true;
+        let collection = request
+            .context_uri
+            .clone()
+            .filter(|uri| keeps_shuffle_mode(uri));
+        if shuffle_first && let Some(uri) = &collection {
+            self.remember_shuffle(uri, true);
+        }
+        let shuffle = shuffle_first
+            || match &collection {
+                Some(uri) => self.remembered_shuffle(uri).unwrap_or(false),
+                None => self.shuffle_wanted,
+            };
+        if shuffle_first || collection.is_some() {
+            self.shuffle_wanted = shuffle;
             self.shuffle_set_at = Some(Instant::now());
             self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
         }
-        let shuffle = shuffle_first || self.shuffle_wanted;
         if request.offset_uri.is_none()
             && request.offset_position.is_none()
             && request.uris.is_empty()
@@ -10750,6 +10977,17 @@ impl App {
             None => {}
         }
         let expected_track = keys.iter().find(|key| key.contains(":track:")).cloned();
+        // Another device may come up in another mode; it is set again once
+        // the device reports this start.
+        self.start_shuffle = Some(StartShuffle {
+            context: request.context_uri.clone(),
+            // A list reports no context: its first song tells it started.
+            track: expected_track
+                .clone()
+                .filter(|_| request.context_uri.is_none()),
+            shuffle,
+            at: Instant::now(),
+        });
         if let Some(uri) = expected_track {
             if let Some(context) = &request.context_uri {
                 self.cache_track_from_context(context, &uri);
@@ -10813,6 +11051,11 @@ impl App {
                     });
                     self.shuffle_length_wait = Some(ShuffleLengthWait { serial, request });
                 } else if shuffle {
+                    // TODO(connect): one Connect `play` carrying the mode in
+                    // `player_options_override`, and no `skip_to` so the
+                    // player draws the first song, as Spotify's apps send it
+                    // (queue-vs-spotify findings 3 and 10), once
+                    // `crate::soloist::connect` lands.
                     self.backend.api(ApiRequest::ShufflePlay {
                         device_id: Some(device_id),
                         play: request,
@@ -11456,6 +11699,12 @@ impl App {
         self.shuffle_wanted = shuffle;
         self.shuffle_set_at = Some(Instant::now());
         self.session_dirty = true;
+        // The latest choice wins over the mode a start was waiting to set,
+        // and the playing collection keeps it for its next start.
+        self.start_shuffle = None;
+        if let Some(uri) = self.shown_context_uri() {
+            self.remember_shuffle(&uri, shuffle);
+        }
         if let Some(assumed) = &mut self.assumed_context {
             assumed.shuffle = Some(shuffle);
         }
@@ -12779,6 +13028,7 @@ impl App {
                     | Action::ToggleShuffle
                     | Action::CycleRepeat
                     | Action::SetShuffle(_)
+                    | Action::SetCollectionShuffle { .. }
                     | Action::SetRepeat(_)
                     | Action::Transfer(_)
                     | Action::AddToQueue { .. }
@@ -12960,7 +13210,14 @@ impl App {
                     // The header's Play names no song. With shuffle on it
                     // starts at a random row, as a whole context does in
                     // `shuffle_start`; a clicked row still plays first.
-                    let shuffled_start = uri.is_empty() && self.shuffle_wanted && !uris.is_empty();
+                    // The view plays in its collection's own mode.
+                    // TODO(connect): Spotify plays a sorted or filtered view
+                    // as its collection, with `sorting.criteria` and
+                    // `filtering.predicate`, past 500 songs and with autoplay
+                    // after it (queue-vs-spotify finding 11). That needs the
+                    // Connect `play` of `crate::soloist::connect`.
+                    let mode = self.collection_shuffle(&context_uri);
+                    let shuffled_start = uri.is_empty() && mode && !uris.is_empty();
                     let index = if shuffled_start {
                         rand::random_range(0..uris.len()) as u32
                     } else {
@@ -12981,6 +13238,9 @@ impl App {
                     if let Some(uri) = uris.get(index as usize) {
                         self.cache_track_from_context(&context_uri, uri);
                     }
+                    // The list starts in the mode of the view's collection.
+                    self.shuffle_wanted = mode;
+                    self.shuffle_set_at = Some(Instant::now());
                     let request = PlayRequest::tracks(uris).starting_at_index(index);
                     self.play_request(request, false);
                     self.played_row = played;
@@ -13086,6 +13346,9 @@ impl App {
                 self.set_shuffle(!shuffle);
             }
             Action::SetShuffle(shuffle) => self.set_shuffle(shuffle),
+            Action::SetCollectionShuffle { uri, shuffle } => {
+                self.set_collection_shuffle(uri, shuffle)
+            }
             Action::CycleRepeat => {
                 let mode = self.now_playing().map(|now| now.repeat).unwrap_or_default();
                 self.set_repeat(mode.next());
@@ -15027,6 +15290,7 @@ impl App {
                     .map(|queue| queue.queue.iter().take(30).cloned().collect())
                     .unwrap_or_default(),
                 shuffle_on: self.shuffle_wanted,
+                shuffle_modes: self.shuffle_modes.clone(),
                 repeat: self.local_repeat().api_name().into(),
                 sorts: self
                     .table_sorts
@@ -20148,6 +20412,100 @@ mod tests {
         report(&mut app, 3, true);
         assert!(app.now_playing().unwrap().shuffle);
         assert!(app.shuffle_wanted);
+        app.backend.shutdown();
+    }
+
+    /// Each collection starts in its own mode, as in Spotify's apps: an
+    /// album never shuffled here plays in order after a shuffled playlist
+    /// (#1187), and the playlist shuffles again when it starts again.
+    #[test]
+    fn each_collection_starts_in_its_own_shuffle_mode() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.selected_device = Some("speaker".into());
+        app.remember_shuffle("spotify:playlist:mix", true);
+        app.context_lengths
+            .insert("spotify:playlist:mix".into(), 30);
+        let play = |app: &mut App, uri: &str| {
+            app.apply(
+                Action::PlayContext {
+                    uri: uri.into(),
+                    offset_uri: None,
+                    offset_index: None,
+                },
+                &ctx,
+            );
+            app.backend.take_remote_play_requests()
+        };
+        assert!(matches!(
+            play(&mut app, "spotify:playlist:mix").as_slice(),
+            [ApiRequest::ShufflePlay { .. }]
+        ));
+        assert!(app.playing_context_shuffle());
+        assert!(matches!(
+            play(&mut app, "spotify:album:calm").as_slice(),
+            [ApiRequest::Remote {
+                action: RemoteAction::Play,
+                ..
+            }]
+        ));
+        assert!(!app.playing_context_shuffle());
+        assert!(matches!(
+            play(&mut app, "spotify:playlist:mix").as_slice(),
+            [ApiRequest::ShufflePlay { .. }]
+        ));
+        app.backend.shutdown();
+    }
+
+    /// Spotify's player applies a collection's own stored mode when it
+    /// starts it. When the device reports the start in another mode than
+    /// the collection has here, that mode is set again, once; a mode
+    /// changed later, from the phone say, becomes the collection's.
+    #[test]
+    fn a_started_collection_keeps_its_mode_and_learns_the_devices() {
+        let ctx = egui::Context::default();
+        let mut app = soloist_playing("spotify:track:old");
+        let album = "spotify:album:calm";
+        app.apply(
+            Action::PlayContext {
+                uri: album.into(),
+                offset_uri: None,
+                offset_index: None,
+            },
+            &ctx,
+        );
+        app.backend.take_remote_play_requests();
+        let report = |app: &mut App, seq: u64, shuffle: bool| {
+            let mut state = app.remote.as_ref().unwrap().state.clone();
+            state.context = Some(crate::api::models::Context {
+                uri: album.into(),
+                kind: "album".into(),
+            });
+            state.item = Some(queued_song("spotify:track:first"));
+            state.shuffle_state = shuffle;
+            app.remote_poll_seq = seq;
+            app.handle_api(ApiResponse::PlaybackState {
+                seq,
+                result: Ok(Some(state)),
+            });
+        };
+        // Spotify came up shuffled: the album is set in order again.
+        report(&mut app, 1, true);
+        assert!(matches!(
+            app.backend.take_remote_shuffle_requests().as_slice(),
+            [ApiRequest::Remote { flag: false, .. }]
+        ));
+        report(&mut app, 2, true);
+        assert!(
+            app.backend.take_remote_shuffle_requests().is_empty(),
+            "once only"
+        );
+        // Later, shuffled from the phone: the album's mode follows.
+        app.shuffle_set_at = Instant::now().checked_sub(PLAYBACK_HOLD * 2);
+        report(&mut app, 3, true);
+        assert!(app.backend.take_remote_shuffle_requests().is_empty());
+        assert_eq!(app.remembered_shuffle(album), Some(true));
+        assert!(app.collection_shuffle(album));
         app.backend.shutdown();
     }
 
@@ -32972,7 +33330,7 @@ mod tests {
             "spotify:playlist:pl0",
             egui::pos2(87.0, 28.0),
         );
-        assert!(app.playing_context_shuffle());
+        assert!(app.collection_shuffle("spotify:playlist:pl0"));
         assert!(app.remote.is_none(), "Shuffle must not start playback");
         assert!(app.backend.take_remote_play_requests().is_empty());
         assert!(
@@ -33017,8 +33375,9 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = headless_app();
         app.selected_device = Some("speaker".into());
-        app.shuffle_wanted = true;
         let context = "spotify:playlist:unopened";
+        // The playlist's own mode, as its page's Shuffle sets it.
+        app.remember_shuffle(context, true);
         let play = Action::PlayContext {
             uri: context.into(),
             offset_uri: None,
@@ -33086,8 +33445,8 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = headless_app();
         app.selected_device = Some("speaker".into());
-        app.shuffle_wanted = true;
         let context = "spotify:album:unopened";
+        app.remember_shuffle(context, true);
         app.apply(
             Action::PlayContext {
                 uri: context.into(),
@@ -33127,7 +33486,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = headless_app();
         app.selected_device = Some("speaker".into());
-        app.shuffle_wanted = true;
+        app.remember_shuffle("spotify:playlist:first", true);
         app.apply(
             Action::PlayContext {
                 uri: "spotify:playlist:first".into(),
@@ -33234,6 +33593,11 @@ mod tests {
             "spotify:playlist:pl0",
             egui::pos2(87.0, 28.0),
         );
+        // The page's Shuffle sets that playlist's own mode, not the
+        // playback's; the player bar's sets the playback's.
+        assert!(app.collection_shuffle("spotify:playlist:pl0"));
+        assert!(!app.playing_context_shuffle());
+        app.apply(Action::ToggleShuffle, &ctx);
         assert!(app.playing_context_shuffle());
 
         draw_player_bar(&ctx, &mut app, Vec::new());
@@ -33266,6 +33630,10 @@ mod tests {
             .1;
         assert_eq!(shuffle_node.toggled(), Some(Toggled::False));
         assert!(app.backend.take_remote_shuffle_requests().is_empty());
+        assert!(
+            app.collection_shuffle("spotify:playlist:pl0"),
+            "the playlist keeps its own mode"
+        );
         app.backend.shutdown();
     }
 
@@ -33288,10 +33656,12 @@ mod tests {
             .id = None;
         assert!(matches!(app.target(), Target::Remote(None)));
 
+        // The playing playlist's page: its Shuffle changes the playback's
+        // mode, which the device reports on.
         click_collection_action(
             &ctx,
             &mut app,
-            "spotify:playlist:pl0",
+            "spotify:playlist:pl1",
             egui::pos2(87.0, 28.0),
         );
         assert!(matches!(
@@ -33299,7 +33669,7 @@ mod tests {
             [ApiRequest::Remote {
                 action: RemoteAction::Shuffle,
                 device_id: None,
-                flag: true,
+                flag: false,
                 ..
             }]
         ));
@@ -33970,25 +34340,31 @@ mod tests {
         app.open(Page::Playlist("pl0".into()));
 
         click_collection_action(&ctx, &mut app, other_collection, egui::pos2(87.0, 28.0));
-        assert!(!app.playing_context_shuffle());
+        // The page sets its own playlist's mode, as in Spotify's apps, and
+        // leaves the playing one alone.
+        assert!(app.collection_shuffle(other_collection));
+        assert!(app.playing_context_shuffle());
         assert_eq!(
             app.playing_context_uri().as_deref(),
             Some(playing_context.as_str())
         );
         assert!(
             app.backend.take_remote_play_requests().is_empty(),
-            "changing the global mode must not start the viewed collection"
+            "a page's Shuffle must not start its collection"
+        );
+        assert!(
+            app.backend.take_remote_shuffle_requests().is_empty(),
+            "nor change the playing one's mode"
         );
 
+        // Its Play then starts it in its own mode.
         click_collection_action(&ctx, &mut app, other_collection, egui::pos2(28.0, 28.0));
         let requests = app.backend.take_remote_play_requests();
         assert!(matches!(
             requests.as_slice(),
-            [ApiRequest::Remote {
-                action: RemoteAction::Play,
+            [ApiRequest::ShufflePlay {
                 device_id: Some(device),
-                play: Some(play),
-                ..
+                play,
             }] if device == "remote1" && play.context_uri.as_deref() == Some(other_collection)
         ));
         app.backend.shutdown();
@@ -34308,7 +34684,8 @@ mod tests {
     fn shuffled_header_play_of_a_shown_view_starts_at_a_random_row() {
         let mut app = headless_app();
         app.backend.set_offline(true);
-        app.shuffle_wanted = true;
+        // The view plays in its playlist's own mode.
+        app.remember_shuffle("spotify:playlist:mix", true);
         let ctx = egui::Context::default();
         let uris: Arc<[String]> = (0..20)
             .map(|n| format!("spotify:track:t{n}"))
@@ -34385,7 +34762,8 @@ mod tests {
 
         let mut app = headless_app();
         app.backend.set_offline(true);
-        app.shuffle_wanted = true;
+        // The view plays in its playlist's own mode.
+        app.remember_shuffle("spotify:playlist:mix", true);
         let ctx = egui::Context::default();
         let uris: Arc<[String]> = uris.into();
         for _ in 0..20 {
@@ -34662,6 +35040,7 @@ mod tests {
         // With no loaded prefix, local shuffle must still choose its own
         // random start, rather than receiving the unshuffled position zero.
         app.playlist_pages.clear();
+        app.remember_shuffle(context, true);
         app.play_request(PlayRequest::context(context), false);
         let request = app.queued_play.as_ref().unwrap();
         assert_eq!(request.offset_uri, None);
@@ -34924,6 +35303,11 @@ mod tests {
                 tracks: Some(TrackCount { total: 57 }),
                 ..Default::default()
             },
+            Playlist {
+                uri: "spotify:playlist:partial".into(),
+                tracks: Some(TrackCount { total: 40 }),
+                ..Default::default()
+            },
         ]);
         app.library.albums.items = vec![SavedAlbum {
             album: Album {
@@ -34948,6 +35332,24 @@ mod tests {
                             ..Default::default()
                         },
                     ],
+                    loaded_once: true,
+                    next_offset: None,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        // A long playlist whose first rows only are loaded.
+        app.playlist_pages.insert(
+            "partial".into(),
+            PlaylistPage {
+                items: PagedList {
+                    items: vec![PlaylistItem {
+                        item: track("spotify:track:early"),
+                        ..Default::default()
+                    }],
+                    loaded_once: true,
+                    next_offset: Some(1),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -34968,9 +35370,11 @@ mod tests {
         );
         assert_eq!(position, None);
 
-        // Begun from the sidebar or a menu, with no rows loaded: a
-        // position inside the length the library reported.
+        // Begun from the sidebar or a menu, with no rows loaded, or only
+        // its first ones: a position inside the length the library
+        // reported, drawn across the whole playlist.
         for (context, len) in [
+            ("spotify:playlist:partial", 40),
             ("spotify:playlist:unopened", 57),
             ("spotify:album:saved", 12),
             ("spotify:user:someone:collection", 9),

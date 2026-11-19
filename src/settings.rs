@@ -1706,8 +1706,14 @@ pub struct SessionState {
     /// Last good playlist tree, scoped to the account that supplied it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rootlist: Option<CachedRootlist>,
-    /// Shuffle mode saved across contexts and restarts.
+    /// The shuffle mode of what was playing when the app closed, which a
+    /// list or a song started next follows.
     pub shuffle_on: bool,
+    /// Each collection's own shuffle mode, by context URI and newest first,
+    /// as Spotify keeps one for every playlist, album, artist, podcast and
+    /// Liked Songs. Sessions saved before it existed read as empty, and
+    /// every collection then starts in order until it is shuffled.
+    pub shuffle_modes: Vec<(String, bool)>,
     /// Local repeat mode ("off", "context" or "track") saved across
     /// restarts. Sessions saved before it existed read as off.
     pub repeat: String,
@@ -1861,6 +1867,25 @@ mod session_tests {
             crate::player::RepeatMode::Off,
             "no saved repeat mode is off"
         );
+    }
+
+    /// Each collection's shuffle mode survives a restart, and a session
+    /// saved before modes were kept per collection still reads.
+    #[test]
+    fn shuffle_modes_round_trip_and_old_sessions_read_without_them() {
+        let state = SessionState {
+            shuffle_on: true,
+            shuffle_modes: vec![
+                ("spotify:album:a".into(), false),
+                ("spotify:playlist:p".into(), true),
+            ],
+            ..SessionState::default()
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert_eq!(serde_json::from_str::<SessionState>(&json).unwrap(), state);
+        let old = serde_json::from_str::<SessionState>(r#"{"shuffle_on":true}"#).unwrap();
+        assert!(old.shuffle_on);
+        assert!(old.shuffle_modes.is_empty());
     }
 
     #[test]

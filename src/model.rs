@@ -1436,6 +1436,12 @@ pub enum Action {
     ToggleShuffle,
     CycleRepeat,
     SetShuffle(bool),
+    /// A collection page's Shuffle button: sets that collection's own mode,
+    /// for its next Play, and the playback's only when it is the one playing.
+    SetCollectionShuffle {
+        uri: String,
+        shuffle: bool,
+    },
     SetRepeat(crate::player::RepeatMode),
     AddToQueue {
         uri: String,

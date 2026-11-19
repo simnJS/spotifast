@@ -100,7 +100,7 @@ queue, and nothing to skip to a given row.
 
 | # | Difference | Paths | Severity | Status |
 |---|---|---|---|---|
-| 1 | Shuffle is one app-wide switch, not a mode of each collection | S L R | High | Open |
+| 1 | Shuffle is one app-wide switch, not a mode of each collection | S L R | High | Fixed (local memory) |
 | 2 | The shuffle button shows Spotifast's wish, not the player's state | S R | High | Fixed |
 | 3 | A shuffled start turns shuffle on in the old collection first, and can deadlock | S R | High | Fixed (deadlock); Connect route open |
 | 4 | Clicking a queue row sends one Next per row above it | S R | High | Open (Connect task) |
@@ -109,8 +109,8 @@ queue, and nothing to skip to a given row.
 | 7 | Rows past the first few of a Soloist queue arrive without names | S | High | Fixed |
 | 8 | With Shuffle on, a lone song skips Soloist's `play` and loses Autoplay | S | Medium | Fixed |
 | 9 | Smart Shuffle is invisible, and cannot be chosen | S R | Medium | Open |
-| 10 | A shuffled Play draws its first song only from the rows loaded so far | S L R | Medium | Open |
-| 11 | Sorted views, artist Popular, Home lists and Recent play as plain lists | S L R | Medium | Open |
+| 10 | A shuffled Play draws its first song only from the rows loaded so far | S L R | Medium | Fixed |
+| 11 | Sorted views, artist Popular, Home lists and Recent play as plain lists | S L R | Medium | Open (Connect task) |
 | 12 | Restarting Spotifast loses the queue on Soloist | S | Medium | Fixed |
 | 13 | Autoplay on Soloist: no switch, and Spotifast's own radio fallback | S R | Medium | Open |
 | 14 | Built-in player: editing rewrites the whole queue; *Next up* rows cannot be edited | L | Medium | Open |
@@ -157,6 +157,14 @@ queue, and nothing to skip to a given row.
   may allow; Spotifast already makes such reads (`src/session_reads.rs`).
 - **Fixable:** yes, as a local memory. Sharing the mode with Spotify's apps
   needs a device check of that GraphQL read.
+- **Status:** fixed as a local memory. Each collection's mode is kept by
+  URI in the session file (`shuffle_modes`), starts with the collection,
+  and the page's button sets its own collection's mode, changing the
+  playback only when that collection plays. A collection never shuffled
+  here starts in order. When the device reports a start in another mode,
+  the collection's is set again once; a mode changed on the device for the
+  playing collection becomes its own. Reading Spotify's stored mode
+  (`centralisedStatePlayerOptions`) is not done: it needs a device check.
 
 ### 2. The shuffle button shows Spotifast's wish, not the player's state
 
@@ -378,6 +386,10 @@ queue, and nothing to skip to a given row.
   with `shuffling_context` and no `skip_to` would let the player choose, as
   Spotify's apps do.
 - **Fixable:** yes.
+- **Status:** fixed: with only part of the rows held, the start is a
+  random position across the known length (read first when unknown) on
+  another device, and the built-in player draws across the whole context
+  itself. The Connect `play` without `skip_to` waits for the Connect task.
 
 ### 11. Sorted views, artist Popular, Home lists and Recent play as plain lists
 
@@ -404,6 +416,11 @@ queue, and nothing to skip to a given row.
   `spotify:artist:…` with `skip_to` the song.
 - **Fixable:** partly: through the session's Connect route, *needs a device
   check*. Not through the Web API.
+- **Status:** open, waiting for the Connect commands task
+  (`src/soloist/connect.rs`): the Web API cannot send context metadata,
+  nor an offset for an artist. `TODO(connect)` marks the places to change
+  (`src/app.rs`, `src/ui/artist.rs`, `src/ui/home.rs`). Sorted views now
+  play in their collection's own shuffle mode.
 
 ### 12. Restarting Spotifast loses the queue on Soloist
 

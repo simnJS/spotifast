@@ -1612,7 +1612,13 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
             // These paired states capture both outcomes of the collection
             // Shuffle click for the PR visual comparison.
             "shuffle-selected" => {
-                app.apply(Action::SetShuffle(true), &egui::Context::default());
+                app.apply(
+                    Action::SetCollectionShuffle {
+                        uri: "spotify:playlist:pl0".into(),
+                        shuffle: true,
+                    },
+                    &egui::Context::default(),
+                );
             }
             "shuffle-started" => {
                 app.apply(

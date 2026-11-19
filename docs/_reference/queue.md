@@ -38,14 +38,31 @@ Starting and resuming are separate actions. With Shuffle off, a playlist's
 Double-clicking a row starts there, including with Shuffle on. **Play** in
 the player bar resumes the current song at its paused position.
 
-With Shuffle on, a playlist's, album's, podcast's or Liked Songs' **Play**
-starts at a random song, wherever it is pressed: on its page, a Home tile or
-card, or the library sidebar. When its songs are not loaded yet and another
-device such as Soloist plays, Spotifast first reads how many songs it holds,
-then starts at a random position within it; the play shows as starting
-meanwhile, and the length is remembered for the next time. If that read
-fails, the play still starts, and Spotify chooses where. An artist has no
-position to start at, so Spotify shuffles it on its own.
+Shuffle is a mode of each collection, as in Spotify's own apps. Every
+playlist, album, artist, podcast and Liked Songs keeps its own, remembered
+on this computer across restarts, and starts in it wherever its **Play** is
+pressed: on its page, a Home tile or card, or the library sidebar. A
+collection never shuffled here starts in order, whatever played before it.
+**Shuffle play** in a menu turns its collection's mode on. A sorted or
+filtered view plays in its collection's mode; a list of songs, as Recent or
+a radio plays, and a song on its own start in the playback's mode, the one
+the player bar shows.
+
+Spotify's player applies a collection's own mode, as Spotify stores it,
+when it starts the collection. When the device reports the start in another
+mode than the collection has here, Spotifast sets the collection's mode
+again, once. A mode changed later on the device, from the phone say,
+becomes the playing collection's own.
+
+A shuffled collection's **Play** starts at a random song drawn across the
+whole collection. When Spotifast holds all its songs, it draws one of them.
+When it holds none, or only the first ones, and another device such as
+Soloist plays, it draws a random position within the collection's length;
+when that length is not known yet, it first reads it, the play shows as
+starting meanwhile, and the length is remembered for the next time. If that
+read fails, the play still starts, and Spotify chooses where. This
+computer's player draws across the whole collection itself. An artist has
+no position to start at, so Spotify shuffles it on its own.
 
 The Shuffle buttons show what the playing device reports. A change made in
 Spotifast shows at once and holds for a few seconds while the device
@@ -54,12 +71,13 @@ changed it, and the next play follows it. Spotify's player applies a
 collection's own mode when it starts it, so the button never stays on a
 wish the device does not share, and one press always changes the mode.
 
-Since 0.10.0, the Shuffle button on a collection page changes the
-global playback mode without starting that collection. It can be selected
-before a playback device is active; the next **Play** uses the selection.
-While another collection plays, toggling Shuffle changes that playback's mode
-without switching to the page's collection. The queue then reflects the new
-play order.
+The Shuffle button on a collection's page shows and sets that collection's
+own mode, without starting it. While that collection plays, it changes the
+playback's mode, and the queue then reflects the new play order. While
+another collection plays, or nothing does, it only sets the page's
+collection's mode for its next **Play** and leaves what plays alone. The
+player bar's Shuffle changes what plays, and the playing collection keeps
+that mode.
 
 Since 0.8.0, starting a playlist in its original order explicitly
 names its first available song from the loaded prefix. If that prefix is not
