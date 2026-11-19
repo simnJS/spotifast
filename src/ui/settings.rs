@@ -624,7 +624,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ),
         RowText::new(
             autoplay.clone(),
-            gettext(locale, "Keep playing similar songs when your music ends."),
+            if built_in {
+                gettext(locale, "Keep playing similar songs when your music ends.")
+            } else {
+                // Translators: The Autoplay switch while Spotify Soloist plays.
+                gettext(
+                    locale,
+                    "When a list of songs ends, such as a sorted view, play a radio of the last one. After a playlist or album, Spotify follows your account's Autoplay setting.",
+                )
+            },
         ),
         RowText::new(
             gapless.clone(),
@@ -695,7 +703,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .when(!cfg!(target_os = "macos")),
         RowText::new(start_with_computer.clone(), start_detail).when(start_available),
     ];
-    for index in [0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 14] {
+    // Autoplay stays with Soloist: it decides whether Spotifast plays a
+    // radio after a list of songs, which Soloist's own Autoplay cannot
+    // follow.
+    for index in [0, 1, 2, 3, 5, 8, 9, 10, 11, 14] {
         playback_rows[index].available &= built_in;
     }
     if section_matches(&needle, &playback, &playback_rows) {
@@ -812,7 +823,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             filtered_row(ui, &palette, &needle, &playback, &playback_rows[4], |ui| {
                 if widgets::switch(ui, &palette, &autoplay, &mut app.settings.autoplay).changed() {
                     changed = true;
-                    playback_dirty = true;
+                    // Soloist's radio after a list reads it at once; only
+                    // this computer's player needs a restart.
+                    playback_dirty |= built_in;
                 }
             });
             filtered_row(ui, &palette, &needle, &playback, &playback_rows[5], |ui| {

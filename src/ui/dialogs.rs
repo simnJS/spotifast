@@ -106,6 +106,32 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         }
                     });
                 }
+                Dialog::ConfirmClearQueue => {
+                    theme::text(
+                        ui,
+                        gettext(locale, "Clear queue?"),
+                        theme::bold(20.0),
+                        palette.text,
+                    );
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(gettext(locale, "You can't undo this."))
+                                .font(theme::regular(14.0))
+                                .color(palette.secondary),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(20.0);
+                    buttons(ui, |ui| {
+                        if theme::pill_button(ui, &palette, &gettext(locale, "Clear"), true).clicked() {
+                            app.actions.push(Action::ClearQueue);
+                        }
+                        if theme::pill_button(ui, &palette, &gettext(locale, "Cancel"), false).clicked() {
+                            app.actions.push(Action::CloseDialog);
+                        }
+                    });
+                }
                 Dialog::ConfirmPlaylistDuplicates {
                     playlist_id,
                     playlist_name,

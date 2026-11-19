@@ -1022,8 +1022,8 @@ fn item_menu_at(
             label: label.clone(),
         });
     }
-    // Only a song the user queued, and only on this computer's queue: the
-    // context's rows play themselves, and no other queue can be rewritten.
+    // Any row of this computer's queue, a queued song or the context's, as
+    // in Spotify's apps; no other queue can be changed from here.
     if let (Some(RowContext::Queue), Some(index)) = (context, index)
         && app.can_remove_from_queue(index)
         && menu_item(

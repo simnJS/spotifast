@@ -198,6 +198,11 @@ pub struct LocalState {
     /// `Paused` that brings the position counts as a seek for media
     /// controls, which would otherwise count on past the end (#587).
     pub replay_pending: bool,
+    /// The engine's own upcoming rows, in order, each with where it comes
+    /// from (`queue`, `context` or `autoplay`), as librespot's queue events
+    /// tell them. The queue shown is still read through the Web API, which
+    /// does not say where a row comes from.
+    pub next_tracks: Vec<(String, String)>,
 }
 
 /// What local playback was doing when its session ended, so the engine
@@ -532,6 +537,8 @@ impl Engine {
             initial_volume: config.initial_volume,
             disable_volume: false,
             volume_steps: 64,
+            // The queue's sections follow where each row comes from.
+            emit_set_queue_events: true,
             ..ConnectConfig::default()
         };
         let (spirc, spirc_task) = Spirc::new(
@@ -1177,10 +1184,7 @@ fn apply_event(state: &mut LocalState, event: PlayerEvent) -> bool {
             // turn the spinner off.
             let mut changed = set(
                 &mut state.error,
-                Some(format!(
-                    "This item isn't available: {}",
-                    track_id.to_uri()
-                )),
+                Some(format!("This item isn't available: {}", track_id.to_uri())),
             );
             changed |= set(&mut state.loading, false);
             changed
@@ -1219,9 +1223,15 @@ fn apply_event(state: &mut LocalState, event: PlayerEvent) -> bool {
         | PlayerEvent::EndOfTrack { .. }
         | PlayerEvent::PlayRequestIdChanged { .. }
         | PlayerEvent::AutoPlayChanged { .. }
-        | PlayerEvent::FilterExplicitContentChanged { .. }
-        // Only sent when `ConnectConfig::emit_set_queue_events` asks for it.
-        | PlayerEvent::SetQueue { .. } => false,
+        | PlayerEvent::FilterExplicitContentChanged { .. } => false,
+        // Sent since `ConnectConfig::emit_set_queue_events` asks for it.
+        PlayerEvent::SetQueue { next_tracks, .. } => set(
+            &mut state.next_tracks,
+            next_tracks
+                .into_iter()
+                .map(|track| (track.uri, track.provider))
+                .collect(),
+        ),
     }
 }
 

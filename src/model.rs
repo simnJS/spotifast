@@ -1349,6 +1349,8 @@ pub enum Dialog {
         duplicate_uris: Vec<String>,
     },
     Shortcuts,
+    /// Clear queue asks first, as Spotify's own apps do.
+    ConfirmClearQueue,
     /// The signed-in account is not Premium, so nothing will play.
     PremiumNeeded,
     /// Introduce personal Spotify apps to eligible listeners once.

@@ -17,10 +17,12 @@ Which part a row belongs to comes from the player whenever it says.
 Soloist, Spotify's own player, reports where each row comes from, as it
 does to Spotify's apps: a song queued from the phone or from Spotify's
 desktop app is under **Next in queue** too, and a playlist row that
-happens to be a song you queued stays the playlist's. The Web API, which
-other devices and the built-in player's queue are read through, does not
-say: there the songs queued in this Spotifast session make **Next in
-queue**, and the rest of the queue sits under **Next from**. Rows Soloist
+happens to be a song you queued stays the playlist's. This computer's
+player says it too, and its queue, read through the Web API, follows it
+whenever the rows read are the player's own, in its order. The Web API
+alone does not say: for other devices, the songs queued in this Spotifast
+session make **Next in queue**, and the rest of the queue sits under
+**Next from**. Rows Soloist
 sends without names keep their place and are named from one read of their
 details.
 
@@ -228,8 +230,9 @@ not consume a queue row or restore an older queue saved on this computer.
 
 7. **Clear only removes your songs.** The trash button sits beside the
    *Next in queue* heading and empties that section; the playlist's rows
-   below stay. It only shows while this computer is the player, because
-   that is the only queue the app can actually clear.
+   below stay. As in Spotify's apps, it asks first: "Clear queue? You
+   can't undo this." It only shows while this computer is the player,
+   because that is the only queue the app can actually clear.
 
 8. **Changes appear immediately.** Spotifast updates the queue before Spotify
    confirms the change. For local playback, it updates its own player directly.
@@ -270,13 +273,17 @@ counts once, and the notification reports only the rows actually added.
     list Spotifast can rewrite. While *Next in queue* is empty, drop the
     song on the player bar's Queue button instead.
 
-12. **A song you queued can be removed on its own, only on this
-    computer.** Right-click a row under *Next in queue*, or open its **…**
-    menu, and choose **Remove from queue**. Only that row leaves: other
-    copies of the song stay, and so do the playlist's rows. Like a move, this
-    rewrites the queue by clearing it and re-adding the rest, so it is
-    offered only while this computer is the active player. The playlist's
-    rows have no such entry; they play from the current context.
+12. **Any upcoming row can be removed on its own, only on this
+    computer.** Right-click a row, or open its **…** menu, and choose
+    **Remove from queue**, as in Spotify's apps. Only that row leaves:
+    other copies of the song stay, and so does the rest of the queue. A
+    row of the playlist, or of Spotify's recommendations, leaves this
+    computer's player on its own. So does a song queued by hand when the
+    player has said where each row comes from; otherwise, like a move, its
+    removal rewrites the songs queued by hand, by clearing them and
+    re-adding the rest. Another device's queue cannot be changed from
+    here, so the entry is offered only while this computer is the active
+    player.
 
 13. **When the queue runs out, playback carries on.** Your songs play
     first, then the playlist or album carries on where it was, under
@@ -289,7 +296,10 @@ counts once, and the notification reports only the rows actually added.
     computer's player Spotifast then loads Spotify's recommendations for that
     last song, and on another device, Soloist included, it plays that song's
     radio once the device stands stopped at the start of it, unless something
-    else was started meanwhile. With Autoplay off, playback stops there.
+    else was started meanwhile. With Autoplay off, playback stops there. The
+    **Autoplay** switch in Settings shows with Soloist too, for that radio;
+    after a playlist or album, Soloist follows the account's own Autoplay
+    setting.
 
 14. **Recent is the player's history when it gives one.** On Soloist, the
     queue panel's **Recent** tab lists what Soloist itself played before

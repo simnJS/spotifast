@@ -2947,6 +2947,16 @@ mod tests {
                 &mut app,
                 vec![accessible_action(clear, AccessibleAction::Click, None)],
             );
+            // As in Spotify's apps, it asks first.
+            assert!(matches!(app.dialog, Some(Dialog::ConfirmClearQueue)));
+            assert_eq!(app.manual_queue.len(), 2);
+            // The dialog's first frame only measures it.
+            accessible_frame(&ctx, &mut app, vec![]);
+            let tree = accessible_frame(&ctx, &mut app, vec![]);
+            accessible_node(&tree, &gettext(locale, "Clear"), Role::Button);
+            // Its Clear button sends this.
+            app.apply(Action::ClearQueue, &ctx);
+            assert!(app.dialog.is_none());
             assert!(app.manual_queue.is_empty());
             assert_eq!(app.queue.get().unwrap().queue, rows[2..]);
             let tree = accessible_frame(&ctx, &mut app, vec![]);
@@ -8267,7 +8277,6 @@ mod tests {
             );
             for title in [
                 "Normalize volume",
-                "Autoplay",
                 "Gapless playback",
                 "Local files",
                 "Audio cache",
@@ -8280,7 +8289,10 @@ mod tests {
                     "{title}: {text:?}"
                 );
             }
+            // Autoplay stays with Soloist: it decides Spotifast's own radio
+            // after a list of songs.
             for title in [
+                "Autoplay",
                 "Keep music playing when the window closes",
                 "Start with your computer",
                 "Automatic update checks",
@@ -9084,6 +9096,7 @@ mod tests {
                 items: vec![PlayableItem::Track(track(1))],
                 duplicate_uris: vec!["spotify:track:trk1".into()],
             },
+            Dialog::ConfirmClearQueue,
         ] {
             app.dialog = Some(dialog);
             frame(&ctx, &mut app);
@@ -10005,9 +10018,9 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// Right-clicking a song under Playing next offers to take it out of
-    /// the queue, and doing so removes that row; a Next up row, which
-    /// plays from the context, offers no such entry (#721).
+    /// Right-clicking a song in this computer's queue offers to take it
+    /// out, and doing so removes that row; a row of the context offers it
+    /// too, as in Spotify's apps (#721, #908).
     #[test]
     fn a_queued_rows_menu_removes_it_from_the_queue() {
         use egui::accesskit::Role;
@@ -10055,7 +10068,7 @@ mod tests {
         );
         let tree = accessible_frame(&ctx, &mut app, vec![]);
         accessible_node(&tree, "Add to queue", Role::Button);
-        assert!(!has_remove(&tree), "a Next up row cannot be removed");
+        assert!(has_remove(&tree), "a row of the context can be removed too");
         accessible_frame(
             &ctx,
             &mut app,

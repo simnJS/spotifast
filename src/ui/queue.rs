@@ -290,7 +290,8 @@ fn save_button(
         .clicked()
 }
 
-/// Clears manual rows from the active local queue.
+/// Clears manual rows from the active local queue, once confirmed, as in
+/// Spotify's apps.
 fn clear_button(app: &mut App, ui: &mut egui::Ui) {
     if !app.can_clear_queue() {
         return;
@@ -306,7 +307,8 @@ fn clear_button(app: &mut App, ui: &mut egui::Ui) {
     )
     .clicked()
     {
-        app.actions.push(Action::ClearQueue);
+        app.actions
+            .push(Action::ShowDialog(crate::model::Dialog::ConfirmClearQueue));
     }
 }
 
