@@ -1,6 +1,7 @@
 //! Optional, user-installed Spotify Soloist. Spotifast owns only the child it
 //! started, and keeps its files and credentials separate from librespot.
 mod audio;
+pub mod connect;
 pub mod install;
 #[cfg(target_os = "linux")]
 mod priority;

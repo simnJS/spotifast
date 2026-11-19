@@ -110,6 +110,12 @@ pub fn command_body(
     Some(json!({ "command": command }))
 }
 
+/// A Spotify context as a Connect `play` command names it, as Spotify's own
+/// apps do: its URI, and the same URI as a `context://` URL to resolve.
+pub(crate) fn uri_context(uri: &str) -> Value {
+    json!({ "uri": uri, "url": format!("context://{uri}"), "metadata": {} })
+}
+
 /// Keeps a Spotify context intact or builds an ordered page for explicit tracks.
 fn play_command(request: &PlayRequest) -> Value {
     let single = request
@@ -117,9 +123,7 @@ fn play_command(request: &PlayRequest) -> Value {
         .as_deref()
         .filter(|uri| matches!(crate::util::uri_kind(uri), Some("track" | "episode")));
     let context = match (single, &request.context_uri) {
-        (None, Some(uri)) => {
-            json!({ "uri": uri, "url": format!("context://{uri}"), "metadata": {} })
-        }
+        (None, Some(uri)) => uri_context(uri),
         _ => {
             let uris: Vec<&str> = match single {
                 Some(uri) => vec![request.offset_uri.as_deref().unwrap_or(uri)],
@@ -163,6 +167,17 @@ pub async fn command(
     to: &str,
     body: &Value,
 ) -> Result<(), crate::api::client::ApiError> {
+    post_command(session, to, body).await.map_err(failure)
+}
+
+/// Posts a player command to any Connect device over the session, from this
+/// session's device. Spotify's own error is kept, so a caller can tell a
+/// refusal (its kind says which) from a network failure.
+pub(crate) async fn post_command(
+    session: &Session,
+    to: &str,
+    body: &Value,
+) -> Result<(), librespot_core::Error> {
     let path = format!(
         "/connect-state/v1/player/command/from/{}/to/{to}",
         session.device_id()
@@ -177,7 +192,6 @@ pub async fn command(
         )
         .await
         .map(drop)
-        .map_err(failure)
 }
 
 /// Sets a restricted device's volume over the session.
