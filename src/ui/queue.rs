@@ -330,10 +330,10 @@ const SECTION_GAP: f32 = 14.0;
 
 fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
     let palette = app.palette;
-    // Neither the Web API nor librespot can reorder or insert into a live
-    // remote queue, so without local playback active every drop just
-    // appends, same as the "Add to queue" menu item.
-    let reorderable = app.queue_locally_reorderable();
+    // This computer's queue can be rewritten, and Soloist's through
+    // Spotify Connect; on any other device every drop just appends, same as
+    // the "Add to queue" menu item.
+    let reorderable = app.queue_editable();
     if !reorderable && let Some(track) = queue_drop(ui, ui.clip_rect()) {
         app.actions.push(Action::QueueMany {
             songs: track
@@ -532,18 +532,13 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
             {
                 match track.from.as_ref() {
                     Some((origin, from)) if origin == "queue" => {
-                        let from = *from as usize;
                         let uri = track.items[0].uri();
                         // Playback can advance mid-drag and shift queue
                         // indices; trust the recorded one only if it still
                         // names the dragged song, otherwise find where that
                         // song actually sits now. Not there at all means it
                         // left the queue, so there is nothing left to move.
-                        let from = if app.manual_queue.get(from).map(String::as_str) == Some(uri) {
-                            Some(from)
-                        } else {
-                            app.manual_queue.iter().position(|queued| queued == uri)
-                        };
+                        let from = app.queue_drag_origin(*from as usize, uri);
                         // A row dropped back on its own edges moves nothing.
                         if let Some(from) = from
                             && slot != from

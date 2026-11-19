@@ -102,10 +102,10 @@ queue, and nothing to skip to a given row.
 |---|---|---|---|---|
 | 1 | Shuffle is one app-wide switch, not a mode of each collection | S L R | High | Fixed (local memory) |
 | 2 | The shuffle button shows Spotifast's wish, not the player's state | S R | High | Fixed |
-| 3 | A shuffled start turns shuffle on in the old collection first, and can deadlock | S R | High | Fixed (deadlock); Connect route open |
-| 4 | Clicking a queue row sends one Next per row above it | S R | High | Open (Connect task) |
+| 3 | A shuffled start turns shuffle on in the old collection first, and can deadlock | S R | High | Fixed (Connect on Soloist; df75525 elsewhere) |
+| 4 | Clicking a queue row sends one Next per row above it | S R | High | Fixed on Soloist |
 | 5 | *Playing next* and *Next up* are guessed; Soloist's `source` is thrown away | S R L | High | Fixed on Soloist and the built-in player |
-| 6 | No queue editing at all while Soloist plays | S R | High | Open (Connect task) |
+| 6 | No queue editing at all while Soloist plays | S R | High | Fixed on Soloist |
 | 7 | Rows past the first few of a Soloist queue arrive without names | S | High | Fixed |
 | 8 | With Shuffle on, a lone song skips Soloist's `play` and loses Autoplay | S | Medium | Fixed |
 | 9 | Smart Shuffle is invisible, and cannot be chosen | S R | Medium | Open |
@@ -224,9 +224,12 @@ queue, and nothing to skip to a given row.
   `player_options_override` today (line 143).
 - **Fixable:** yes. The Connect route needs the session signed in to the
   same account (Settings → Spotify Soloist → Spotify access).
-- **Status:** the deadlock is fixed: df75525 is cherry-picked. The Connect
-  `play` with `shuffling_context` waits for the Connect commands task
-  (`src/soloist/connect.rs`).
+- **Status:** fixed. On Soloist a collection starts with one Connect
+  `play` carrying its shuffle mode (`ApiRequest::ConnectPlay`, through
+  `crate::soloist::connect::play`); refused, and on other devices, the
+  start goes through the Web API with df75525's order (shuffle refused,
+  play first). *Needs a device check* that Soloist takes the Connect
+  `play`.
 
 ### 4. Clicking a queue row sends one Next per row above it
 
@@ -249,6 +252,11 @@ queue, and nothing to skip to a given row.
 - **Fixable:** yes, through the session's Connect route. *Needs a device
   check* that Soloist accepts a Connect `skip_next` with a track; Spotify's
   own apps use it on every Connect device.
+- **Status:** fixed on Soloist: one Connect `skip_next` names the row by
+  its `uid` (`ApiRequest::SkipToRow`, `crate::soloist::connect::skip_to_row`).
+  Refused, the backend sends one Next per row, one after another so none
+  overtakes another. Other devices still step down. *Needs a device check*
+  that Soloist takes it.
 
 ### 5. *Playing next* and *Next up* are guessed; Soloist's `source` is thrown away
 
@@ -304,6 +312,13 @@ queue, and nothing to skip to a given row.
 - **Fixable:** maybe. *Needs a device check*: the queue revision comes from
   Spotify's Connect state, not from Soloist's API, and concurrent changes
   must not be lost. Without it, not fixable with the documented APIs.
+- **Status:** fixed on Soloist: **Remove from queue** (any row),
+  **Clear queue**, dragging within *Next in queue* and dropping at a
+  position go as one Connect `set_queue` against the revision read just
+  before (`ApiRequest::EditQueue`). Refused, the queue is read again as
+  Soloist has it and a notice says so; a refused insertion is added after
+  the songs queued instead. **Play next** stays on the built-in player.
+  *Needs a device check* that Soloist takes `set_queue`.
 
 ### 7. Rows past the first few of a Soloist queue arrive without names
 
@@ -391,7 +406,8 @@ queue, and nothing to skip to a given row.
 - **Status:** fixed: with only part of the rows held, the start is a
   random position across the known length (read first when unknown) on
   another device, and the built-in player draws across the whole context
-  itself. The Connect `play` without `skip_to` waits for the Connect task.
+  itself. On Soloist, a shuffled start goes as a Connect `play` without
+  `skip_to`, so the player draws it.
 
 ### 11. Sorted views, artist Popular, Home lists and Recent play as plain lists
 
@@ -418,11 +434,14 @@ queue, and nothing to skip to a given row.
   `spotify:artist:…` with `skip_to` the song.
 - **Fixable:** partly: through the session's Connect route, *needs a device
   check*. Not through the Web API.
-- **Status:** open, waiting for the Connect commands task
-  (`src/soloist/connect.rs`): the Web API cannot send context metadata,
-  nor an offset for an artist. `TODO(connect)` marks the places to change
-  (`src/app.rs`, `src/ui/artist.rs`, `src/ui/home.rs`). Sorted views now
-  play in their collection's own shuffle mode.
+- **Status:** open. The Connect `play` exists now
+  (`crate::soloist::connect::play` with `context_metadata` and `skip_to`),
+  but these starts need what it does not settle: the exact
+  `sorting.criteria` and `filtering.predicate` values a view sends, and,
+  for an artist's Popular row, a fallback list when Connect refuses (the
+  Web API takes no offset for an artist). `TODO(connect)` marks the places
+  (`src/app.rs`, `src/ui/artist.rs`, `src/ui/home.rs`). Sorted views play
+  in their collection's own shuffle mode.
 
 ### 12. Restarting Spotifast loses the queue on Soloist
 

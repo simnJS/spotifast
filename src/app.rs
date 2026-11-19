@@ -14,7 +14,8 @@ use crate::api::models::{
 };
 use crate::backend::{
     ApiRequest, ApiResponse, AuthStatus, Backend, Command, Event, LocalPlayback, LyricsRequest,
-    PLAYLIST_PAGE_SIZE, PlaylistCacheRows, QueueSource, RecentsFor, RemoteAction, Waker,
+    PLAYLIST_PAGE_SIZE, PlaylistCacheRows, QueueEdit, QueuePlace, QueueRow, QueueSource,
+    RecentsFor, RemoteAction, Waker,
 };
 use crate::i18n::{Locale, gettext, ngettext};
 use crate::model::QueueTab;
@@ -638,6 +639,9 @@ pub struct App {
     /// Details read for queue rows a player sent without names, by URI;
     /// `None` while the read is out, or once it found nothing.
     queue_row_details: HashMap<String, Option<PlayableItem>>,
+    /// Soloist's queue as an edit sent here shows it, and when, so an
+    /// answer from before Soloist took the edit is not shown.
+    soloist_queue_expected: Option<(Vec<String>, Instant)>,
     /// What the window's title bar says, as last set.
     window_title: String,
 
@@ -1411,6 +1415,7 @@ impl App {
             queue_reorder_pending: None,
             queue_removed: None,
             queue_row_details: HashMap::new(),
+            soloist_queue_expected: None,
             window_title: String::new(),
             library: Library::default(),
             liked_songs: crate::liked::LikedSongs::default(),
@@ -7413,6 +7418,11 @@ impl App {
             return;
         };
         let skips = position + 1;
+        // The row as Soloist names it, for a Connect skip straight to it.
+        let entry = queue
+            .provided()
+            .and_then(|entries| entries.get(position))
+            .cloned();
         let mut items = queue.take_rows(position + 1);
         let chosen = items.pop().expect("the chosen row was just drained");
         let skipped: Vec<String> = items.iter().map(|item| item.uri().to_string()).collect();
@@ -7426,7 +7436,7 @@ impl App {
         }
         self.expect_track(uri.clone(), 0);
         self.queue_start_pending = Some(self.target());
-        self.set_play_pending(vec![uri]);
+        self.set_play_pending(vec![uri.clone()]);
         self.optimistic_playing = Some((true, Instant::now()));
         match self.target() {
             Target::Local => {
@@ -7441,14 +7451,36 @@ impl App {
                 self.backend.player(PlayerCommand::Next);
             }
             Target::Remote(device_id) => {
-                // The Web API and Soloist cannot take a song out of a live
-                // queue, so another device steps down to the row.
                 // With nothing to act on, one call earns the "pick
                 // something first" toast; a skip per row would repeat it.
                 if device_id.is_none() && self.remote_fresh().is_none() {
                     self.remote(RemoteAction::Next, None);
                     return;
                 }
+                // Soloist names its rows: one Connect skip_next to the row,
+                // as Spotify's apps send it, so nothing in between plays.
+                // Refused, the backend steps down one Next per row.
+                if let Some(device_id) = device_id
+                    .clone()
+                    .filter(|device| self.soloist_device_id.as_deref() == Some(device.as_str()))
+                    && let Some(entry) = entry
+                {
+                    self.backend.api(ApiRequest::SkipToRow {
+                        device_id,
+                        // Soloist gives a row with no id of its own its URI.
+                        uid: if entry.uid == uri {
+                            String::new()
+                        } else {
+                            entry.uid
+                        },
+                        provider: entry.source.as_str().to_string(),
+                        uri,
+                        skips,
+                    });
+                    return;
+                }
+                // The Web API cannot take a song out of a live queue, so
+                // another device steps down to the row.
                 for _ in 0..skips {
                     self.remote(RemoteAction::Next, device_id.clone());
                 }
@@ -7502,16 +7534,53 @@ impl App {
         self.local.is_active() && matches!(self.target(), Target::Local)
     }
 
-    /// Whether the active local queue has rows that can be cleared.
+    /// Whether Soloist's queue can be edited from here: it is the playing
+    /// device and reports each row with the id a Spotify Connect
+    /// `set_queue` names it by, as Spotify's apps edit any device's queue.
+    pub fn queue_editable_on_soloist(&self) -> bool {
+        self.targets_own_soloist()
+            && self
+                .queue
+                .get()
+                .is_some_and(|queue| queue.provided().is_some())
+    }
+
+    /// Whether the queue on show can be edited: this computer's, or
+    /// Soloist's.
+    pub fn queue_editable(&self) -> bool {
+        self.queue_locally_reorderable() || self.queue_editable_on_soloist()
+    }
+
+    /// Where a row dragged from Next in queue at `from` sits now: playback
+    /// can advance mid-drag. Not there at all, it left the queue.
+    pub fn queue_drag_origin(&self, from: usize, uri: &str) -> Option<usize> {
+        if self.queue_editable_on_soloist() {
+            let queue = self.queue.get()?;
+            let queued = &queue.queue[..self.queued_rows_len().min(queue.queue.len())];
+            return if queued.get(from).is_some_and(|item| item.uri() == uri) {
+                Some(from)
+            } else {
+                queued.iter().position(|item| item.uri() == uri)
+            };
+        }
+        if self.manual_queue.get(from).map(String::as_str) == Some(uri) {
+            Some(from)
+        } else {
+            self.manual_queue.iter().position(|queued| queued == uri)
+        }
+    }
+
+    /// Whether the queue has rows queued by hand that can be cleared.
     pub fn can_clear_queue(&self) -> bool {
-        self.queue_locally_reorderable() && self.queued_rows_len() > 0
+        (self.queue_locally_reorderable() || self.queue_editable_on_soloist())
+            && self.queued_rows_len() > 0
     }
 
     /// Whether the queue row at `index` can be taken out: any row of the
     /// active local queue, a queued song or one of the context's, as in
     /// Spotify's apps.
     pub fn can_remove_from_queue(&self, index: usize) -> bool {
-        self.queue_locally_reorderable()
+        self.queue_editable()
             && self
                 .queue
                 .get()
@@ -7622,6 +7691,212 @@ impl App {
         self.queue_removed = Some((removed, Instant::now()));
         if rewrite {
             self.resync_local_queue();
+        }
+    }
+
+    /// The queue row at `index` as a Connect edit of Soloist's queue names
+    /// it.
+    fn soloist_row(&self, index: usize) -> Option<QueueRow> {
+        let queue = self.queue.get()?;
+        let item = queue.queue.get(index)?;
+        let entry = queue.provided()?.get(index)?;
+        Some(QueueRow {
+            uri: item.uri().to_string(),
+            // Soloist gives a row with no id of its own its URI.
+            uid: if entry.uid == item.uri() {
+                String::new()
+            } else {
+                entry.uid.clone()
+            },
+        })
+    }
+
+    /// Sends an edit of Soloist's queue, already on show, and holds what
+    /// is shown until Soloist reports it.
+    fn send_soloist_edit(&mut self, edit: QueueEdit) {
+        let Some(device_id) = self.soloist_device_id.clone() else {
+            return;
+        };
+        if let Some(queue) = self.queue.get() {
+            let shown = queue
+                .queue
+                .iter()
+                .map(|item| item.uri().to_string())
+                .collect();
+            self.soloist_queue_expected = Some((shown, Instant::now()));
+        }
+        self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
+        self.backend.api(ApiRequest::EditQueue { device_id, edit });
+    }
+
+    /// Takes rows out of Soloist's queue, any of them, as Spotify's apps do.
+    fn remove_from_soloist_queue(&mut self, rows: Vec<(usize, String)>) {
+        let Loadable::Loaded(queue) = &self.queue else {
+            return;
+        };
+        let mut indexes: Vec<usize> = rows
+            .into_iter()
+            .filter(|(index, uri)| {
+                queue
+                    .queue
+                    .get(*index)
+                    .is_some_and(|item| item.uri() == uri)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        indexes.sort_unstable();
+        indexes.dedup();
+        let named: Vec<QueueRow> = indexes
+            .iter()
+            .filter_map(|index| self.soloist_row(*index))
+            .collect();
+        if named.is_empty() {
+            return;
+        }
+        let mut removed = std::collections::HashSet::new();
+        for index in indexes.into_iter().rev() {
+            let Loadable::Loaded(queue) = &mut self.queue else {
+                return;
+            };
+            let item = queue.remove_row(index);
+            if let Some(at) = self
+                .manual_queue
+                .iter()
+                .position(|queued| queued == item.uri())
+            {
+                self.remove_manual_queue_row(at);
+            }
+            removed.insert(item.uri().to_string());
+        }
+        self.queue_removed = Some((removed, Instant::now()));
+        self.send_soloist_edit(QueueEdit::Remove(named));
+    }
+
+    /// Clears the songs queued by hand from Soloist's queue, whoever queued
+    /// them; the context's rows stay.
+    fn clear_soloist_queue(&mut self) {
+        let queued_len = self.queued_rows_len();
+        if queued_len == 0 {
+            return;
+        }
+        self.pending_collection_queues.clear();
+        self.last_collection_queue = None;
+        let mut cleared = std::collections::HashSet::new();
+        if let Loadable::Loaded(queue) = &mut self.queue {
+            for item in queue.take_rows(queued_len) {
+                cleared.insert(item.uri().to_string());
+            }
+        }
+        if !self.manual_queue.is_empty() {
+            self.session_dirty = true;
+        }
+        self.manual_queue.clear();
+        self.pending_queue_adds.clear();
+        self.queue_cleared = Some((cleared, Instant::now()));
+        self.send_soloist_edit(QueueEdit::Clear);
+        self.toast(gettext(self.locale, "Queue cleared"));
+    }
+
+    /// Moves a row of Soloist's Next in queue to the slot `to`.
+    fn move_in_soloist_queue(&mut self, from: usize, to: usize) {
+        let queued_len = self.queued_rows_len();
+        if from >= queued_len || to > queued_len || from == to || to == from + 1 {
+            return;
+        }
+        let place = if to < queued_len {
+            self.soloist_row(to).map(QueuePlace::Before)
+        } else {
+            self.soloist_row(queued_len - 1).map(QueuePlace::After)
+        };
+        let (Some(row), Some(place)) = (self.soloist_row(from), place) else {
+            return;
+        };
+        if let Loadable::Loaded(queue) = &mut self.queue
+            && let Some(entries) = queue.entries.as_mut()
+        {
+            let at = if to > from { to - 1 } else { to };
+            let entry = entries.remove(from);
+            entries.insert(at, entry);
+            let item = queue.queue.remove(from);
+            queue.queue.insert(at, item);
+        }
+        self.send_soloist_edit(QueueEdit::Move {
+            rows: vec![row],
+            place,
+        });
+    }
+
+    /// Inserts songs into Soloist's Next in queue at the slot `position`.
+    /// With nothing queued yet, or anything but songs, they are added
+    /// after the songs queued, as Add to queue adds them.
+    fn insert_in_soloist_queue(&mut self, items: Vec<PlayableItem>, position: usize) {
+        let queued_len = self.queued_rows_len();
+        let place = if items.is_empty()
+            || queued_len == 0
+            || items
+                .iter()
+                .any(|item| util::uri_kind(item.uri()) != Some("track"))
+        {
+            None
+        } else if position < queued_len {
+            self.soloist_row(position).map(QueuePlace::Before)
+        } else {
+            self.soloist_row(queued_len - 1).map(QueuePlace::After)
+        };
+        let Some(place) = place else {
+            let songs = items
+                .into_iter()
+                .map(|item| (item.uri().to_string(), item.name().to_string()))
+                .collect();
+            self.queue_many(songs);
+            return;
+        };
+        let uris: Vec<String> = items.iter().map(|item| item.uri().to_string()).collect();
+        let at = position.min(queued_len);
+        if let Loadable::Loaded(queue) = &mut self.queue {
+            for (offset, item) in items.into_iter().enumerate() {
+                queue.insert_row(at + offset, item, QueueProvider::Queue);
+            }
+        }
+        self.manual_queue.extend(uris.iter().cloned());
+        self.session_dirty = true;
+        self.queued_toast(uris.len());
+        self.send_soloist_edit(QueueEdit::Insert { uris, place });
+    }
+
+    /// Spotify refused an edit of Soloist's queue, or no session could
+    /// send it: the queue is read again as Soloist has it, and songs that
+    /// were to be inserted are added after the songs queued instead.
+    fn soloist_edit_refused(&mut self, edit: QueueEdit) {
+        self.soloist_queue_expected = None;
+        self.queue_removed = None;
+        self.queue_cleared = None;
+        self.refresh_queue(true);
+        match edit {
+            QueueEdit::Insert { uris, .. } => {
+                for uri in &uris {
+                    if let Some(at) = self.manual_queue.iter().rposition(|queued| queued == uri) {
+                        self.remove_manual_queue_row(at);
+                    }
+                }
+                let songs = uris
+                    .into_iter()
+                    .map(|uri| {
+                        let label = util::uri_id(&uri)
+                            .and_then(|id| self.track_cache.get(id))
+                            .map(|track| track.name.clone())
+                            .unwrap_or_default();
+                        (uri, label)
+                    })
+                    .collect();
+                self.queue_many(songs);
+            }
+            QueueEdit::Remove(_) | QueueEdit::Move { .. } | QueueEdit::Clear => {
+                self.toast(gettext(
+                    self.locale,
+                    "Soloist did not take this change to its queue",
+                ));
+            }
         }
     }
 
@@ -7778,6 +8053,18 @@ impl App {
     fn queue_fetch_is_stale(&self, fetched: &Queue) -> bool {
         if self.queue_stale_retries >= QUEUE_STALE_RETRIES {
             return false;
+        }
+        // An edit of Soloist's queue shows at once; an answer that does not
+        // have it yet tells the story from before.
+        if let Some((expected, at)) = &self.soloist_queue_expected
+            && at.elapsed() < PLAYBACK_HOLD
+            && !fetched
+                .queue
+                .iter()
+                .map(PlayableItem::uri)
+                .eq(expected.iter().map(String::as_str))
+        {
+            return true;
         }
         // A recent play or pop must be reflected in the fetched current row.
         if let Some(intent) = &self.intent_track
@@ -8558,6 +8845,7 @@ impl App {
                 }
                 self.queue_stale_retries = 0;
                 if result.is_ok() {
+                    self.soloist_queue_expected = None;
                     self.queue_cleared = None;
                     self.queue_shuffle_pending = None;
                     self.queue_reorder_pending = None;
@@ -10124,6 +10412,12 @@ impl App {
                 }
                 self.refresh_queue(true);
             }
+            ApiResponse::QueueEdited { edit, result } => {
+                if let Err(error) = result {
+                    log::debug!("Soloist's queue edit not carried out: {error}");
+                    self.soloist_edit_refused(edit);
+                }
+            }
             ApiResponse::QueueDetails { uris, result } => match result {
                 Ok(found) => {
                     for item in found {
@@ -10984,6 +11278,9 @@ impl App {
             self.shuffle_set_at = Some(Instant::now());
             self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
         }
+        // Whether the start of a shuffled play was drawn here, rather than
+        // chosen: a Connect start leaves the player to draw it.
+        let mut drawn = false;
         if request.offset_uri.is_none()
             && request.offset_position.is_none()
             && request.uris.is_empty()
@@ -10991,6 +11288,7 @@ impl App {
         {
             if shuffle {
                 (request.offset_uri, request.offset_position) = self.shuffle_start(context);
+                drawn = true;
             } else if let Some(id) = context.strip_prefix("spotify:playlist:") {
                 (request.offset_uri, request.offset_position) = self.playlist_start(id);
             }
@@ -11101,12 +11399,23 @@ impl App {
                         serial,
                     });
                     self.shuffle_length_wait = Some(ShuffleLengthWait { serial, request });
+                } else if self.soloist_device_id.as_deref() == Some(device_id.as_str())
+                    && request
+                        .context_uri
+                        .as_deref()
+                        .is_some_and(keeps_shuffle_mode)
+                {
+                    // One Connect play carrying the collection's mode, as
+                    // Spotify's apps start one, so it never applies to what
+                    // played before; a drawn start is left to the player.
+                    // Refused, the backend starts it as below.
+                    self.backend.api(ApiRequest::ConnectPlay {
+                        device_id,
+                        play: request,
+                        shuffle,
+                        drawn,
+                    });
                 } else if shuffle {
-                    // TODO(connect): one Connect `play` carrying the mode in
-                    // `player_options_override`, and no `skip_to` so the
-                    // player draws the first song, as Spotify's apps send it
-                    // (queue-vs-spotify findings 3 and 10), once
-                    // `crate::soloist::connect` lands.
                     self.backend.api(ApiRequest::ShufflePlay {
                         device_id: Some(device_id),
                         play: request,
@@ -13451,6 +13760,10 @@ impl App {
                 }
             }
             Action::MoveInQueue { from, to } => {
+                if self.queue_editable_on_soloist() {
+                    self.move_in_soloist_queue(from, to);
+                    return;
+                }
                 if !self.queue_locally_reorderable() {
                     return;
                 }
@@ -13479,8 +13792,18 @@ impl App {
                 self.session_dirty = true;
                 self.resync_local_queue();
             }
-            Action::RemoveFromQueue { rows } => self.remove_from_queue(rows),
+            Action::RemoveFromQueue { rows } => {
+                if self.queue_editable_on_soloist() {
+                    self.remove_from_soloist_queue(rows);
+                } else {
+                    self.remove_from_queue(rows);
+                }
+            }
             Action::InsertInQueue { items, position } => {
+                if self.queue_editable_on_soloist() {
+                    self.insert_in_soloist_queue(items, position);
+                    return;
+                }
                 if !self.queue_locally_reorderable() {
                     let songs = items
                         .into_iter()
@@ -13818,7 +14141,11 @@ impl App {
                 if matches!(self.dialog, Some(Dialog::ConfirmClearQueue)) {
                     self.dialog = None;
                 }
-                self.clear_queue();
+                if self.queue_editable_on_soloist() {
+                    self.clear_soloist_queue();
+                } else {
+                    self.clear_queue();
+                }
             }
             Action::SaveQueueAsPlaylist => self.save_queue_as_playlist(),
             Action::SaveRadio(seed) => self.save_radio(&seed),
@@ -20598,6 +20925,188 @@ mod tests {
         assert!(app.backend.take_remote_shuffle_requests().is_empty());
         assert_eq!(app.remembered_shuffle(album), Some(true));
         assert!(app.collection_shuffle(album));
+        app.backend.shutdown();
+    }
+
+    /// Soloist's queue with ids for its rows: two songs queued by hand
+    /// and one of the context's.
+    fn soloist_queue_with_ids(app: &mut App) {
+        let entry = |uid: &str, source| crate::api::models::QueueEntry {
+            uid: uid.into(),
+            source,
+        };
+        app.queue_seq = 1;
+        app.handle_api(ApiResponse::Queue {
+            seq: 1,
+            result: Ok(Queue {
+                currently_playing: Some(named_song("spotify:track:now", "Now")),
+                queue: vec![
+                    named_song("spotify:track:mine", "Mine"),
+                    named_song("spotify:track:other", "Other"),
+                    named_song("spotify:track:ctx", "Context"),
+                ],
+                entries: Some(vec![
+                    entry("u1", QueueProvider::Queue),
+                    entry("u2", QueueProvider::Queue),
+                    entry("u3", QueueProvider::Context),
+                ]),
+                previous: Vec::new(),
+            }),
+        });
+        app.backend.take_queue_requests();
+    }
+
+    /// On Soloist a clicked queue row is one Spotify Connect skip naming
+    /// it, as Spotify's apps send it, not one Next per row above it. The
+    /// backend falls back on those Nexts when Spotify refuses.
+    #[test]
+    fn a_clicked_soloist_row_is_one_skip_naming_it() {
+        let mut app = soloist_playing("spotify:track:now");
+        soloist_queue_with_ids(&mut app);
+        app.play_queue_item(2, "spotify:track:ctx".into());
+        let requests = app.backend.take_queue_requests();
+        assert!(
+            matches!(
+                requests.as_slice(),
+                [ApiRequest::SkipToRow { device_id, uri, uid, provider, skips: 3 }]
+                    if device_id == "own"
+                        && uri == "spotify:track:ctx"
+                        && uid == "u3"
+                        && provider == "context"
+            ),
+            "{requests:?}"
+        );
+        assert_eq!(
+            queue_uris(&app),
+            (Some("spotify:track:ctx".to_string()), Vec::new())
+        );
+        app.backend.shutdown();
+    }
+
+    /// A collection started on Soloist goes as one Spotify Connect play
+    /// carrying its mode, its drawn start left to the player; a list of
+    /// songs is no context and keeps the Web API.
+    #[test]
+    fn a_collection_started_on_soloist_goes_as_one_connect_play() {
+        let ctx = egui::Context::default();
+        let mut app = soloist_playing("spotify:track:old");
+        app.remember_shuffle("spotify:playlist:mix", true);
+        app.context_lengths
+            .insert("spotify:playlist:mix".into(), 30);
+        app.apply(
+            Action::PlayContext {
+                uri: "spotify:playlist:mix".into(),
+                offset_uri: None,
+                offset_index: None,
+            },
+            &ctx,
+        );
+        let requests = app.backend.take_remote_play_requests();
+        assert!(
+            matches!(
+                requests.as_slice(),
+                [ApiRequest::ConnectPlay { device_id, play, shuffle: true, drawn: true }]
+                    if device_id == "own"
+                        && play.context_uri.as_deref() == Some("spotify:playlist:mix")
+                        && play.offset_position.is_some_and(|position| position < 30)
+            ),
+            "{requests:?}"
+        );
+        app.apply(
+            Action::PlayUris {
+                uris: vec!["spotify:track:a".into(), "spotify:track:b".into()],
+                index: 0,
+            },
+            &ctx,
+        );
+        assert!(matches!(
+            app.backend.take_remote_play_requests().as_slice(),
+            [ApiRequest::Remote { .. } | ApiRequest::ShufflePlay { .. }]
+        ));
+        app.backend.shutdown();
+    }
+
+    /// Soloist's queue can be edited, as Spotify's apps edit it: the edit
+    /// shows at once and goes as one Spotify Connect `set_queue`. Refused,
+    /// the queue is read again as Soloist has it, and songs to insert are
+    /// added after the songs queued instead.
+    #[test]
+    fn soloist_queue_edits_go_over_connect_and_fall_back_when_refused() {
+        let ctx = egui::Context::default();
+        let mut app = soloist_playing("spotify:track:now");
+        soloist_queue_with_ids(&mut app);
+        assert!(app.queue_editable());
+        assert!(app.can_remove_from_queue(2));
+        assert!(app.can_clear_queue());
+
+        app.apply(
+            Action::RemoveFromQueue {
+                rows: vec![(2, "spotify:track:ctx".into())],
+            },
+            &ctx,
+        );
+        assert_eq!(
+            queue_uris(&app).1,
+            ["spotify:track:mine", "spotify:track:other"]
+        );
+        let requests = app.backend.take_queue_requests();
+        let [
+            ApiRequest::EditQueue {
+                device_id,
+                edit: QueueEdit::Remove(rows),
+            },
+        ] = &requests[..]
+        else {
+            panic!("one Connect edit: {requests:?}");
+        };
+        assert_eq!(device_id, "own");
+        assert_eq!(
+            rows,
+            &[QueueRow {
+                uri: "spotify:track:ctx".into(),
+                uid: "u3".into(),
+            }]
+        );
+
+        // Moving the second queued song first names the row it goes before.
+        app.apply(Action::MoveInQueue { from: 1, to: 0 }, &ctx);
+        assert_eq!(
+            queue_uris(&app).1,
+            ["spotify:track:other", "spotify:track:mine"]
+        );
+        assert!(matches!(
+            app.backend.take_queue_requests().as_slice(),
+            [ApiRequest::EditQueue {
+                edit: QueueEdit::Move { rows, place: QueuePlace::Before(before) },
+                ..
+            }] if rows[0].uid == "u2" && before.uid == "u1"
+        ));
+
+        // Spotify refuses: the queue is read again.
+        let seq = app.queue_seq;
+        app.handle_api(ApiResponse::QueueEdited {
+            edit: QueueEdit::Remove(rows.clone()),
+            result: Err(crate::api::ApiError::Network("refused".into())),
+        });
+        assert!(app.queue_seq > seq, "the queue is read again");
+
+        // A refused insertion is added after the songs queued instead.
+        app.handle_api(ApiResponse::QueueEdited {
+            edit: QueueEdit::Insert {
+                uris: vec!["spotify:track:new".into()],
+                place: QueuePlace::After(rows[0].clone()),
+            },
+            result: Err(crate::api::ApiError::Network("refused".into())),
+        });
+        assert!(
+            app.backend
+                .take_queue_requests()
+                .iter()
+                .any(|request| matches!(
+                    request,
+                    ApiRequest::AddManyToQueue { uris, .. } if uris == &["spotify:track:new"]
+                ))
+        );
         app.backend.shutdown();
     }
 

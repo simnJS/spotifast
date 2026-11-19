@@ -163,6 +163,37 @@ pub enum QueueSource {
     Artist(String),
 }
 
+/// A queue row as a Connect queue edit names it: its URI and the player's
+/// `uid` for it, empty when the player gave none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueRow {
+    pub uri: String,
+    pub uid: String,
+}
+
+/// Where moved or inserted rows go: next to a row of the queue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueuePlace {
+    Before(QueueRow),
+    After(QueueRow),
+}
+
+/// An edit of Soloist's queue, sent as one Spotify Connect `set_queue`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueueEdit {
+    Remove(Vec<QueueRow>),
+    Move {
+        rows: Vec<QueueRow>,
+        place: QueuePlace,
+    },
+    Insert {
+        uris: Vec<String>,
+        place: QueuePlace,
+    },
+    /// The rows queued by hand; the context's stay.
+    Clear,
+}
+
 #[derive(Clone, Debug)]
 pub enum ApiRequest {
     Me,
@@ -431,6 +462,34 @@ pub enum ApiRequest {
     /// metadata read over the playback session.
     QueueDetails {
         uris: Vec<String>,
+    },
+    /// A queue row clicked while Soloist plays: one Spotify Connect
+    /// `skip_next` naming it, as Spotify's apps send it, so nothing in
+    /// between plays. Refused, one Next per row down to it, one after
+    /// another (`skips` of them).
+    SkipToRow {
+        device_id: String,
+        uri: String,
+        uid: String,
+        provider: String,
+        skips: usize,
+    },
+    /// A collection started on Soloist: one Spotify Connect `play` that
+    /// carries its shuffle mode, so the mode applies to it and never to
+    /// what played before. Refused, the Web API's start (`ShufflePlay`, or
+    /// `Remote` play).
+    ConnectPlay {
+        device_id: String,
+        play: PlayRequest,
+        shuffle: bool,
+        /// The start was drawn here for a shuffled play: Connect leaves the
+        /// player to draw it across the whole collection.
+        drawn: bool,
+    },
+    /// An edit of Soloist's queue over Spotify Connect.
+    EditQueue {
+        device_id: String,
+        edit: QueueEdit,
     },
 }
 
@@ -719,6 +778,11 @@ pub enum ApiResponse {
     QueueDetails {
         uris: Vec<String>,
         result: ApiResult<Vec<PlayableItem>>,
+    },
+    /// Whether Spotify took an edit of Soloist's queue.
+    QueueEdited {
+        edit: QueueEdit,
+        result: ApiResult<()>,
     },
 }
 
@@ -1580,6 +1644,8 @@ impl Backend {
                 | ApiRequest::AddToQueue { .. }
                 | ApiRequest::AddManyToQueue { .. }
                 | ApiRequest::QueueDetails { .. }
+                | ApiRequest::SkipToRow { .. }
+                | ApiRequest::EditQueue { .. }
         ) {
             self.queue_requests.lock().unwrap().push(request.clone());
         }
@@ -1590,6 +1656,7 @@ impl Backend {
                 action: RemoteAction::Play,
                 ..
             } | ApiRequest::ShufflePlay { .. }
+                | ApiRequest::ConnectPlay { .. }
                 | ApiRequest::ContextLength { .. }
         ) {
             self.remote_play_requests
@@ -5692,10 +5759,24 @@ impl Worker {
             let (response, expired) = tokio::select! {
                 _ = session.changed() => return,
                 result = async {
-                    if let Some(soloist) = soloist && let Some(response) = soloist.dispatch(&request).await {
-                        return (response, Vec::new());
+                    let fallbacks = match over_connect_to_soloist(&api, engine.as_deref(), &request).await {
+                        Some(ConnectOutcome::Done(response)) => return (*response, Vec::new()),
+                        Some(ConnectOutcome::Fallback(fallbacks)) => fallbacks,
+                        None => vec![request],
+                    };
+                    // One after another, so none overtakes another; the
+                    // first refusal stops the rest.
+                    let mut answer = (
+                        ApiResponse::Remote { action: RemoteAction::Next, result: Ok(()) },
+                        Vec::new(),
+                    );
+                    for request in fallbacks {
+                        answer = route(&api, &made_for_you, &new_releases, &connect, engine.as_deref(), &background_session, soloist.as_ref(), request).await;
+                        if matches!(&answer.0, ApiResponse::Remote { result: Err(_), .. }) {
+                            break;
+                        }
                     }
-                    handle(&api, &made_for_you, &new_releases, &connect, engine.as_deref(), &background_session, request).await
+                    answer
                 } => result,
             };
             // Apply completion on the command loop. A late response cannot
@@ -5820,7 +5901,10 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         | ApiRequest::Transfer { .. }
         | ApiRequest::ShufflePlay { .. }
         | ApiRequest::AddToQueue { .. }
-        | ApiRequest::AddManyToQueue { .. } => Operation::Playback,
+        | ApiRequest::AddManyToQueue { .. }
+        | ApiRequest::SkipToRow { .. }
+        | ApiRequest::ConnectPlay { .. }
+        | ApiRequest::EditQueue { .. } => Operation::Playback,
         ApiRequest::RecentlyPlayed { .. }
         | ApiRequest::TopTracks { .. }
         | ApiRequest::TopArtists { .. }
@@ -6621,6 +6705,9 @@ async fn handle(
         | ApiRequest::HomeShortcuts { .. }
         | ApiRequest::SetHiddenInPlaylist { .. }
         | ApiRequest::QueueDetails { .. }
+        | ApiRequest::SkipToRow { .. }
+        | ApiRequest::ConnectPlay { .. }
+        | ApiRequest::EditQueue { .. }
         | ApiRequest::ContextLength { .. } => unreachable!("handled before Web API routing"),
         ApiRequest::MyPlaylists { offset, generation } => ApiResponse::MyPlaylists {
             offset,
@@ -7032,6 +7119,213 @@ async fn handle(
     }
     observe_playlists(api, &response);
     (response, expired.get().into_iter().collect())
+}
+
+/// Soloist's own local API first, then the Web API and the session.
+#[allow(clippy::too_many_arguments)]
+async fn route(
+    api: &ApiGateway,
+    made_for_you: &crate::made_for_you::MadeForYou,
+    new_releases: &crate::new_releases::NewReleases,
+    connect: &crate::restricted_device::Controller,
+    engine: Option<&Engine>,
+    background_session: &tokio::sync::Semaphore,
+    soloist: Option<&crate::soloist::Client>,
+    request: ApiRequest,
+) -> (ApiResponse, Vec<ApiSource>) {
+    if let Some(soloist) = soloist
+        && let Some(response) = soloist.dispatch(&request).await
+    {
+        return (response, Vec::new());
+    }
+    handle(
+        api,
+        made_for_you,
+        new_releases,
+        connect,
+        engine,
+        background_session,
+        request,
+    )
+    .await
+}
+
+/// What Spotify Connect did with a command to Soloist.
+enum ConnectOutcome {
+    Done(Box<ApiResponse>),
+    /// Refused, or no session to send it: what Spotifast sent before this
+    /// route existed, to send instead, in order.
+    Fallback(Vec<ApiRequest>),
+}
+
+/// Spotify Connect commands to Soloist over the signed-in session, for
+/// what Soloist's local API cannot do (see [`crate::soloist::connect`]).
+/// `None` leaves the request to the usual route.
+async fn over_connect_to_soloist(
+    api: &ApiGateway,
+    engine: Option<&Engine>,
+    request: &ApiRequest,
+) -> Option<ConnectOutcome> {
+    use crate::soloist::connect;
+    let session = engine
+        .filter(|engine| same_account(&engine.session().username(), api.account().as_ref()))
+        .map(Engine::session);
+    Some(match request {
+        ApiRequest::SkipToRow {
+            device_id,
+            uri,
+            uid,
+            provider,
+            skips,
+        } => {
+            let row = connect::QueueTrack::row(uri.clone(), uid.clone(), provider.clone());
+            if let Some(session) = session
+                && connect::skip_to_row(session, device_id, &row).await.is_ok()
+            {
+                ConnectOutcome::Done(Box::new(ApiResponse::Remote {
+                    action: RemoteAction::Next,
+                    result: Ok(()),
+                }))
+            } else {
+                ConnectOutcome::Fallback(skips_down_to_row(device_id, *skips))
+            }
+        }
+        ApiRequest::ConnectPlay {
+            device_id,
+            play,
+            shuffle,
+            drawn,
+        } => {
+            if let Some(session) = session
+                && let Some(start) = connect_start(play, *shuffle, *drawn)
+                && connect::play(session, device_id, &start).await.is_ok()
+            {
+                ConnectOutcome::Done(Box::new(ApiResponse::Remote {
+                    action: RemoteAction::Play,
+                    result: Ok(()),
+                }))
+            } else {
+                ConnectOutcome::Fallback(vec![web_start(device_id, play, *shuffle)])
+            }
+        }
+        ApiRequest::EditQueue { device_id, edit } => {
+            let result = match session {
+                Some(session) => edit_queue(session, device_id, edit).await,
+                None => Err(connect::ConnectError::NoPlayer),
+            };
+            ConnectOutcome::Done(Box::new(ApiResponse::QueueEdited {
+                edit: edit.clone(),
+                result: result.map_err(ApiError::from),
+            }))
+        }
+        _ => return None,
+    })
+}
+
+/// Today's way down to a queue row on another device: one Next per row.
+fn skips_down_to_row(device_id: &str, skips: usize) -> Vec<ApiRequest> {
+    (0..skips)
+        .map(|_| ApiRequest::Remote {
+            action: RemoteAction::Next,
+            device_id: Some(device_id.to_string()),
+            play: None,
+            position_ms: 0,
+            percent: 0,
+            flag: false,
+            repeat: String::new(),
+        })
+        .collect()
+}
+
+/// The Web API's start of what a Connect `play` would have started:
+/// shuffle turned on first when it is a shuffled start (#1348).
+fn web_start(device_id: &str, play: &PlayRequest, shuffle: bool) -> ApiRequest {
+    if shuffle {
+        ApiRequest::ShufflePlay {
+            device_id: Some(device_id.to_string()),
+            play: play.clone(),
+        }
+    } else {
+        ApiRequest::Remote {
+            action: RemoteAction::Play,
+            device_id: Some(device_id.to_string()),
+            play: Some(play.clone()),
+            position_ms: 0,
+            percent: 0,
+            flag: false,
+            repeat: String::new(),
+        }
+    }
+}
+
+/// The Connect `play` of a collection's start: its shuffle mode as the
+/// start's own option, never Smart Shuffle, and the song it starts at. A
+/// shuffled start drawn here names no song, so the player draws it across
+/// the whole collection. `None` for a list of songs, which is no context.
+fn connect_start(
+    play: &PlayRequest,
+    shuffle: bool,
+    drawn: bool,
+) -> Option<crate::soloist::connect::ContextPlay> {
+    use crate::soloist::connect::{ContextPlay, ShuffleMode, SkipTo};
+    let context_uri = play
+        .context_uri
+        .clone()
+        .filter(|uri| !matches!(crate::util::uri_kind(uri), Some("track" | "episode") | None))?;
+    let skip_to = if drawn && play.position_ms == 0 {
+        SkipTo::default()
+    } else if let Some(uri) = &play.offset_uri {
+        SkipTo::uri(uri.clone())
+    } else if let Some(index) = play.offset_position {
+        SkipTo::index(index)
+    } else {
+        SkipTo::default()
+    };
+    Some(ContextPlay {
+        context_uri,
+        skip_to,
+        shuffle: Some(if shuffle {
+            ShuffleMode::On
+        } else {
+            ShuffleMode::Off
+        }),
+        seek_to_ms: (play.position_ms > 0).then_some(play.position_ms),
+        ..ContextPlay::default()
+    })
+}
+
+/// Reads Soloist's queue as Spotify Connect holds it, with its revision,
+/// and rewrites it with the edit in one `set_queue`.
+async fn edit_queue(
+    session: &librespot_core::session::Session,
+    device_id: &str,
+    edit: &QueueEdit,
+) -> Result<(), crate::soloist::connect::ConnectError> {
+    use crate::soloist::connect::{self, ConnectError, Place, QueueTrack};
+    let queue = connect::fetch_queue(session).await?;
+    if !queue.device.is_empty() && queue.device != device_id {
+        // The snapshot describes another player.
+        return Err(ConnectError::NoPlayer);
+    }
+    let track = |row: &QueueRow| QueueTrack::row(row.uri.clone(), row.uid.clone(), "");
+    let place = |place: &QueuePlace| match place {
+        QueuePlace::Before(row) => Place::Before(track(row)),
+        QueuePlace::After(row) => Place::After(track(row)),
+    };
+    match edit {
+        QueueEdit::Remove(rows) => {
+            let rows: Vec<QueueTrack> = rows.iter().map(track).collect();
+            connect::remove(session, device_id, &queue, &rows).await
+        }
+        QueueEdit::Move { rows, place: at } => {
+            let rows: Vec<QueueTrack> = rows.iter().map(track).collect();
+            connect::reorder(session, device_id, &queue, &rows, &place(at)).await
+        }
+        QueueEdit::Insert { uris, place: at } => {
+            connect::insert(session, device_id, &queue, uris, &place(at)).await
+        }
+        QueueEdit::Clear => connect::clear(session, device_id, &queue).await,
+    }
 }
 
 /// The device a player command names, for those [`over_connect`] can send.
@@ -11656,5 +11950,67 @@ mod tests {
                 .try_iter()
                 .any(|event| matches!(event, Event::Playback(LocalPlayback::Failed(_))))
         );
+    }
+}
+
+#[cfg(test)]
+mod connect_route_tests {
+    use super::*;
+    use crate::soloist::connect::{ShuffleMode, SkipTo};
+
+    /// A start on Soloist over Connect carries its collection's shuffle
+    /// mode, and leaves a start drawn here to the player, which draws it
+    /// across the whole collection; a song chosen stays chosen. A list,
+    /// or a lone song, is no context to send.
+    #[test]
+    fn a_connect_start_carries_its_mode_and_leaves_a_drawn_start_to_the_player() {
+        let drawn = PlayRequest::context("spotify:playlist:p").starting_at_index(7);
+        let start = connect_start(&drawn, true, true).unwrap();
+        assert_eq!(start.context_uri, "spotify:playlist:p");
+        assert_eq!(start.skip_to, SkipTo::default());
+        assert_eq!(start.shuffle, Some(ShuffleMode::On));
+        let chosen = PlayRequest::context("spotify:album:a").starting_at_uri("spotify:track:t");
+        let start = connect_start(&chosen, false, false).unwrap();
+        assert_eq!(start.skip_to, SkipTo::uri("spotify:track:t"));
+        assert_eq!(start.shuffle, Some(ShuffleMode::Off));
+        let row = PlayRequest::context("spotify:playlist:p").starting_at_index(3);
+        assert_eq!(
+            connect_start(&row, true, false).unwrap().skip_to,
+            SkipTo::index(3)
+        );
+        let list = PlayRequest::tracks(vec!["spotify:track:a".into(), "spotify:track:b".into()]);
+        assert!(connect_start(&list, false, false).is_none());
+        assert!(connect_start(&PlayRequest::context("spotify:track:a"), false, false).is_none());
+    }
+
+    /// Refused, a Connect command to Soloist falls back on what Spotifast
+    /// sent before it: one Next per row down to a clicked row, and the Web
+    /// API's start, shuffle turned on first for a shuffled one (#1348).
+    #[test]
+    fn refused_connect_commands_fall_back_on_the_previous_route() {
+        let skips = skips_down_to_row("soloist", 3);
+        assert_eq!(skips.len(), 3);
+        assert!(skips.iter().all(|request| matches!(
+            request,
+            ApiRequest::Remote {
+                action: RemoteAction::Next,
+                device_id: Some(device),
+                ..
+            } if device == "soloist"
+        )));
+        let play = PlayRequest::context("spotify:playlist:p");
+        assert!(matches!(
+            web_start("soloist", &play, true),
+            ApiRequest::ShufflePlay { device_id: Some(device), play: sent }
+                if device == "soloist" && sent.context_uri.as_deref() == Some("spotify:playlist:p")
+        ));
+        assert!(matches!(
+            web_start("soloist", &play, false),
+            ApiRequest::Remote {
+                action: RemoteAction::Play,
+                play: Some(_),
+                ..
+            }
+        ));
     }
 }

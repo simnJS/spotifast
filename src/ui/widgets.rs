@@ -1611,9 +1611,7 @@ fn track_row_contents(
                     editable_playlist: Some((id, _)),
                     ..
                 } => Some((id.clone(), row.index as u32)),
-                RowContext::Queue
-                    if row.index < app.queued_rows_len() && app.queue_locally_reorderable() =>
-                {
+                RowContext::Queue if row.index < app.queued_rows_len() && app.queue_editable() => {
                     Some(("queue".to_string(), row.index as u32))
                 }
                 _ => None,

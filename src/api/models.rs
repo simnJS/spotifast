@@ -816,6 +816,15 @@ pub enum QueueProvider {
 }
 
 impl QueueProvider {
+    /// The name the player gives it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queue => "queue",
+            Self::Context => "context",
+            Self::Autoplay => "autoplay",
+        }
+    }
+
     pub fn parse(source: &str) -> Option<Self> {
         match source {
             "queue" => Some(Self::Queue),

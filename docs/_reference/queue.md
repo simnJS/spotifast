@@ -50,6 +50,12 @@ filtered view plays in its collection's mode; a list of songs, as Recent or
 a radio plays, and a song on its own start in the playback's mode, the one
 the player bar shows.
 
+On Soloist, a collection starts with one Spotify Connect play that carries
+its mode, as Spotify's apps start one, so the mode applies to it and never
+to what played before; a shuffled start drawn here is left to Soloist,
+which draws it across the whole collection. When Spotify refuses that
+play, the Web API starts it, turning shuffle on first for a shuffled start.
+
 Spotify's player applies a collection's own mode, as Spotify stores it,
 when it starts the collection. When the device reports the start in another
 mode than the collection has here, Spotifast sets the collection's mode
@@ -217,9 +223,11 @@ not consume a queue row or restore an older queue saved on this computer.
    below it stay, and the playlist keeps going afterwards. On this
    computer the rows above leave the queue without playing, so only the
    chosen song loads and no song in between is heard or named. Previous
-   then returns to the song that was playing, not to a skipped row. Another
-   device, Soloist included, cannot have a song taken out of its queue, so
-   it steps down to the row with one skip per row.
+   then returns to the song that was playing, not to a skipped row. On
+   Soloist, Spotifast sends one Spotify Connect skip that names the row, as
+   Spotify's apps do, so nothing in between plays either; when Spotify
+   refuses it, Soloist steps down to the row with one skip per row, one
+   after another. Any other device steps down that way.
 
 6. **Starting a playlist or album keeps your songs.** The rows underneath
    change to the new collection; your songs stay under **Next in queue**
@@ -231,8 +239,10 @@ not consume a queue row or restore an older queue saved on this computer.
 7. **Clear only removes your songs.** The trash button sits beside the
    *Next in queue* heading and empties that section; the playlist's rows
    below stay. As in Spotify's apps, it asks first: "Clear queue? You
-   can't undo this." It only shows while this computer is the player,
-   because that is the only queue the app can actually clear.
+   can't undo this." It shows while this computer is the player, and while
+   Soloist is, whose queue Spotifast clears through Spotify Connect, as
+   Spotify's apps do, songs queued from other apps included. No other
+   device's queue can be cleared from here.
 
 8. **Changes appear immediately.** Spotifast updates the queue before Spotify
    confirms the change. For local playback, it updates its own player directly.
@@ -260,29 +270,33 @@ Since 0.8.0, selecting several playlist rows and choosing
 For example, selecting B, C, B adds all three rows. A repeated click still
 counts once, and the notification reports only the rows actually added.
 
-11. **Dragging within *Next in queue* reorders it, only on this computer.**
-    Neither the Web API nor librespot can reorder or insert into a live
-    queue; the only way to change one is to clear it and re-add its songs
-    in the new order, which reaches nothing but the engine actually playing
-    them. So dropping a song, dragged from elsewhere, at a position in
-    *Next in queue* inserts it there, and dragging a row already in
-    *Next in queue* elsewhere in the same section moves it, only while this
-    computer is the active player. Otherwise every drop still just adds to
-    the end, exactly like **Add to queue**. *Next from* and *Next up* are
+11. **Dragging within *Next in queue* reorders it, on this computer and on
+    Soloist.** Neither the Web API nor librespot can reorder or insert into
+    a live queue; on this computer Spotifast clears its queued songs and
+    re-adds them in the new order, and on Soloist it rewrites the queue
+    with one Spotify Connect `set_queue`, as Spotify's apps do. So dropping
+    a song, dragged from elsewhere, at a position in *Next in queue*
+    inserts it there, and dragging a row already in *Next in queue*
+    elsewhere in the same section moves it. Otherwise, and when Spotify
+    refuses the change on Soloist, every drop still just adds to the end,
+    exactly like **Add to queue**, and a refused move leaves the queue as
+    Soloist has it. *Next from* and *Next up* are
     never a drop target: they play from the current context, not from a
     list Spotifast can rewrite. While *Next in queue* is empty, drop the
     song on the player bar's Queue button instead.
 
-12. **Any upcoming row can be removed on its own, only on this
-    computer.** Right-click a row, or open its **…** menu, and choose
+12. **Any upcoming row can be removed on its own, on this computer and on
+    Soloist.** Right-click a row, or open its **…** menu, and choose
     **Remove from queue**, as in Spotify's apps. Only that row leaves:
     other copies of the song stay, and so does the rest of the queue. A
     row of the playlist, or of Spotify's recommendations, leaves this
     computer's player on its own. So does a song queued by hand when the
     player has said where each row comes from; otherwise, like a move, its
     removal rewrites the songs queued by hand, by clearing them and
-    re-adding the rest. Another device's queue cannot be changed from
-    here, so the entry is offered only while this computer is the active
+    re-adding the rest. On Soloist the row leaves through Spotify Connect;
+    if Spotify refuses, the queue is read again as Soloist has it and a
+    notice says so. Another device's queue cannot be changed from here, so
+    the entry is offered only while this computer or Soloist is the active
     player.
 
 13. **When the queue runs out, playback carries on.** Your songs play
