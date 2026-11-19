@@ -4,10 +4,25 @@ description: What the queue shows, what Add to queue does, and what the app prom
 nav_order: 2
 ---
 
-The queue is the list of what plays next. It has two parts. On top,
-under **Playing next**, are the songs you queued yourself. Below them,
-under **Next up**, are the songs that come next in whatever playlist or
-album is playing. Your songs always play first.
+The queue is the list of what plays next. It has up to three parts, as in
+Spotify's own apps. On top, under **Next in queue**, are the songs queued
+by hand. Below them, under **Next from**, followed by the name of the
+playing playlist or album, which opens when clicked, are the songs that
+come next in it; when that name is not known the heading reads **Next
+up**. Last, under **Next up**, with a line saying they are recommendations,
+are the songs Spotify's autoplay adds once the playlist or album ends.
+Queued songs always play first.
+
+Which part a row belongs to comes from the player whenever it says.
+Soloist, Spotify's own player, reports where each row comes from, as it
+does to Spotify's apps: a song queued from the phone or from Spotify's
+desktop app is under **Next in queue** too, and a playlist row that
+happens to be a song you queued stays the playlist's. The Web API, which
+other devices and the built-in player's queue are read through, does not
+say: there the songs queued in this Spotifast session make **Next in
+queue**, and the rest of the queue sits under **Next from**. Rows Soloist
+sends without names keep their place and are named from one read of their
+details.
 
 Above both, **Playing from** names where the playing song came from: the
 playlist, album, artist, or podcast, which opens when clicked, Liked
@@ -31,6 +46,13 @@ then starts at a random position within it; the play shows as starting
 meanwhile, and the length is remembered for the next time. If that read
 fails, the play still starts, and Spotify chooses where. An artist has no
 position to start at, so Spotify shuffles it on its own.
+
+The Shuffle buttons show what the playing device reports. A change made in
+Spotifast shows at once and holds for a few seconds while the device
+catches up; after that the device's own state shows again, whoever
+changed it, and the next play follows it. Spotify's player applies a
+collection's own mode when it starts it, so the button never stays on a
+wish the device does not share, and one press always changes the mode.
 
 Since 0.10.0, the Shuffle button on a collection page changes the
 global playback mode without starting that collection. It can be selected
@@ -66,7 +88,8 @@ album, artist or Liked Songs started from a row, with Shuffle on or off,
 plays as that context at the chosen song, so Spotify carries on from the
 whole context when it ends. A song started on its own, as a search result
 is, plays as its own context, and Spotify carries on from that song; this
-holds for the built-in player and for Soloist. A sorted or filtered view
+holds for the built-in player and for Soloist, with Shuffle on or off,
+since shuffling one song changes nothing. A sorted or filtered view
 plays its shown rows as a plain list, which leaves the player no context to
 carry on from. Since 0.22.0, when such a list ends, with any songs queued
 behind it, Spotifast carries on from the last song that played: on this
@@ -97,12 +120,14 @@ not consume a queue row or restore an older queue saved on this computer.
 1. **The list shows the play order.** The top row plays next, followed by the
    rows below it.
 
-   Spotify pads a short queue by going round it again, back to the playing
-   song, even with Repeat off. With Repeat off, Spotifast leaves out the
-   rows from where the list comes back round, so a song started on its own,
-   as a Recent row starts it, is not listed again under itself. Near the end
-   of an album, Spotify may go round to the album's first song without
-   showing where the album ends, so a few rows that will not play can stay.
+   The Web API pads a short queue by going round it again, back to the
+   playing song, even with Repeat off. With Repeat off, Spotifast leaves
+   out the rows from where the list comes back round, so a song started on
+   its own, as a Recent row starts it, is not listed again under itself.
+   Near the end of an album, Spotify may go round to the album's first song
+   without showing where the album ends, so a few rows that will not play
+   can stay. Soloist lists only what it will play, so its queue is shown
+   whole, even a list whose order really repeats.
 
 2. **Add to queue adds a song to your part of the queue.** It goes after
    the songs you queued earlier and before the playlist's songs. Queue
@@ -110,7 +135,7 @@ not consume a queue row or restore an older queue saved on this computer.
    once.
 
    **Play next** puts a song, or a selection of songs in displayed order,
-   at the front of **Playing next**, before the songs already queued. It
+   at the front of **Next in queue**, before the songs already queued. It
    leaves the current song playing and keeps repeated songs as separate
    entries. Right-click a song or selection to find it beside **Add to queue**.
    It is enabled only while this computer is the active player, including
@@ -149,6 +174,10 @@ not consume a queue row or restore an older queue saved on this computer.
    plays on its own, so Autoplay follows it, and a playlist, album, Liked
    Songs or artist plays from its start, so it carries on as itself.
 
+   On Soloist, songs join the queue through Soloist's own queue, one batch
+   at a time and in order, with no Web API request. Episodes, which
+   Soloist's queue refuses, go through the Web API.
+
    On another device, a rate limit delays additions instead of dropping them.
    Spotifast retries automatically after Spotify's requested wait and keeps
    later songs behind the album. Pending rows retain their known titles and
@@ -173,14 +202,14 @@ not consume a queue row or restore an older queue saved on this computer.
    it steps down to the row with one skip per row.
 
 6. **Starting a playlist or album keeps your songs.** The rows underneath
-   change to the new collection; your songs stay under **Playing next**
+   change to the new collection; your songs stay under **Next in queue**
    and play before the collection continues. If you queue an album and then
    start it from the Library, its first song plays now and the separately
    queued album still follows. **Clear queue** removes those manual copies
    while keeping the playing album's remaining songs.
 
 7. **Clear only removes your songs.** The trash button sits beside the
-   *Playing next* heading and empties that section; the playlist's rows
+   *Next in queue* heading and empties that section; the playlist's rows
    below stay. It only shows while this computer is the player, because
    that is the only queue the app can actually clear.
 
@@ -192,7 +221,10 @@ not consume a queue row or restore an older queue saved on this computer.
 9. **Closing the app keeps the queue.** Spotifast saves it locally. When you
    resume the last song, it restores your queued songs and playlist position,
    and the playlist carries on after that song, even when it was paused or
-   playing from a sorted view when you closed the app.
+   playing from a sorted view when you closed the app. Closing Spotifast
+   stops Soloist, which forgets its queue; when the last song resumes on
+   Soloist, Spotifast queues the saved songs there again, in one batch and
+   in order, except local files, which Soloist's queue does not take.
 
    A song the playlist no longer holds, such as a recommendation that followed
    its end, plays on its own at its saved position, followed by your queued
@@ -207,35 +239,42 @@ Since 0.8.0, selecting several playlist rows and choosing
 For example, selecting B, C, B adds all three rows. A repeated click still
 counts once, and the notification reports only the rows actually added.
 
-11. **Dragging within *Playing next* reorders it, only on this computer.**
+11. **Dragging within *Next in queue* reorders it, only on this computer.**
     Neither the Web API nor librespot can reorder or insert into a live
     queue; the only way to change one is to clear it and re-add its songs
     in the new order, which reaches nothing but the engine actually playing
     them. So dropping a song, dragged from elsewhere, at a position in
-    *Playing next* inserts it there, and dragging a row already in
-    *Playing next* elsewhere in the same section moves it, only while this
+    *Next in queue* inserts it there, and dragging a row already in
+    *Next in queue* elsewhere in the same section moves it, only while this
     computer is the active player. Otherwise every drop still just adds to
-    the end, exactly like **Add to queue**. *Next up* is never a drop
-    target: it plays from the current context, not from a list Spotifast
-    can rewrite. While *Playing next* is empty, drop the song on the player
-    bar's Queue button instead.
+    the end, exactly like **Add to queue**. *Next from* and *Next up* are
+    never a drop target: they play from the current context, not from a
+    list Spotifast can rewrite. While *Next in queue* is empty, drop the
+    song on the player bar's Queue button instead.
 
 12. **A song you queued can be removed on its own, only on this
-    computer.** Right-click a row under *Playing next*, or open its **…**
+    computer.** Right-click a row under *Next in queue*, or open its **…**
     menu, and choose **Remove from queue**. Only that row leaves: other
-    copies of the song stay, and so does *Next up*. Like a move, this
+    copies of the song stay, and so do the playlist's rows. Like a move, this
     rewrites the queue by clearing it and re-adding the rest, so it is
-    offered only while this computer is the active player. *Next up* rows
-    have no such entry; they play from the current context.
+    offered only while this computer is the active player. The playlist's
+    rows have no such entry; they play from the current context.
 
 13. **When the queue runs out, playback carries on.** Your songs play
     first, then the playlist or album carries on where it was, under
     **Next from**. When it has ended as well, Repeat off and Autoplay on,
     what follows comes from Spotify's recommendations for the last song that
     played, a queued one included, as in Spotify's own apps. A playlist,
-    album, artist, Liked Songs or a song on its own carries on by itself.
+    album, artist, Liked Songs or a song on its own carries on by itself;
+    on Soloist its recommendations are listed ahead, under **Next up**.
     A plain list, as a sorted or filtered view plays, does not: on this
     computer's player Spotifast then loads Spotify's recommendations for that
     last song, and on another device, Soloist included, it plays that song's
     radio once the device stands stopped at the start of it, unless something
     else was started meanwhile. With Autoplay off, playback stops there.
+
+14. **Recent is the player's history when it gives one.** On Soloist, the
+    queue panel's **Recent** tab lists what Soloist itself played before
+    the current song, most recent first, skipped songs included: the songs
+    Previous steps back through, as in Spotify's own panel. Elsewhere it
+    merges Spotify's recently played list with this computer's history.

@@ -427,6 +427,11 @@ pub enum ApiRequest {
         uris: Vec<String>,
         device_id: Option<String>,
     },
+    /// The details of queue rows a player sent without names, in one
+    /// metadata read over the playback session.
+    QueueDetails {
+        uris: Vec<String>,
+    },
 }
 
 impl ApiRequest {
@@ -710,6 +715,10 @@ pub enum ApiResponse {
         request: u64,
         added: usize,
         result: ApiResult<()>,
+    },
+    QueueDetails {
+        uris: Vec<String>,
+        result: ApiResult<Vec<PlayableItem>>,
     },
 }
 
@@ -1570,6 +1579,7 @@ impl Backend {
                 | ApiRequest::QueueSourceItems { .. }
                 | ApiRequest::AddToQueue { .. }
                 | ApiRequest::AddManyToQueue { .. }
+                | ApiRequest::QueueDetails { .. }
         ) {
             self.queue_requests.lock().unwrap().push(request.clone());
         }
@@ -5834,7 +5844,7 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
             Operation::PlaylistSearch
         }
         ApiRequest::NewReleases { .. } => Operation::UserData,
-        ApiRequest::NewReleaseTracks { .. } => Operation::Catalog,
+        ApiRequest::NewReleaseTracks { .. } | ApiRequest::QueueDetails { .. } => Operation::Catalog,
         ApiRequest::HiddenSongs { .. } | ApiRequest::SetHiddenInPlaylist { .. } => {
             Operation::UserData
         }
@@ -6438,6 +6448,19 @@ async fn handle(
         };
         return (ApiResponse::HiddenSongs { generation, result }, Vec::new());
     }
+    if let ApiRequest::QueueDetails { uris } = request {
+        let result = match playback_session(api, engine) {
+            Ok(session) => {
+                let _permit = background_session.acquire().await.ok();
+                session_reads::playables(session, &uris)
+                    .await
+                    .map(|found| found.into_values().collect())
+                    .map_err(|error| ApiError::Network(format!("{error:#}")))
+            }
+            Err(error) => Err(error),
+        };
+        return (ApiResponse::QueueDetails { uris, result }, Vec::new());
+    }
     if matches!(
         request,
         ApiRequest::BrowseAll | ApiRequest::BrowsePage { .. }
@@ -6597,6 +6620,7 @@ async fn handle(
         | ApiRequest::BrowsePage { .. }
         | ApiRequest::HomeShortcuts { .. }
         | ApiRequest::SetHiddenInPlaylist { .. }
+        | ApiRequest::QueueDetails { .. }
         | ApiRequest::ContextLength { .. } => unreachable!("handled before Web API routing"),
         ApiRequest::MyPlaylists { offset, generation } => ApiResponse::MyPlaylists {
             offset,

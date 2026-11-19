@@ -2489,6 +2489,27 @@ async fn metadata_tolerating(
     answers_tolerating(&asked, tolerated, response)
 }
 
+/// The details of the songs and episodes among `uris`, by URI, in one
+/// metadata read. A URI Spotify leaves unanswered or refuses is left out:
+/// this fills the queue rows Soloist sends without names (#1277), and one
+/// row without them is no reason to leave the others bare.
+pub async fn playables(
+    session: &Session,
+    uris: &[String],
+) -> anyhow::Result<HashMap<String, PlayableItem>> {
+    let parsed: Vec<SpotifyUri> = uris
+        .iter()
+        .filter_map(|uri| SpotifyUri::from_uri(uri).ok())
+        .collect();
+    let tolerated: BTreeSet<String> = parsed.iter().map(|uri| uri.to_uri()).collect();
+    metadata_tolerating(session, parsed.iter(), &tolerated)
+        .await
+        .map_err(|failure| match failure {
+            Failure::Definitive(error) => anyhow::anyhow!("{error}"),
+            Failure::Retry(error) => error,
+        })
+}
+
 /// Every song of `albums`, album by album in the order given and each in its
 /// own order, with the album as the list knows it. Two metadata batches: one
 /// for the albums' track lists, one for the songs.

@@ -785,6 +785,7 @@ pub fn populate(app: &mut App) {
             .cloned()
             .map(PlayableItem::Track)
             .collect(),
+        ..Default::default()
     });
     app.devices = vec![
         Device {
@@ -7896,6 +7897,107 @@ mod tests {
         app.backend.shutdown();
     }
 
+    /// With the player's own sources, as Soloist gives them, the queue has
+    /// Spotify's sections: the songs queued by hand under *Next in queue*,
+    /// the playing context's rows under *Next from* and its name, and
+    /// Spotify's recommendations under *Next up*.
+    #[test]
+    fn the_queue_splits_into_spotifys_sections_by_the_players_sources() {
+        use crate::api::models::{QueueEntry, QueueProvider};
+        let root = std::env::temp_dir().join(format!(
+            "spotifast-queue-sections-test-{}",
+            std::process::id()
+        ));
+        let dirs = AppDirs {
+            config: root.join("config"),
+            state: root.join("state"),
+            cache: root.join("cache"),
+        };
+        let ctx = egui::Context::default();
+        let waker = crate::backend::Waker::default();
+        waker.attach(&ctx);
+        let mut app = App::new(
+            &waker,
+            dirs,
+            Settings::default(),
+            AppOptions {
+                media_controls: false,
+                restore_sign_in: false,
+                tray: false,
+                autostart: false,
+            },
+        );
+        app.attach(&ctx);
+        populate(&mut app);
+        app.show_queue_panel = true;
+        let sources = [
+            QueueProvider::Queue,
+            QueueProvider::Context,
+            QueueProvider::Context,
+            QueueProvider::Autoplay,
+        ];
+        if let Loadable::Loaded(queue) = &mut app.queue {
+            queue.queue.truncate(sources.len());
+            queue.entries = Some(
+                sources
+                    .iter()
+                    .map(|source| QueueEntry {
+                        uid: String::new(),
+                        source: *source,
+                    })
+                    .collect(),
+            );
+        }
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut placed: Vec<(String, egui::Rect)> = Vec::new();
+        // A panel applies its requested width after the first frame.
+        for _ in 0..2 {
+            placed.clear();
+            let mut output = ctx.run_ui(input.clone(), |ui| app.frame_ui(ui));
+            output.textures_delta.clear();
+            fn walk(shape: &egui::epaint::Shape, placed: &mut Vec<(String, egui::Rect)>) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => {
+                        placed.push((text.galley.job.text.clone(), text.visual_bounding_rect()))
+                    }
+                    egui::epaint::Shape::Vec(shapes) => {
+                        shapes.iter().for_each(|shape| walk(shape, placed))
+                    }
+                    _ => {}
+                }
+            }
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut placed);
+            }
+        }
+        let top = |label: &str| {
+            placed
+                .iter()
+                .find(|(text, _)| text.trim_end() == label)
+                .map(|(_, rect)| rect.top())
+                .unwrap_or_else(|| panic!("{label} was never drawn: {placed:?}"))
+        };
+        let queued = top("Next in queue");
+        let from = top("Next from:");
+        let next_up = top("Next up");
+        assert!(queued < from && from < next_up, "{placed:?}");
+        top("Recommendations based on what you've been playing");
+        // The playing playlist is named, as a link, beside its heading.
+        assert!(
+            placed
+                .iter()
+                .any(|(text, rect)| text == "Late night focus" && (rect.top() - from).abs() < 10.0),
+            "{placed:?}"
+        );
+        app.backend.shutdown();
+    }
+
     /// Staged fixture combinations never leave both side panels open,
     /// no matter the surface order: the queue wins.
     #[cfg(feature = "demo")]
@@ -10122,13 +10224,18 @@ mod tests {
         // "Otomo" is the first row of "Next up", from the default demo
         // queue past the three manually queued rows seeded above.
         let next_up_row = row_rect("Otomo");
-        // The "Next up" heading sits just below Playing next's last row.
+        // The context's heading, "Next from" and the playlist's name, sits
+        // just below Next in queue's last row.
         let heading = tree
             .nodes
             .iter()
-            .find(|(_, node)| node.label() == Some("Next up") || node.value() == Some("Next up"))
+            .find(|(_, node)| {
+                node.label()
+                    .or(node.value())
+                    .is_some_and(|text| text.starts_with("Next from"))
+            })
             .and_then(|(_, node)| node.bounds())
-            .expect("the Next up heading");
+            .expect("the Next from heading");
         let heading = egui::Rect::from_min_max(
             egui::pos2(heading.x0 as f32, heading.y0 as f32),
             egui::pos2(heading.x1 as f32, heading.y1 as f32),
@@ -10342,8 +10449,12 @@ mod tests {
         let heading = tree
             .nodes
             .iter()
-            .find(|(_, node)| node.label() == Some("Next up") || node.value() == Some("Next up"))
-            .expect("the Next up heading")
+            .find(|(_, node)| {
+                node.label()
+                    .or(node.value())
+                    .is_some_and(|text| text.starts_with("Next from"))
+            })
+            .expect("the Next from heading")
             .0;
         let heading = bounds_of(heading);
         // The player bar's Queue button, not the queue panel's Queue tab.

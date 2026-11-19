@@ -10,7 +10,7 @@ use egui::Color32;
 use crate::api::PlayRequest;
 use crate::api::models::{
     Album, Artist, ArtistRef, Device, Episode, PlayableItem, PlaybackState, Playlist, PlaylistItem,
-    Queue, Show, Track, TrackCount, User, UserRef, pick_image,
+    Queue, QueueProvider, Show, Track, TrackCount, User, UserRef, pick_image,
 };
 use crate::backend::{
     ApiRequest, ApiResponse, AuthStatus, Backend, Command, Event, LocalPlayback, LyricsRequest,
@@ -75,6 +75,9 @@ const TOAST_LIFETIME: Duration = Duration::from_millis(3200);
 /// from delayed repaints, so 33 ms drives roughly one frame per 16 ms.
 const TOAST_FRAME: Duration = Duration::from_millis(33);
 const OPTIMISTIC_HOLD: Duration = Duration::from_millis(2500);
+/// How many bare queue rows are read one at a time through the Web API
+/// when the playback session cannot read them all at once.
+const QUEUE_DETAILS_ONE_BY_ONE: usize = 20;
 /// The banner suggesting a personal app appears at most this often.
 const SLOW_BANNER_INTERVAL: jiff::SignedDuration = jiff::SignedDuration::from_hours(24);
 /// A "too many requests" answer older than this no longer brings up the
@@ -603,6 +606,9 @@ pub struct App {
     /// Songs taken out of Playing next one by one, and when, used to
     /// reject a fetch that still has one right after the queued rows.
     queue_removed: Option<(std::collections::HashSet<String>, Instant)>,
+    /// Details read for queue rows a player sent without names, by URI;
+    /// `None` while the read is out, or once it found nothing.
+    queue_row_details: HashMap<String, Option<PlayableItem>>,
     /// What the window's title bar says, as last set.
     window_title: String,
 
@@ -1357,6 +1363,7 @@ impl App {
                     Loadable::Loaded(Queue {
                         currently_playing: None,
                         queue: rows,
+                        ..Default::default()
                     })
                 }
                 _ => Loadable::NotLoaded,
@@ -1369,6 +1376,7 @@ impl App {
             queue_shuffle_pending: None,
             queue_reorder_pending: None,
             queue_removed: None,
+            queue_row_details: HashMap::new(),
             window_title: String::new(),
             library: Library::default(),
             liked_songs: crate::liked::LikedSongs::default(),
@@ -2264,6 +2272,14 @@ impl App {
         self.shuffle_wanted
     }
 
+    /// A shuffle change made here shows as made until the player has had
+    /// time to report it, as play and pause do; after that, the player's
+    /// own state shows.
+    fn shuffle_held(&self) -> bool {
+        self.shuffle_set_at
+            .is_some_and(|at| at.elapsed() < PLAYBACK_HOLD)
+    }
+
     /// Current item for menus, using cached track details when available.
     pub fn now_playing_item(&self) -> Option<PlayableItem> {
         let now = self.now_playing()?;
@@ -2511,7 +2527,13 @@ impl App {
             position_ms: position,
             playing,
             loading: false,
-            shuffle: self.shuffle_wanted,
+            // What the device reports, except for a moment after a change
+            // made here, which shows at once as every control does.
+            shuffle: if self.shuffle_held() {
+                self.shuffle_wanted
+            } else {
+                remote.state.shuffle_state
+            },
             repeat: RepeatMode::from_api(&remote.state.repeat_state),
             volume_percent: volume,
             // A restricted device is driven over the playback session's
@@ -4299,7 +4321,27 @@ impl App {
         if !self.resume_queue.is_empty() {
             let queued = std::mem::take(&mut self.resume_queue);
             self.session_dirty = true;
-            if now.local && self.resume_track.as_deref() == Some(now.uri.as_str()) {
+            let resumed = self.resume_track.as_deref() == Some(now.uri.as_str());
+            if resumed && !now.local && self.targets_own_soloist() {
+                // Closing Spotifast stops Soloist, which forgets its queue:
+                // the saved songs go back in one batch, in order. Soloist's
+                // queue takes no local files.
+                let uris: Vec<String> = queued
+                    .into_iter()
+                    .filter(|uri| !uri.starts_with(LOCAL_URI_PREFIX))
+                    .collect();
+                if !uris.is_empty() {
+                    self.manual_queue.extend(uris.iter().cloned());
+                    self.album_queue_serial = self.album_queue_serial.wrapping_add(1);
+                    let request = self.album_queue_serial;
+                    self.pending_queue_batches.insert(request, self.target());
+                    self.backend.api(ApiRequest::AddManyToQueue {
+                        request,
+                        uris,
+                        device_id: self.soloist_device_id.clone(),
+                    });
+                }
+            } else if now.local && resumed {
                 for uri in queued {
                     self.manual_queue.push(uri.clone());
                     // Spotify's queue refuses local files; the engine
@@ -4337,7 +4379,7 @@ impl App {
                     .first()
                     .is_some_and(|item| item.uri() == now.uri)
             {
-                let item = queue.queue.remove(0);
+                let item = queue.remove_row(0);
                 queue.currently_playing = Some(item);
             }
         }
@@ -7199,7 +7241,7 @@ impl App {
             return;
         };
         let skips = position + 1;
-        let mut items: Vec<_> = queue.queue.drain(..=position).collect();
+        let mut items = queue.take_rows(position + 1);
         let chosen = items.pop().expect("the chosen row was just drained");
         let skipped: Vec<String> = items.iter().map(|item| item.uri().to_string()).collect();
         let mut consumed = skipped.clone();
@@ -7242,15 +7284,31 @@ impl App {
         }
     }
 
-    /// How many leading rows of Next up are songs the user queued here,
-    /// so the view can give them their own section.
+    /// How many leading rows of the queue were queued by hand, so the view
+    /// can give them their own section: the rows the player reports as
+    /// queued when it says (Soloist does, whoever queued them), else the
+    /// songs the user queued here.
     pub fn queued_rows_len(&self) -> usize {
         match &self.queue {
-            Loadable::Loaded(queue) => {
-                Self::end_of_queued_rows(&queue.queue, self.queued_by_hand())
-            }
+            Loadable::Loaded(queue) => Self::queued_end(queue, self.queued_by_hand()),
             _ => 0,
         }
+    }
+
+    /// What the player itself played before the current song, most recent
+    /// first, when it says: Soloist does, and Spotify's queue panel shows
+    /// that history, skipped songs included.
+    pub fn player_history(&self) -> Option<&[PlayableItem]> {
+        let queue = self.queue.get()?;
+        (queue.entries.is_some() && !queue.previous.is_empty() && self.targets_own_soloist())
+            .then_some(queue.previous.as_slice())
+    }
+
+    /// The first of the rows Spotify recommends after the context ends,
+    /// when the player says which rows are: from there the panel heads
+    /// them *Next up*, as Spotify's apps do.
+    pub fn autoplay_rows_from(&self) -> Option<usize> {
+        self.queue.get()?.autoplay_from()
     }
 
     /// The songs the user queued here. Before resume, the saved manual
@@ -7332,7 +7390,7 @@ impl App {
             else {
                 continue;
             };
-            queue.queue.remove(index);
+            queue.remove_row(index);
             self.remove_manual_queue_row(manual);
             removed.insert(uri);
         }
@@ -7376,7 +7434,7 @@ impl App {
         }
         if let Loadable::Loaded(queue) = &mut self.queue {
             // Remove one row per queued copy, starting at the front.
-            queue.queue.retain(|item| match counts.get_mut(item.uri()) {
+            queue.retain_rows(|item| match counts.get_mut(item.uri()) {
                 Some(left) if *left > 0 => {
                     *left -= 1;
                     false
@@ -7457,7 +7515,7 @@ impl App {
         if !anchored || queue.queue.is_empty() {
             return;
         }
-        let item = queue.queue.remove(0);
+        let item = queue.remove_row(0);
         let uri = item.uri().to_string();
         // The queue row already has the song's details, so the player bar
         // can name it now instead of waiting for the engine to load it.
@@ -7540,7 +7598,7 @@ impl App {
             && fetched.currently_playing.as_ref().map(|item| item.uri())
                 == pending.current_uri.as_deref()
         {
-            let at = Self::end_of_queued_rows(&fetched.queue, &self.manual_queue);
+            let at = Self::queued_end(fetched, &self.manual_queue);
             let fetched_context = &fetched.queue[at..];
             if fetched_context.len() == pending.context_uris.len()
                 && fetched_context
@@ -8182,25 +8240,21 @@ impl App {
                                 .as_ref()
                                 .map(|item| item.uri().to_string())
                         });
-                        let previous_shuffle = self
-                            .remote
-                            .as_ref()
-                            .map(|remote| remote.state.shuffle_state);
                         self.remote = state.map(|state| RemoteSnapshot {
                             state,
                             received_at: Instant::now(),
                         });
-                        if let (Some(previous), Some(current)) = (
-                            previous_shuffle,
-                            self.remote
-                                .as_ref()
-                                .map(|remote| remote.state.shuffle_state),
-                        ) && previous != current
-                            && self
-                                .shuffle_set_at
-                                .is_none_or(|at| at.elapsed() > Duration::from_secs(5))
+                        // Once a change made here has had time to land, the
+                        // device's own state is the truth, whoever changed
+                        // it: Spotify's player also applies a collection's
+                        // own mode when it starts one.
+                        if let Some(current) = self
+                            .remote
+                            .as_ref()
+                            .map(|remote| remote.state.shuffle_state)
+                            && !self.shuffle_held()
+                            && !matches!(self.target(), Target::Local)
                         {
-                            // Accept shuffle changes from another device.
                             self.shuffle_wanted = current;
                         }
                         if let Some(context) = self
@@ -8287,6 +8341,7 @@ impl App {
                 }
                 self.queue = Loadable::from_result(result);
                 self.reconcile_pending_queue();
+                self.name_bare_queue_rows();
                 if let Some(queue) = self.queue.get() {
                     let uris: Vec<String> = queue
                         .queue
@@ -9696,6 +9751,7 @@ impl App {
                             &format!("spotify:track:{id}"),
                             Some(PlayableItem::Track(track.clone())),
                         );
+                        self.name_queue_rows(&PlayableItem::Track(track.clone()));
                         self.track_cache.insert(id.clone(), track);
                         self.track_used.insert(id, Instant::now());
                     }
@@ -9843,6 +9899,111 @@ impl App {
                     );
                 }
                 self.refresh_queue(true);
+            }
+            ApiResponse::QueueDetails { uris, result } => match result {
+                Ok(found) => {
+                    for item in found {
+                        if let PlayableItem::Track(track) = &item
+                            && let Some(id) = &track.id
+                        {
+                            self.track_cache
+                                .entry(id.clone())
+                                .or_insert_with(|| track.clone());
+                        }
+                        self.name_queue_rows(&item);
+                        self.queue_row_details
+                            .insert(item.uri().to_string(), Some(item));
+                    }
+                }
+                Err(error) => {
+                    // Without the session, the songs are read one by one
+                    // through the Web API, the first few only.
+                    log::debug!("queue details unavailable: {error}");
+                    let ids: Vec<String> = uris
+                        .iter()
+                        .filter(|uri| util::uri_kind(uri) == Some("track"))
+                        .filter_map(|uri| util::uri_id(uri).map(str::to_string))
+                        .take(QUEUE_DETAILS_ONE_BY_ONE)
+                        .collect();
+                    for id in ids {
+                        if !self.track_cache.contains_key(&id)
+                            && self.track_requests.insert(id.clone())
+                        {
+                            self.backend.api(ApiRequest::Track { id });
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    /// Rows a player sent without names take the details already known
+    /// here, and the rest are read in one batch: Soloist names only the
+    /// head of a long queue, and sends the other rows as bare URIs.
+    fn name_bare_queue_rows(&mut self) {
+        // The Web API names every row it lists.
+        let Loadable::Loaded(queue) = &mut self.queue else {
+            return;
+        };
+        if queue.entries.is_none() {
+            return;
+        }
+        let mut missing = Vec::new();
+        for row in queue
+            .queue
+            .iter_mut()
+            .chain(queue.previous.iter_mut())
+            .chain(queue.currently_playing.iter_mut())
+        {
+            if !row.name().is_empty() || row.uri().is_empty() {
+                continue;
+            }
+            let known = match self.queue_row_details.get(row.uri()) {
+                Some(Some(item)) => Some(item.clone()),
+                // Asked for already, or Spotify had nothing.
+                Some(None) => continue,
+                None => match &*row {
+                    PlayableItem::Track(_) => util::uri_id(row.uri())
+                        .and_then(|id| self.track_cache.get(id))
+                        .filter(|cached| !cached.name.is_empty())
+                        .cloned()
+                        .map(PlayableItem::Track),
+                    PlayableItem::Episode(_) => None,
+                },
+            };
+            match known {
+                Some(item) => *row = item,
+                None => {
+                    let uri = row.uri().to_string();
+                    if !missing.contains(&uri) {
+                        missing.push(uri);
+                    }
+                }
+            }
+        }
+        if missing.is_empty() {
+            return;
+        }
+        for uri in &missing {
+            self.queue_row_details.insert(uri.clone(), None);
+        }
+        self.backend.api(ApiRequest::QueueDetails { uris: missing });
+    }
+
+    /// Gives the queue's rows of `found` that came without names its
+    /// details.
+    fn name_queue_rows(&mut self, found: &PlayableItem) {
+        let Loadable::Loaded(queue) = &mut self.queue else {
+            return;
+        };
+        for row in queue
+            .queue
+            .iter_mut()
+            .chain(queue.previous.iter_mut())
+            .chain(queue.currently_playing.iter_mut())
+        {
+            if row.uri() == found.uri() && row.name().is_empty() {
+                *row = found.clone();
             }
         }
     }
@@ -11274,7 +11435,7 @@ impl App {
 
     fn note_shuffle_pending(&mut self) {
         if let Loadable::Loaded(queue) = &self.queue {
-            let at = Self::end_of_queued_rows(&queue.queue, &self.manual_queue);
+            let at = Self::queued_end(queue, &self.manual_queue);
             let context_uris: Vec<String> = queue.queue[at..]
                 .iter()
                 .map(|item| item.uri().to_string())
@@ -11858,11 +12019,9 @@ impl App {
             manual_index: self.manual_queue.len(),
             write: None,
         });
-        if let Loadable::Loaded(queue) = &self.queue {
-            let at = Self::end_of_queued_rows(&queue.queue, &self.manual_queue);
-            if let Loadable::Loaded(queue) = &mut self.queue {
-                queue.queue.insert(at, item);
-            }
+        if let Loadable::Loaded(queue) = &mut self.queue {
+            let at = Self::queued_end(queue, &self.manual_queue);
+            queue.insert_row(at, item, QueueProvider::Queue);
         }
         self.manual_queue.push(uri.to_string());
         self.session_dirty = true;
@@ -11913,7 +12072,7 @@ impl App {
                 .filter(|other| *other == uri)
                 .count();
             if let Loadable::Loaded(queue) = &mut self.queue {
-                let queued_len = Self::end_of_queued_rows(&queue.queue, &self.manual_queue);
+                let queued_len = Self::queued_end(queue, &self.manual_queue);
                 if let Some(row) = queue.queue[..queued_len]
                     .iter()
                     .enumerate()
@@ -11921,7 +12080,7 @@ impl App {
                     .nth(occurrence)
                     .map(|(row, _)| row)
                 {
-                    queue.queue.remove(row);
+                    queue.remove_row(row);
                 }
             }
             self.remove_manual_queue_row(index);
@@ -11937,6 +12096,10 @@ impl App {
         let Loadable::Loaded(queue) = &mut self.queue else {
             return;
         };
+        // A player that reports its queue's order is the truth about it.
+        if queue.provided().is_some() {
+            return;
+        }
         let queued_len = queued_len.min(queue.queue.len());
         let mut shown: Vec<Option<PlayableItem>> =
             queue.queue.drain(..queued_len).map(Some).collect();
@@ -11954,7 +12117,19 @@ impl App {
         queue.queue.splice(0..0, ordered);
     }
 
-    /// Index after manual queue rows and before context rows.
+    /// Index after the rows queued by hand and before the context's: as
+    /// the player reports them when it does, else guessed from the songs
+    /// queued here.
+    fn queued_end(queue: &Queue, manual: &[String]) -> usize {
+        queue
+            .provided_queued_len()
+            .unwrap_or_else(|| Self::end_of_queued_rows(&queue.queue, manual))
+            .min(queue.queue.len())
+    }
+
+    /// Index after manual queue rows and before context rows, guessed by
+    /// matching the leading rows with the songs queued here: the Web API
+    /// does not say which rows were queued.
     fn end_of_queued_rows(rows: &[PlayableItem], manual: &[String]) -> usize {
         let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for uri in manual {
@@ -11981,6 +12156,12 @@ impl App {
     fn drop_queue_padding(&self, fetched: &mut Queue) {
         let repeat = self.now_playing().map(|now| now.repeat);
         if repeat.unwrap_or(self.repeat_wanted) != RepeatMode::Off {
+            return;
+        }
+        // The padding is the Web API's; a player that says where each row
+        // comes from lists only what it will play, and a list whose order
+        // really repeats keeps every row.
+        if fetched.entries.is_some() {
             return;
         }
         let Some(current) = &fetched.currently_playing else {
@@ -12088,13 +12269,11 @@ impl App {
             .iter()
             .map(|addition| addition.item.clone())
             .collect();
-        let at = match &self.queue {
-            Loadable::Loaded(queue) => Self::end_of_queued_rows(&queue.queue, &self.manual_queue),
-            _ => 0,
-        };
+        let manual = &self.manual_queue;
         if let Loadable::Loaded(queue) = &mut self.queue {
+            let at = Self::queued_end(queue, manual);
             for item in missing.into_iter().rev() {
-                queue.queue.insert(at, item);
+                queue.insert_row(at, item, QueueProvider::Queue);
             }
         }
     }
@@ -12991,7 +13170,7 @@ impl App {
                         write: None,
                     });
                     if let Loadable::Loaded(queue) = &mut self.queue {
-                        queue.queue.insert(at.min(queue.queue.len()), item);
+                        queue.insert_row(at, item, QueueProvider::Queue);
                     }
                     self.manual_queue.insert(at, uri);
                     inserted += 1;
@@ -19717,6 +19896,7 @@ mod tests {
         Loadable::Loaded(Queue {
             currently_playing: Some(queued_song(current)),
             queue: next.iter().map(|uri| queued_song(uri)).collect(),
+            ..Default::default()
         })
     }
 
@@ -19733,6 +19913,271 @@ mod tests {
                 .map(|item| item.uri().to_string())
                 .collect(),
         )
+    }
+
+    /// An app whose own Soloist is the playing device, playing `current`.
+    fn soloist_playing(current: &str) -> App {
+        let mut app = headless_app();
+        app.auth = AuthStatus::Connected {
+            username: "alice".into(),
+        };
+        app.local_ready = false;
+        app.soloist_device_id = Some("own".into());
+        app.selected_device = Some("own".into());
+        app.remote = Some(RemoteSnapshot {
+            state: PlaybackState {
+                device: Some(Device {
+                    id: Some("own".into()),
+                    name: "Soloist".into(),
+                    is_active: true,
+                    ..Default::default()
+                }),
+                item: Some(queued_song(current)),
+                is_playing: true,
+                ..Default::default()
+            },
+            received_at: Instant::now(),
+        });
+        assert!(app.targets_own_soloist());
+        app
+    }
+
+    /// A song with a name, as a player that names it sends it.
+    fn named_song(uri: &str, name: &str) -> PlayableItem {
+        PlayableItem::Track(Track {
+            id: util::uri_id(uri).map(str::to_string),
+            uri: uri.into(),
+            name: name.into(),
+            ..Default::default()
+        })
+    }
+
+    /// A queue as Soloist reports it: each row with its source.
+    fn provided_queue(current: PlayableItem, rows: &[(PlayableItem, QueueProvider)]) -> Queue {
+        Queue {
+            currently_playing: Some(current),
+            queue: rows.iter().map(|(item, _)| item.clone()).collect(),
+            entries: Some(
+                rows.iter()
+                    .map(|(item, source)| crate::api::models::QueueEntry {
+                        uid: item.uri().to_string(),
+                        source: *source,
+                    })
+                    .collect(),
+            ),
+            previous: Vec::new(),
+        }
+    }
+
+    /// Soloist says where each queue row comes from, so the sections follow
+    /// it as Spotify's own panel does: a song queued from the phone is
+    /// queued, a context row that shares a song queued here stays the
+    /// context's, and Spotify's recommendations begin Next up. Its own
+    /// history is the Recent tab's.
+    #[test]
+    fn soloist_queue_sections_follow_the_players_own_sources() {
+        let mut app = soloist_playing("spotify:track:now");
+        app.manual_queue = vec!["spotify:track:mine".into()];
+        let mut queue = provided_queue(
+            named_song("spotify:track:now", "Now"),
+            &[
+                (
+                    named_song("spotify:track:phone", "Phone"),
+                    QueueProvider::Queue,
+                ),
+                (
+                    named_song("spotify:track:mine", "Mine"),
+                    QueueProvider::Context,
+                ),
+                (
+                    named_song("spotify:track:next", "Next"),
+                    QueueProvider::Context,
+                ),
+                (
+                    named_song("spotify:track:radio", "Radio"),
+                    QueueProvider::Autoplay,
+                ),
+            ],
+        );
+        queue.previous = vec![named_song("spotify:track:before", "Before")];
+        app.queue_seq = 1;
+        app.handle_api(ApiResponse::Queue {
+            seq: 1,
+            result: Ok(queue),
+        });
+        assert_eq!(app.queued_rows_len(), 1);
+        assert_eq!(app.autoplay_rows_from(), Some(3));
+        let history: Vec<&str> = app
+            .player_history()
+            .expect("Soloist's history")
+            .iter()
+            .map(PlayableItem::uri)
+            .collect();
+        assert_eq!(history, ["spotify:track:before"]);
+        // Every row came named: nothing to read.
+        assert!(app.backend.take_queue_requests().is_empty());
+        app.backend.shutdown();
+    }
+
+    /// Spotify's Web API pads a short queue by going round it again, which
+    /// Spotifast cuts. A player that says where each row comes from lists
+    /// only what it plays, so a list whose order really repeats keeps
+    /// every row.
+    #[test]
+    fn a_players_own_queue_keeps_rows_that_repeat() {
+        let mut app = soloist_playing("spotify:track:a");
+        let rows = ["spotify:track:b", "spotify:track:a", "spotify:track:b"];
+        let provided: Vec<(PlayableItem, QueueProvider)> = rows
+            .iter()
+            .map(|uri| (queued_song(uri), QueueProvider::Context))
+            .collect();
+        app.queue_seq = 1;
+        app.handle_api(ApiResponse::Queue {
+            seq: 1,
+            result: Ok(provided_queue(queued_song("spotify:track:a"), &provided)),
+        });
+        assert_eq!(queue_uris(&app).1, rows);
+        app.queue_seq = 2;
+        app.handle_api(ApiResponse::Queue {
+            seq: 2,
+            result: Ok(Queue {
+                currently_playing: Some(queued_song("spotify:track:a")),
+                queue: rows.iter().map(|uri| queued_song(uri)).collect(),
+                ..Default::default()
+            }),
+        });
+        assert_eq!(queue_uris(&app).1, ["spotify:track:b"]);
+        app.backend.shutdown();
+    }
+
+    /// Soloist names only the head of a long queue. The bare rows take the
+    /// details known here at once, the rest are read in one batch, and a
+    /// later answer with the same bare rows asks for nothing again.
+    #[test]
+    fn bare_soloist_rows_are_named_in_one_read() {
+        let mut app = soloist_playing("spotify:track:now");
+        app.track_cache.insert(
+            "known".into(),
+            Track {
+                id: Some("known".into()),
+                uri: "spotify:track:known".into(),
+                name: "Known".into(),
+                ..Default::default()
+            },
+        );
+        let answer = |app: &mut App, seq: u64| {
+            let rows: Vec<(PlayableItem, QueueProvider)> = [
+                "spotify:track:known",
+                "spotify:track:bare1",
+                "spotify:track:bare2",
+            ]
+            .iter()
+            .map(|uri| (queued_song(uri), QueueProvider::Context))
+            .collect();
+            app.queue_seq = seq;
+            app.handle_api(ApiResponse::Queue {
+                seq,
+                result: Ok(provided_queue(
+                    named_song("spotify:track:now", "Now"),
+                    &rows,
+                )),
+            });
+        };
+        let names = |app: &App| -> Vec<String> {
+            app.queue
+                .get()
+                .expect("the queue is loaded")
+                .queue
+                .iter()
+                .map(|item| item.name().to_string())
+                .collect()
+        };
+        answer(&mut app, 1);
+        assert_eq!(names(&app), ["Known", "", ""]);
+        let requests = app.backend.take_queue_requests();
+        let [ApiRequest::QueueDetails { uris }] = &requests[..] else {
+            panic!("one read for the bare rows: {requests:?}");
+        };
+        assert_eq!(uris, &["spotify:track:bare1", "spotify:track:bare2"]);
+        app.handle_api(ApiResponse::QueueDetails {
+            uris: uris.clone(),
+            result: Ok(vec![named_song("spotify:track:bare1", "Bare one")]),
+        });
+        assert_eq!(names(&app), ["Known", "Bare one", ""]);
+        answer(&mut app, 2);
+        assert_eq!(names(&app), ["Known", "Bare one", ""]);
+        assert!(app.backend.take_queue_requests().is_empty());
+        app.backend.shutdown();
+    }
+
+    /// The shuffle button shows what the device reports, however it
+    /// changed: Spotify's player applies a collection's own mode when it
+    /// starts one, with no flip between two polls. A change made here
+    /// shows at once, and a poll from before it does not undo it; after a
+    /// moment the device's report wins again.
+    #[test]
+    fn shuffle_shows_the_devices_own_state_after_a_short_hold() {
+        let ctx = egui::Context::default();
+        let mut app = soloist_playing("spotify:track:a");
+        app.shuffle_wanted = false;
+        let report = |app: &mut App, seq: u64, shuffle: bool| {
+            let mut state = app.remote.as_ref().unwrap().state.clone();
+            state.shuffle_state = shuffle;
+            app.remote_poll_seq = seq;
+            app.handle_api(ApiResponse::PlaybackState {
+                seq,
+                result: Ok(Some(state)),
+            });
+        };
+        report(&mut app, 1, true);
+        assert!(app.now_playing().unwrap().shuffle);
+        assert!(app.shuffle_wanted, "the next play follows the device");
+
+        // One press turns it off: it does not send the state the device
+        // already has.
+        app.apply(Action::ToggleShuffle, &ctx);
+        assert!(matches!(
+            app.backend.take_remote_shuffle_requests().as_slice(),
+            [ApiRequest::Remote { flag: false, .. }]
+        ));
+        assert!(!app.now_playing().unwrap().shuffle);
+        report(&mut app, 2, true);
+        assert!(!app.now_playing().unwrap().shuffle, "held after the press");
+
+        app.shuffle_set_at = Instant::now().checked_sub(PLAYBACK_HOLD * 2);
+        report(&mut app, 3, true);
+        assert!(app.now_playing().unwrap().shuffle);
+        assert!(app.shuffle_wanted);
+        app.backend.shutdown();
+    }
+
+    /// Closing Spotifast stops Soloist, which forgets its queue. Resuming
+    /// the remembered song there puts the saved songs back in one batch,
+    /// in order, without the local files Soloist cannot queue.
+    #[test]
+    fn resuming_on_soloist_restores_the_saved_queue() {
+        let mut app = soloist_playing("spotify:track:resume");
+        app.resume_track = Some("spotify:track:resume".into());
+        app.resume_queue = vec![
+            "spotify:track:a".into(),
+            "spotify:local:Artist:Album:Song:180".into(),
+            "spotify:track:b".into(),
+        ];
+        app.on_now_playing_changed();
+        let requests = app.backend.take_queue_requests();
+        let [
+            ApiRequest::AddManyToQueue {
+                uris, device_id, ..
+            },
+        ] = &requests[..]
+        else {
+            panic!("one batch for the saved queue: {requests:?}");
+        };
+        assert_eq!(uris, &["spotify:track:a", "spotify:track:b"]);
+        assert_eq!(device_id.as_deref(), Some("own"));
+        assert_eq!(app.manual_queue, ["spotify:track:a", "spotify:track:b"]);
+        assert!(app.resume_queue.is_empty());
+        app.backend.shutdown();
     }
 
     /// Next moves the queue head to the playing row immediately.
@@ -19775,6 +20220,7 @@ mod tests {
                 name: "Second Song".into(),
                 ..Default::default()
             })],
+            ..Default::default()
         });
         assert!(!app.track_cache.contains_key("b"));
         app.apply(Action::Next, &egui::Context::default());
@@ -19822,6 +20268,7 @@ mod tests {
         app.queue = Loadable::Loaded(Queue {
             currently_playing: None,
             queue: vec![queued_song("spotify:track:stale")],
+            ..Default::default()
         });
 
         app.apply(Action::Next, &ctx);
@@ -19965,6 +20412,7 @@ mod tests {
                 queued_song("spotify:track:b"),
                 queued_song("spotify:track:c"),
             ],
+            ..Default::default()
         };
         app.handle_api(ApiResponse::Queue {
             seq: app.queue_seq,
@@ -20006,6 +20454,7 @@ mod tests {
                 result: Ok(Queue {
                     currently_playing: Some(queued_song("spotify:track:a")),
                     queue: next.iter().map(|uri| queued_song(uri)).collect(),
+                    ..Default::default()
                 }),
             });
             queue_uris(app).1
@@ -21503,6 +21952,7 @@ mod tests {
         let old_story = Queue {
             currently_playing: Some(queued_song("spotify:track:a")),
             queue: Vec::new(),
+            ..Default::default()
         };
         app.handle_api(ApiResponse::Queue {
             seq: 1,
@@ -21520,6 +21970,7 @@ mod tests {
                 queued_song("spotify:track:b"),
                 queued_song("spotify:track:c"),
             ],
+            ..Default::default()
         };
         app.handle_api(ApiResponse::Queue {
             seq: 2,
@@ -21643,6 +22094,7 @@ mod tests {
                 queued_song("spotify:track:ctx2"),
                 queued_song("spotify:track:ctx3"),
             ],
+            ..Default::default()
         };
         app.handle_api(ApiResponse::Queue {
             seq: seq - 1,
@@ -21670,6 +22122,7 @@ mod tests {
                 queued_song("spotify:track:ctx1"),
                 queued_song("spotify:track:ctx2"),
             ],
+            ..Default::default()
         };
         app.handle_api(ApiResponse::Queue {
             seq,
@@ -21763,6 +22216,7 @@ mod tests {
                 queued_song("spotify:track:ctx1"),
                 queued_song("spotify:track:ctx2"),
             ],
+            ..Default::default()
         };
         app.handle_api(ApiResponse::Queue {
             seq: seq - 1,
@@ -21785,6 +22239,7 @@ mod tests {
                 queued_song("spotify:track:ctx2"),
                 queued_song("spotify:track:ctx1"),
             ],
+            ..Default::default()
         };
         app.handle_api(ApiResponse::Queue {
             seq,
@@ -21861,6 +22316,7 @@ mod tests {
                 queued_song("spotify:track:manual2"),
                 queued_song("spotify:track:ctx1"),
             ],
+            ..Default::default()
         };
         app.handle_api(ApiResponse::Queue {
             seq: outstanding_seq,
@@ -21898,6 +22354,7 @@ mod tests {
                 queued_song("spotify:track:manual1"),
                 queued_song("spotify:track:ctx1"),
             ],
+            ..Default::default()
         };
         app.handle_api(ApiResponse::Queue {
             seq,
@@ -22205,6 +22662,7 @@ mod tests {
         let mid_resync = Queue {
             currently_playing: Some(queued_song("spotify:track:playing")),
             queue: vec![queued_song("spotify:track:ctx")],
+            ..Default::default()
         };
         let answer_stale = |app: &mut App| {
             app.refresh_queue(true);
@@ -22355,6 +22813,7 @@ mod tests {
                 result: Ok(Queue {
                     currently_playing: Some(queued_song("spotify:track:playing")),
                     queue: rows.iter().map(|uri| queued_song(uri)).collect(),
+                    ..Default::default()
                 }),
             });
         };
@@ -22482,6 +22941,7 @@ mod tests {
                 queued_song("spotify:track:ctx2"),
                 queued_song("spotify:track:ctx1"),
             ],
+            ..Default::default()
         };
         app.handle_api(ApiResponse::Queue {
             seq,
@@ -22535,6 +22995,7 @@ mod tests {
                 queued_song("spotify:track:ctx2"),
                 queued_song("spotify:track:ctx3"),
             ],
+            ..Default::default()
         };
 
         app.handle_api(ApiResponse::Queue {
@@ -22573,6 +23034,7 @@ mod tests {
                 queued_song("spotify:track:ctx1"),
                 queued_song("spotify:track:ctx2"),
             ],
+            ..Default::default()
         };
 
         app.handle_api(ApiResponse::Queue {
@@ -22621,6 +23083,7 @@ mod tests {
                 queued_song("spotify:track:ctx1"),
                 queued_song("spotify:track:ctx2"),
             ],
+            ..Default::default()
         };
 
         // Responses with the pre-shuffle order are rejected as stale and scheduled for retry.

@@ -449,9 +449,10 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
         theme::ROW_HEIGHT
     };
     let queue_len = app.queue.get().map(|queue| queue.queue.len()).unwrap_or(0);
-    // The user's own songs get their own section on top; the playing
-    // context's rows follow under the usual heading. One numbering runs
-    // through both, because that is the order things play.
+    // As in Spotify's apps: the songs queued by hand get their own section
+    // on top, then the playing context's rows under *Next from* it, then
+    // Spotify's recommendations under *Next up*. One numbering runs through
+    // all three, because that is the order things play.
     let queued_len = app.queued_rows_len().min(queue_len);
     if queued_len > 0 {
         // The trash sits with the songs it removes: only this section is
@@ -462,7 +463,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
                 gettext(
                     app.locale,
                     // Translators: Songs added manually, before the current playlist or album continues.
-                    "Playing next",
+                    "Next in queue",
                 ),
                 theme::semibold(14.0),
                 palette.text,
@@ -560,25 +561,86 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
         }
         ui.add_space(SECTION_GAP);
     }
-    // With Playing next empty, the panel holds no drop target at all: every
-    // row on it belongs to Next up, which plays from the context and is never
-    // rewritten. The player bar's Queue button still takes the drop.
-    if queue_len > queued_len {
+    // With Next in queue empty, the panel holds no drop target at all:
+    // every row on it plays from the context or from Spotify's
+    // recommendations, which are never rewritten. The player bar's Queue
+    // button still takes the drop.
+    let autoplay_from = app
+        .autoplay_rows_from()
+        .map_or(queue_len, |at| at.clamp(queued_len, queue_len));
+    if autoplay_from > queued_len {
+        context_heading(app, ui);
+        ui.add_space(4.0);
+        widgets::virtual_rows(ui, autoplay_from - queued_len, row_height, |ui, index| {
+            queue_row(app, ui, queued_len + index, compact, 0.0);
+        });
+    }
+    if queue_len > autoplay_from {
+        if autoplay_from > queued_len {
+            ui.add_space(SECTION_GAP);
+        }
+        next_up_heading(app.locale, ui, &palette);
         theme::text(
             ui,
             gettext(
                 app.locale,
-                // Translators: Upcoming songs from the current playlist or album, after manually queued songs.
-                "Next up",
+                // Translators: Under "Next up", when the songs that follow are Spotify's recommendations.
+                "Recommendations based on what you've been playing",
             ),
-            theme::semibold(14.0),
-            palette.text,
+            theme::regular(12.0),
+            palette.secondary,
         );
         ui.add_space(4.0);
-        widgets::virtual_rows(ui, queue_len - queued_len, row_height, |ui, index| {
-            queue_row(app, ui, queued_len + index, compact, 0.0);
+        widgets::virtual_rows(ui, queue_len - autoplay_from, row_height, |ui, index| {
+            queue_row(app, ui, autoplay_from + index, compact, 0.0);
         });
     }
+}
+
+/// The heading over the playing context's rows: *Next from* and its name,
+/// which opens it, as in Spotify's apps; *Next up* when the context is not
+/// known by name.
+fn context_heading(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    let Some(from) = app.playing_from() else {
+        next_up_heading(app.locale, ui, &palette);
+        return;
+    };
+    // Translators: Heading over the songs that come next from the playing playlist or album; {name} is its name.
+    let heading = gettext(app.locale, "Next from: {name}");
+    let (before, after) = heading.split_once("{name}").unwrap_or((&*heading, ""));
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        if !before.is_empty() {
+            theme::text(ui, before, theme::semibold(14.0), palette.text);
+        }
+        match from.page {
+            Some(page) => {
+                if theme::link(ui, &from.name, theme::semibold(14.0), palette.text).clicked() {
+                    app.actions.push(Action::Open(page));
+                }
+            }
+            None => {
+                theme::text(ui, &from.name, theme::semibold(14.0), palette.text);
+            }
+        }
+        if !after.is_empty() {
+            theme::text(ui, after, theme::semibold(14.0), palette.text);
+        }
+    });
+}
+
+fn next_up_heading(locale: Locale, ui: &mut egui::Ui, palette: &crate::theme::Palette) {
+    theme::text(
+        ui,
+        gettext(
+            locale,
+            // Translators: Upcoming songs from the current playlist or album, after manually queued songs.
+            "Next up",
+        ),
+        theme::semibold(14.0),
+        palette.text,
+    );
 }
 
 pub(super) fn queue_is_empty(app: &App) -> bool {
@@ -586,6 +648,12 @@ pub(super) fn queue_is_empty(app: &App) -> bool {
 }
 
 fn recents_contents(app: &mut App, ui: &mut egui::Ui) {
+    // Soloist reports its own history, skipped songs included, which is
+    // what Spotify's queue panel shows: the order Previous follows.
+    if let Some(history) = app.player_history().map(<[PlayableItem]>::to_vec) {
+        player_history_rows(app, ui, &history);
+        return;
+    }
     let palette = app.palette;
     // Share the rows to avoid borrow issues while drawing. The rows are both
     // histories as one: what was played here, which Spotify is never told
@@ -712,6 +780,37 @@ fn recents_contents(app: &mut App, ui: &mut egui::Ui) {
             app.actions.push(Action::LoadMoreRecents);
         }
     }
+}
+
+/// The player's own history, most recent first.
+fn player_history_rows(app: &mut App, ui: &mut egui::Ui, items: &[PlayableItem]) {
+    widgets::virtual_rows(ui, items.len(), theme::COMPACT_ROW_HEIGHT, |ui, index| {
+        let item = &items[index];
+        let context = RowContext::Uris(Arc::from([item.uri().to_string()]));
+        widgets::track_row(
+            ui,
+            app,
+            TrackRow {
+                index,
+                number: None,
+                item,
+                context: &context,
+                show_cover: true,
+                show_album: false,
+                added_at: None,
+                added_by: None,
+                show_added_by: false,
+                show_plays: false,
+                compact: true,
+                thin: false,
+                shift: 0.0,
+                picked: false,
+                picked_songs: &[],
+                picked_positions: &[],
+                position: None,
+            },
+        );
+    });
 }
 
 /// One row of the queue, numbered and indexed by its place in the whole

@@ -6,7 +6,8 @@ description: An audit of every known difference between Spotifast's queue and sh
 This is an audit, written on 2026-11-19 against `main` at 435aee0 (0.22.0).
 It lists every difference found between how Spotifast's queue and shuffle
 behave and how Spotify's own desktop app behaves, ordered by severity. It
-changes no code. [The Queue's Rules](queue.md) remains the contract Spotifast
+changed no code; the **Status** column of the summary, and a **Status**
+line under each finding, say what has been fixed since. [The Queue's Rules](queue.md) remains the contract Spotifast
 follows today; this page says where that contract, or the code behind it,
 departs from Spotify.
 
@@ -97,31 +98,31 @@ queue, and nothing to skip to a given row.
 
 ## Summary
 
-| # | Difference | Paths | Severity |
-|---|---|---|---|
-| 1 | Shuffle is one app-wide switch, not a mode of each collection | S L R | High |
-| 2 | The shuffle button shows Spotifast's wish, not the player's state | S R | High |
-| 3 | A shuffled start turns shuffle on in the old collection first, and can deadlock | S R | High |
-| 4 | Clicking a queue row sends one Next per row above it | S R | High |
-| 5 | *Playing next* and *Next up* are guessed; Soloist's `source` is thrown away | S R L | High |
-| 6 | No queue editing at all while Soloist plays | S R | High |
-| 7 | Rows past the first few of a Soloist queue arrive without names | S | High |
-| 8 | With Shuffle on, a lone song skips Soloist's `play` and loses Autoplay | S | Medium |
-| 9 | Smart Shuffle is invisible, and cannot be chosen | S R | Medium |
-| 10 | A shuffled Play draws its first song only from the rows loaded so far | S L R | Medium |
-| 11 | Sorted views, artist Popular, Home lists and Recent play as plain lists | S L R | Medium |
-| 12 | Restarting Spotifast loses the queue on Soloist | S | Medium |
-| 13 | Autoplay on Soloist: no switch, and Spotifast's own radio fallback | S R | Medium |
-| 14 | Built-in player: editing rewrites the whole queue; *Next up* rows cannot be edited | L | Medium |
-| 15 | Adding a collection sends one Web API request per song | S R | Medium |
-| 16 | Section headings differ, and *Next from* is not a link | S L R | Low |
-| 17 | **Clear queue** asks for no confirmation | L | Low |
-| 18 | *Recent* is not the player's history | S L R | Low |
-| 19 | The built-in player's queue is read back through the Web API | L | Low |
-| 20 | The padding filter can hide real rows | S L R | Low |
-| 21 | librespot forgets the play history on every shuffle toggle | L | Low |
-| 22 | No shuffle style choice | S L R | Low |
-| 23 | Features Spotify's desktop app does not have | S L R | Low |
+| # | Difference | Paths | Severity | Status |
+|---|---|---|---|---|
+| 1 | Shuffle is one app-wide switch, not a mode of each collection | S L R | High | Open |
+| 2 | The shuffle button shows Spotifast's wish, not the player's state | S R | High | Fixed |
+| 3 | A shuffled start turns shuffle on in the old collection first, and can deadlock | S R | High | Fixed (deadlock); Connect route open |
+| 4 | Clicking a queue row sends one Next per row above it | S R | High | Open (Connect task) |
+| 5 | *Playing next* and *Next up* are guessed; Soloist's `source` is thrown away | S R L | High | Fixed on Soloist |
+| 6 | No queue editing at all while Soloist plays | S R | High | Open (Connect task) |
+| 7 | Rows past the first few of a Soloist queue arrive without names | S | High | Fixed |
+| 8 | With Shuffle on, a lone song skips Soloist's `play` and loses Autoplay | S | Medium | Fixed |
+| 9 | Smart Shuffle is invisible, and cannot be chosen | S R | Medium | Open |
+| 10 | A shuffled Play draws its first song only from the rows loaded so far | S L R | Medium | Open |
+| 11 | Sorted views, artist Popular, Home lists and Recent play as plain lists | S L R | Medium | Open |
+| 12 | Restarting Spotifast loses the queue on Soloist | S | Medium | Fixed |
+| 13 | Autoplay on Soloist: no switch, and Spotifast's own radio fallback | S R | Medium | Open |
+| 14 | Built-in player: editing rewrites the whole queue; *Next up* rows cannot be edited | L | Medium | Open |
+| 15 | Adding a collection sends one Web API request per song | S R | Medium | Fixed on Soloist |
+| 16 | Section headings differ, and *Next from* is not a link | S L R | Low | Fixed |
+| 17 | **Clear queue** asks for no confirmation | L | Low | Open |
+| 18 | *Recent* is not the player's history | S L R | Low | Fixed on Soloist |
+| 19 | The built-in player's queue is read back through the Web API | L | Low | Open |
+| 20 | The padding filter can hide real rows | S L R | Low | Fixed on Soloist |
+| 21 | librespot forgets the play history on every shuffle toggle | L | Low | Open |
+| 22 | No shuffle style choice | S L R | Low | Open |
+| 23 | Features Spotify's desktop app does not have | S L R | Low | On purpose |
 
 ## High severity
 
@@ -181,6 +182,10 @@ queue, and nothing to skip to a given row.
   `OPTIMISTIC_HOLD` does for play and pause, and take the device's value
   after it.
 - **Fixable:** yes. *Needs a device check* for how often it bites.
+- **Status:** fixed. The player bar and the queue show the device's
+  reported state, except for a hold of a few seconds after a change made
+  in Spotifast; after it the device's report wins and the next play
+  follows it (`shuffle_held`, `src/app.rs`).
 
 ### 3. A shuffled start turns shuffle on in the old collection first, and can deadlock
 
@@ -211,6 +216,9 @@ queue, and nothing to skip to a given row.
   `player_options_override` today (line 143).
 - **Fixable:** yes. The Connect route needs the session signed in to the
   same account (Settings → Spotify Soloist → Spotify access).
+- **Status:** the deadlock is fixed: df75525 is cherry-picked. The Connect
+  `play` with `shuffling_context` waits for the Connect commands task
+  (`src/soloist/connect.rs`).
 
 ### 4. Clicking a queue row sends one Next per row above it
 
@@ -258,6 +266,10 @@ queue, and nothing to skip to a given row.
   knows each row's provider too (librespot's `ProvidedTrack`, see finding
   19). Keep the guess only for Web API devices.
 - **Fixable:** yes for S and L. Not for R: the Web API does not say.
+- **Status:** fixed on Soloist: the queue keeps each row's `source` and
+  `uid` (`QueueEntry`, `src/api/models.rs`) and splits by them. The guess
+  stays for the Web API's queue, the built-in player's included (finding
+  19).
 
 ### 6. No queue editing at all while Soloist plays
 
@@ -299,6 +311,11 @@ queue, and nothing to skip to a given row.
   them.
 - **Fixable:** yes. Reported upstream; *needs a device check* on this
   Soloist build.
+- **Status:** fixed. Bare rows stay in place; their details come from what
+  Spotifast already holds, then one metadata read over the playback
+  session (`session_reads::playables`), or one by one through the Web API
+  for the first twenty when the session cannot read them. *Needs a device
+  check* on this Soloist build.
 
 ## Medium severity
 
@@ -320,6 +337,8 @@ queue, and nothing to skip to a given row.
 - **Fix:** route a lone song through Soloist's `play` whatever the shuffle
   flag; shuffling a single song means nothing.
 - **Fixable:** yes.
+- **Status:** fixed: Soloist's dispatch starts a lone song through `play`
+  for `ShufflePlay` too.
 
 ### 9. Smart Shuffle is invisible, and cannot be chosen
 
@@ -398,6 +417,8 @@ queue, and nothing to skip to a given row.
 - **Fix:** when the remembered song resumes on Soloist, add the saved songs
   again with Soloist's `add_to_queue`.
 - **Fixable:** yes.
+- **Status:** fixed: when the remembered song resumes on Soloist, the
+  saved songs go back in one batch through Soloist's `add_to_queue`.
 
 ### 13. Autoplay on Soloist: no switch, and Spotifast's own radio fallback
 
@@ -453,6 +474,9 @@ queue, and nothing to skip to a given row.
 - **Fix:** on Soloist, send additions through its local `add_to_queue`,
   serialized the same way, with no Web API quota spent.
 - **Fixable:** yes.
+- **Status:** fixed on Soloist: tracks go through its `add_to_queue`, one
+  batch under one lock; a batch with an episode keeps the Web API. Other
+  devices still need one Web API request per song.
 
 ## Low severity
 
@@ -467,6 +491,10 @@ queue, and nothing to skip to a given row.
 - **Fix:** use Spotify's headings, a *Next from* link to the context, and
   *Next up* from the first autoplay row once finding 5 gives the provider.
 - **Fixable:** yes.
+- **Status:** fixed: *Next in queue*, *Next from: \<name\>* as a link, and
+  *Next up* with a line about recommendations from the first autoplay row
+  (on Soloist). *Playing from* stays above the song. The new headings
+  await their translations.
 
 ### 17. **Clear queue** asks for no confirmation
 
@@ -485,6 +513,7 @@ queue, and nothing to skip to a given row.
 - **Effect:** songs skipped after a few seconds, and the order Previous will
   follow, are not shown.
 - **Fixable:** yes on Soloist, from `previous`.
+- **Status:** fixed on Soloist: *Recent* lists Soloist's `previous`.
 
 ### 19. The built-in player's queue is read back through the Web API
 
@@ -510,6 +539,8 @@ queue, and nothing to skip to a given row.
   queue rules note.
 - **Fix:** skip it where the player gives providers (Soloist, built-in).
 - **Fixable:** yes.
+- **Status:** fixed on Soloist: the filter no longer runs on a queue whose
+  rows have providers.
 
 ### 21. librespot forgets the play history on every shuffle toggle
 

@@ -1,7 +1,9 @@
 //! Only commands documented by Spotify's Soloist WebSocket API. Context
 //! loads retain their offsets through Spotifast's existing Spotify API path;
 //! a lone song starts as its own context through Soloist's `play`, as
-//! Spotify's apps start one, so autoplay follows it from that song.
+//! Spotify's apps start one, so autoplay follows it from that song, with
+//! Shuffle on or off. Songs join the queue through Soloist's own
+//! `add_to_queue`, and the queue keeps each row's `source` and `uid`.
 use crate::{
     api::{client::ApiError, models::*},
     backend::{ApiRequest, ApiResponse, RemoteAction},
@@ -157,19 +159,77 @@ impl Client {
                             Some("queue_changed"),
                         )
                         .await?;
-                    Ok(Queue {
-                        currently_playing: item(&state["item"]),
-                        queue: queue["upcoming"]
-                            .as_array()
-                            .context("Missing Soloist queue")?
-                            .iter()
-                            .filter_map(|entry| item(&entry["item"]))
-                            .collect(),
-                    })
+                    read_queue(&state, &queue)
                 }
                 .await
                 .map_err(failure);
                 Some(ApiResponse::Queue { seq: *seq, result })
+            }
+            // Shuffling one song means nothing: a lone song starts as its
+            // own context whatever the Shuffle setting, so autoplay follows
+            // it as with Shuffle off (#1320). Anything else keeps the Web
+            // API's shuffled start.
+            ApiRequest::ShufflePlay { device_id, play }
+                if active && device_id.is_some() && device_id == &device.id =>
+            {
+                let uri = lone_song(play)?.to_string();
+                let result = self
+                    .rpc(port, json!({"command":"play", "uri":uri}), None)
+                    .await
+                    .map(|_| ())
+                    .map_err(failure);
+                Some(ApiResponse::Remote {
+                    action: RemoteAction::Play,
+                    result,
+                })
+            }
+            // Soloist queues songs itself, spending no Web API quota. One
+            // lock over a whole batch keeps an album's songs together and
+            // in order, as the Web API's queue writer does.
+            ApiRequest::AddManyToQueue {
+                request: batch,
+                uris,
+                device_id,
+            } if active
+                && device_id.is_some()
+                && device_id == &device.id
+                && uris.iter().all(|uri| soloist_queues(uri)) =>
+            {
+                let _guard = self.serial.lock().await;
+                let mut added = 0;
+                let mut result = Ok(());
+                for uri in uris {
+                    let command = json!({"command":"add_to_queue", "uri":uri});
+                    if let Err(error) = self.rpc_unlocked(port, command, None).await {
+                        result = Err(failure(error));
+                        break;
+                    }
+                    added += 1;
+                }
+                Some(ApiResponse::QueueBatchAdded {
+                    request: *batch,
+                    added,
+                    result,
+                })
+            }
+            ApiRequest::AddToQueue {
+                uri,
+                device_id,
+                label,
+            } if active
+                && device_id.is_some()
+                && device_id == &device.id
+                && soloist_queues(uri) =>
+            {
+                let result = self
+                    .rpc(port, json!({"command":"add_to_queue", "uri":uri}), None)
+                    .await
+                    .map(|_| ())
+                    .map_err(failure);
+                Some(ApiResponse::QueueAdded {
+                    label: label.clone(),
+                    result,
+                })
             }
             ApiRequest::Remote {
                 action, device_id, ..
@@ -189,8 +249,8 @@ impl Client {
                     result,
                 })
             }
-            // Adding remains on the existing serialized queue writer, so an
-            // album and a single addition cannot overtake one another.
+            // Episodes, which Soloist's `add_to_queue` refuses, and a
+            // Soloist that is not the active player keep the Web API.
             _ => None,
         }
     }
@@ -257,6 +317,11 @@ fn lone_song(play: &crate::api::PlayRequest) -> Option<&str> {
     };
     let from_start = play.position_ms == 0 && play.offset_position.unwrap_or(0) == 0;
     (from_start && crate::util::uri_kind(uri) == Some("track")).then_some(uri)
+}
+
+/// Soloist's `add_to_queue` takes a Spotify track URI only.
+fn soloist_queues(uri: &str) -> bool {
+    crate::util::uri_kind(uri) == Some("track")
 }
 
 fn commands(request: &ApiRequest, active: bool) -> Option<Vec<Value>> {
@@ -393,6 +458,70 @@ fn item(entity: &Value) -> Option<PlayableItem> {
         _ => None,
     }
 }
+/// A queue entry's item. Soloist decorates only the head of a long queue
+/// and sends the rest as bare URIs, sometimes without an `entity_type`.
+/// Those stay as rows without names, which Spotifast fills afterwards, so
+/// no row is lost and every row keeps its place.
+fn queue_item(entity: &Value) -> Option<PlayableItem> {
+    if let Some(item) = item(entity) {
+        return Some(item);
+    }
+    let uri = uri(entity);
+    match crate::util::uri_kind(&uri)? {
+        "track" => Some(PlayableItem::Track(Track {
+            id: id(entity),
+            uri,
+            ..Default::default()
+        })),
+        "episode" => Some(PlayableItem::Episode(Episode {
+            id: id(entity).unwrap_or_default(),
+            uri,
+            ..Default::default()
+        })),
+        _ => None,
+    }
+}
+
+/// One entry of `get_queue`: its item, and where it comes from as the
+/// player says, with its stable id. Spotify's apps split the queue panel
+/// by that `source`; an unknown one counts as the context's.
+fn queue_entry(entry: &Value) -> Option<(PlayableItem, QueueEntry)> {
+    let item = queue_item(&entry["item"])?;
+    let source = entry["source"]
+        .as_str()
+        .and_then(QueueProvider::parse)
+        .unwrap_or(QueueProvider::Context);
+    let uid = entry["uid"]
+        .as_str()
+        .filter(|uid| !uid.is_empty())
+        .unwrap_or_else(|| item.uri())
+        .to_string();
+    Some((item, QueueEntry { uid, source }))
+}
+
+/// The queue from Soloist's state and its `queue_changed` answer: the
+/// upcoming rows with their sources and ids, and the player's history.
+fn read_queue(state: &Value, queue: &Value) -> Result<Queue> {
+    let (rows, entries): (Vec<_>, Vec<_>) = queue["upcoming"]
+        .as_array()
+        .context("Missing Soloist queue")?
+        .iter()
+        .filter_map(queue_entry)
+        .unzip();
+    let previous = queue["previous"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| queue_item(&entry["item"]))
+        .collect();
+    Ok(Queue {
+        currently_playing: item(&state["item"]),
+        queue: rows,
+        entries: Some(entries),
+        previous,
+    })
+}
+
 fn playback(state: &Value, mut device: Device, delay_ms: u32) -> Result<PlaybackState> {
     let active = state["is_active"]
         .as_bool()
@@ -725,5 +854,167 @@ mod tests {
                 .is_none()
         );
         server.await.unwrap();
+    }
+
+    /// The queue keeps each row's source and id as Soloist reports them,
+    /// so the panel splits by them, and the player's own history. A row
+    /// Soloist sends bare, without names or even an entity type, stays in
+    /// its place to be filled in later.
+    #[test]
+    fn the_queue_keeps_sources_ids_history_and_bare_rows() {
+        let state = json!({"is_active":true,"item":{"uri":"spotify:track:now","entity_type":"track","decorations":{"identity":{"name":"Now"}}}});
+        let queue = json!({
+            "type":"queue_changed",
+            "previous":[
+                {"uid":"p1","source":"context","item":{"uri":"spotify:track:before","entity_type":"track","decorations":{"identity":{"name":"Before"}}}}
+            ],
+            "upcoming":[
+                {"uid":"q1","source":"queue","item":{"uri":"spotify:track:mine","entity_type":"track","decorations":{"identity":{"name":"Mine"}}}},
+                {"uid":"c1","source":"context","item":{"uri":"spotify:track:next","entity_type":"track"}},
+                {"source":"context","item":{"uri":"spotify:track:bare"}},
+                {"uid":"a1","source":"autoplay","item":{"uri":"spotify:episode:talk"}},
+                {"uid":"x","source":"queue","item":{"uri":"spotify:artist:nope"}}
+            ]
+        });
+        let got = read_queue(&state, &queue).unwrap();
+        assert_eq!(got.currently_playing.as_ref().unwrap().name(), "Now");
+        let uris: Vec<&str> = got.queue.iter().map(PlayableItem::uri).collect();
+        assert_eq!(
+            uris,
+            [
+                "spotify:track:mine",
+                "spotify:track:next",
+                "spotify:track:bare",
+                "spotify:episode:talk"
+            ]
+        );
+        assert_eq!(got.queue[0].name(), "Mine");
+        assert_eq!(got.queue[2].name(), "", "a bare row has no name yet");
+        assert_eq!(got.queue[2].id(), Some("bare"));
+        let entries = got.entries.clone().unwrap();
+        let sources: Vec<QueueProvider> = entries.iter().map(|entry| entry.source).collect();
+        assert_eq!(
+            sources,
+            [
+                QueueProvider::Queue,
+                QueueProvider::Context,
+                QueueProvider::Context,
+                QueueProvider::Autoplay
+            ]
+        );
+        let uids: Vec<&str> = entries.iter().map(|entry| entry.uid.as_str()).collect();
+        assert_eq!(uids, ["q1", "c1", "spotify:track:bare", "a1"]);
+        assert_eq!(got.provided_queued_len(), Some(1));
+        assert_eq!(got.autoplay_from(), Some(3));
+        assert_eq!(got.previous.len(), 1);
+        assert_eq!(got.previous[0].uri(), "spotify:track:before");
+    }
+
+    /// A Soloist that acknowledges every command, each on the connection
+    /// the client opens for it, and reports the commands it was sent.
+    async fn acknowledging_soloist(commands: usize) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for _ in 0..commands {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let message = socket.next().await.unwrap().unwrap();
+                let command: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                socket
+                    .send(Message::Text(
+                        json!({"type":"command_result", "command":command["command"]})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+                seen.push(command);
+            }
+            seen
+        });
+        (port, server)
+    }
+
+    fn active_soloist(port: u16) -> Client {
+        let client = Client::default();
+        client.listening(Some(port));
+        client.bind(Some(Device {
+            id: Some("soloist".into()),
+            ..Default::default()
+        }));
+        client.active(true);
+        client
+    }
+
+    /// With Shuffle on, a lone song still starts as its own context
+    /// through Soloist's `play`, so autoplay follows it (#1320). A
+    /// shuffled collection keeps the Web API's route.
+    #[tokio::test]
+    async fn a_lone_song_with_shuffle_on_still_plays_as_its_own_context() {
+        let (port, server) = acknowledging_soloist(1).await;
+        let client = active_soloist(port);
+        let lone = ApiRequest::ShufflePlay {
+            device_id: Some("soloist".into()),
+            play: crate::api::PlayRequest::tracks(vec!["spotify:track:a".into()]),
+        };
+        let Some(ApiResponse::Remote {
+            action: RemoteAction::Play,
+            result,
+        }) = client.dispatch(&lone).await
+        else {
+            panic!("the lone song did not reach Soloist");
+        };
+        assert!(result.is_ok());
+        assert_eq!(
+            server.await.unwrap(),
+            [json!({"type":"command", "command":"play", "uri":"spotify:track:a"})]
+        );
+        let collection = ApiRequest::ShufflePlay {
+            device_id: Some("soloist".into()),
+            play: crate::api::PlayRequest::context("spotify:playlist:p"),
+        };
+        assert!(client.dispatch(&collection).await.is_none());
+    }
+
+    /// Songs added to the queue go through Soloist's own `add_to_queue`,
+    /// one after another in order, with no Web API request. A batch with
+    /// an episode, which Soloist refuses, keeps the Web API's route.
+    #[tokio::test]
+    async fn additions_go_through_soloists_own_queue_in_order() {
+        let (port, server) = acknowledging_soloist(3).await;
+        let client = active_soloist(port);
+        let uris: Vec<String> = ["a", "b", "a"]
+            .iter()
+            .map(|id| format!("spotify:track:{id}"))
+            .collect();
+        let batch = ApiRequest::AddManyToQueue {
+            request: 7,
+            uris: uris.clone(),
+            device_id: Some("soloist".into()),
+        };
+        let Some(ApiResponse::QueueBatchAdded {
+            request,
+            added,
+            result,
+        }) = client.dispatch(&batch).await
+        else {
+            panic!("the batch did not reach Soloist");
+        };
+        assert_eq!((request, added), (7, 3));
+        assert!(result.is_ok());
+        let sent: Vec<Value> = server.await.unwrap();
+        let expected: Vec<Value> = uris
+            .iter()
+            .map(|uri| json!({"type":"command", "command":"add_to_queue", "uri":uri}))
+            .collect();
+        assert_eq!(sent, expected);
+        let episodes = ApiRequest::AddManyToQueue {
+            request: 8,
+            uris: vec!["spotify:track:a".into(), "spotify:episode:e".into()],
+            device_id: Some("soloist".into()),
+        };
+        assert!(client.dispatch(&episodes).await.is_none());
     }
 }

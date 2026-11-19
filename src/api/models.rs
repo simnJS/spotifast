@@ -792,6 +792,124 @@ pub struct Queue {
     pub currently_playing: Option<PlayableItem>,
     #[serde(default, deserialize_with = "skip_nulls")]
     pub queue: Vec<PlayableItem>,
+    /// One entry per row of `queue`, in the same order, when the player
+    /// says where each row comes from: Soloist does, as Spotify's own
+    /// player tells its apps. `None` from the Web API, which does not.
+    #[serde(skip)]
+    pub entries: Option<Vec<QueueEntry>>,
+    /// What the player played before the current song, most recent first,
+    /// skipped songs included, when it reports it (Soloist's `previous`).
+    #[serde(skip)]
+    pub previous: Vec<PlayableItem>,
+}
+
+/// Who put a queue row there, as the player reports it: Spotify's
+/// `provider`, Soloist's `source`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueProvider {
+    /// Queued by hand, from any app or device.
+    Queue,
+    /// The playing playlist, album or other context.
+    Context,
+    /// Spotify's recommendations after the context ends.
+    Autoplay,
+}
+
+impl QueueProvider {
+    pub fn parse(source: &str) -> Option<Self> {
+        match source {
+            "queue" => Some(Self::Queue),
+            "context" => Some(Self::Context),
+            "autoplay" => Some(Self::Autoplay),
+            _ => None,
+        }
+    }
+}
+
+/// A queue row's place in the player's own queue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueEntry {
+    /// The player's stable id for the row; empty for a row shown here
+    /// before the player confirmed it.
+    pub uid: String,
+    pub source: QueueProvider,
+}
+
+impl Queue {
+    /// The player's entries, when there is one per row.
+    pub fn provided(&self) -> Option<&[QueueEntry]> {
+        self.entries
+            .as_deref()
+            .filter(|entries| entries.len() == self.queue.len())
+    }
+
+    /// How many leading rows the player reports as queued by hand. They
+    /// always come first: Spotify plays the queue before the context.
+    /// `None` when the player does not say.
+    pub fn provided_queued_len(&self) -> Option<usize> {
+        Some(
+            self.provided()?
+                .iter()
+                .take_while(|entry| entry.source == QueueProvider::Queue)
+                .count(),
+        )
+    }
+
+    /// The first row of Spotify's recommendations, when the player says
+    /// which rows are.
+    pub fn autoplay_from(&self) -> Option<usize> {
+        self.provided()?
+            .iter()
+            .position(|entry| entry.source == QueueProvider::Autoplay)
+    }
+
+    /// Takes out the row at `index`, with its entry.
+    pub fn remove_row(&mut self, index: usize) -> PlayableItem {
+        if let Some(entries) = &mut self.entries
+            && index < entries.len()
+        {
+            entries.remove(index);
+        }
+        self.queue.remove(index)
+    }
+
+    /// Takes out the first `count` rows, with their entries.
+    pub fn take_rows(&mut self, count: usize) -> Vec<PlayableItem> {
+        let count = count.min(self.queue.len());
+        if let Some(entries) = &mut self.entries {
+            entries.drain(..count.min(entries.len()));
+        }
+        self.queue.drain(..count).collect()
+    }
+
+    /// Puts `item` at `at` as a row of `source`, before the player has
+    /// given it an id.
+    pub fn insert_row(&mut self, at: usize, item: PlayableItem, source: QueueProvider) {
+        let at = at.min(self.queue.len());
+        if let Some(entries) = &mut self.entries {
+            entries.insert(
+                at.min(entries.len()),
+                QueueEntry {
+                    uid: String::new(),
+                    source,
+                },
+            );
+        }
+        self.queue.insert(at, item);
+    }
+
+    /// Keeps the rows `keep` accepts, with their entries.
+    pub fn retain_rows(&mut self, mut keep: impl FnMut(&PlayableItem) -> bool) {
+        let kept: Vec<bool> = self.queue.iter().map(&mut keep).collect();
+        if let Some(entries) = &mut self.entries
+            && entries.len() == kept.len()
+        {
+            let mut flags = kept.iter();
+            entries.retain(|_| flags.next().copied().unwrap_or(true));
+        }
+        let mut flags = kept.iter();
+        self.queue.retain(|_| flags.next().copied().unwrap_or(true));
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
