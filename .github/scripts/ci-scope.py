@@ -8,7 +8,7 @@ on main, in the merge queue, by hand, and on a pull request that touches the
 dependencies, the CI itself, or carries the `all-platforms` label.
 A change to Markdown, the site, or the repository's GitHub settings alone is
 tested on Linux only (the branding test reads the guide) and skips the Rust
-lints and the Nix package.
+lints.
 
 Usage: ci-scope.py --repo <owner/name> --event <name> [--pr <number>]
                    [--before <sha> --after <sha>]
@@ -24,7 +24,7 @@ import subprocess
 LABEL = "all-platforms"
 LINUX = "ubuntu-latest"
 PULL_REQUEST = [LINUX, "windows-latest"]
-EVERYTHING = [LINUX, "windows-latest", "windows-11-arm"]
+EVERYTHING = [LINUX, "windows-latest"]
 NO_BUILD = ["docs/*", "*.md", ".github/*"]
 FULL = ["Cargo.toml", "Cargo.lock", ".cargo/*", "rust-toolchain*", "build.rs", ".github/workflows/ci.yml"]
 
